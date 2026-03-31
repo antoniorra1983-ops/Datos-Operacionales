@@ -67,15 +67,13 @@ with st.sidebar:
 
 # --- 4. PROCESAMIENTO ---
 all_data_ops, all_data_trenes, all_data_seat, all_data_prmte, all_data_factura_h = [], [], [], [], []
-
-# Combinamos todos los archivos para asegurar que no se pierda nada por subirlos en el cargador "equivocado"
 todos_archivos = (f_umr_list or []) + (f_seat_list or []) + (f_billing_list or [])
 
 for f in todos_archivos:
     try:
         xl = pd.ExcelFile(f)
         
-        # --- A. BUSCAR DATOS OPERACIONALES (UMR) ---
+        # A. UMR / RESUMEN (Búsqueda Flexible)
         sn_res = next((s for s in xl.sheet_names if 'UMR' in s.upper() or 'RESUMEN' in s.upper()), None)
         if sn_res:
             df_r = pd.read_excel(f, sheet_name=sn_res, header=None)
@@ -96,7 +94,7 @@ for f in todos_archivos:
                         o, tk = parse_latam_number(row.iloc[idx_o]), parse_latam_number(row.iloc[idx_t])
                         if o > 0: all_data_ops.append({"Fecha": fch.strftime('%d/%m/%Y'), "Tipo Día": t_dia, "N° Semana": fch.isocalendar()[1], "Odómetro [km]": o, "Tren-Km [km]": tk, "UMR [%]": (tk/o*100), "Timestamp": fch})
 
-        # --- B. BUSCAR ODÓMETRO POR TREN ---
+        # B. ODÓMETRO POR TREN
         sn_tr = next((s for s in xl.sheet_names if 'ODO' in s.upper() and 'KIL' in s.upper()), None)
         if sn_tr:
             df_tr = pd.read_excel(f, sheet_name=sn_tr, header=None)
@@ -105,8 +103,7 @@ for f in todos_archivos:
                 for j in range(1, len(df_tr.columns)):
                     p_d = pd.to_datetime(df_tr.iloc[i, j], errors='coerce')
                     if pd.notna(p_d) and p_d.year in f_anio_list:
-                        if 'KILO' in str(df_tr.iloc[i+1, j]).upper() and 'DIARIO' in str(df_tr.iloc[i+2, j]).upper():
-                            d_idx, c_map[j] = i, p_d
+                        if 'KILO' in str(df_tr.iloc[i+1, j]).upper(): d_idx, c_map[j] = i, p_d
             if d_idx is not None:
                 for i in range(d_idx+3, len(df_tr)):
                     n_tr = str(df_tr.iloc[i, 0]).strip().upper()
@@ -115,7 +112,7 @@ for f in todos_archivos:
                             if c_fch.day in f_dias and c_fch.month in meses_num:
                                 all_data_trenes.append({"Tren": n_tr, "Fecha": c_fch.strftime('%d/%m/%Y'), "Día": c_fch.day, "Kilometraje Diario [km]": parse_latam_number(df_tr.iloc[i, c_idx]), "Timestamp": c_fch})
 
-        # --- C. BUSCAR ENERGÍA SEAT ---
+        # C. ENERGÍA SEAT
         sn_s = next((s for s in xl.sheet_names if 'SEAT' in s.upper() and 'SER' in s.upper()), None)
         if sn_s:
             df_s = pd.read_excel(f, sheet_name=sn_s, header=None)
@@ -125,7 +122,7 @@ for f in todos_archivos:
                     tot, tra, k12 = parse_latam_number(df_s.iloc[i, 3]), parse_latam_number(df_s.iloc[i, 5]), parse_latam_number(df_s.iloc[i, 7])
                     all_data_seat.append({"Fecha": fs.strftime('%d/%m/%Y'), "Total [kWh]": tot, "Tracción [kWh]": tra, "12 KV [kWh]": k12, "% Tracción": (tra/tot*100 if tot>0 else 0), "% 12 KV": (k12/tot*100 if tot>0 else 0), "Timestamp": fs})
 
-        # --- D. BUSCAR FACTURA Y PRMTE ---
+        # D. FACTURA Y PRMTE
         sn_f = next((s for s in xl.sheet_names if 'FACTURA' in s.upper() or 'CONSUMO' in s.upper()), None)
         if sn_f:
             df_f = pd.read_excel(f, sheet_name=sn_f)
@@ -141,11 +138,12 @@ for f in todos_archivos:
             df_p.columns = [str(c).strip() for c in df_p.iloc[h_idx]]; df_p = df_p.iloc[h_idx+1:].copy()
             df_p['Timestamp'] = pd.to_datetime(df_p[['AÑO', 'MES', 'DIA']].rename(columns={'AÑO':'year','MES':'month','DIA':'day'}))
             mask_p = (df_p['Timestamp'].dt.month.isin(meses_num))
-            for d, group in df_p[mask_p].groupby(df_p['Timestamp'].dt.date):
-                all_data_prmte.append({"Fecha": d.strftime('%d/%m/%Y'), "Retiro Energía (PRMTE) [kWh]": group['Retiro_Energia_Activa (kWhD)'].apply(parse_latam_number).sum(), "Timestamp": pd.Timestamp(d)})
+            df_daily = df_p[mask_p].groupby(df_p['Timestamp'].dt.date)['Retiro_Energia_Activa (kWhD)'].sum().reset_index()
+            for _, r in df_daily.iterrows():
+                all_data_prmte.append({"Fecha": r['Timestamp'].strftime('%d/%m/%Y'), "Retiro Energía (PRMTE) [kWh]": parse_latam_number(r['Retiro_Energia_Activa (kWhD)']), "Timestamp": pd.Timestamp(r['Timestamp'])})
     except: continue
 
-# --- 5. RENDERIZADO (BLINDAJE DE VARIABLES) ---
+# --- 5. RENDERIZADO ---
 df_ops, df_tr, df_seat, df_prmte, df_fact_h, df_fact_d = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 if any([all_data_ops, all_data_seat, all_data_factura_h]):
@@ -153,11 +151,17 @@ if any([all_data_ops, all_data_seat, all_data_factura_h]):
     if all_data_trenes: df_tr = pd.DataFrame(all_data_trenes).sort_values(["Timestamp", "Tren"])
     if all_data_seat: df_seat = pd.DataFrame(all_data_seat).drop_duplicates(subset=['Fecha']).sort_values("Timestamp")
     if all_data_prmte: df_prmte = pd.DataFrame(all_data_prmte).drop_duplicates(subset=['Fecha']).sort_values("Timestamp")
+    
     if all_data_factura_h:
         df_fact_h = pd.DataFrame(all_data_factura_h).sort_values("Timestamp")
-        df_fact_d = df_fact_h.groupby("Fecha")["Consumo Horario [kWh]"].sum().reset_index().rename(columns={"Consumo Horario [kWh]":"Total Facturado [kWh]"})
+        df_fact_d_base = df_fact_h.groupby("Fecha")["Consumo Horario [kWh]"].sum().reset_index().rename(columns={"Consumo Horario [kWh]":"Total Facturado [kWh]"})
         if not df_seat.empty:
-            df_fact_d = pd.merge(df_fact_d, df_seat[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left")
+            # UNIÓN Y CÁLCULO DE ENERGÍA FACTURADA PROPORCIONAL
+            df_fact_d = pd.merge(df_fact_d_base, df_seat[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left")
+            df_fact_d["Energía Tracción Facturación [kWh]"] = df_fact_d["Total Facturado [kWh]"] * (df_fact_d["% Tracción"] / 100)
+            df_fact_d["Energía 12kV Facturación [kWh]"] = df_fact_d["Total Facturado [kWh]"] * (df_fact_d["% 12 KV"] / 100)
+        else:
+            df_fact_d = df_fact_d_base
 
     tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación"])
     
@@ -185,10 +189,20 @@ if any([all_data_ops, all_data_seat, all_data_factura_h]):
             col1.metric("Total", f"{g_t:,.0f} kWh"); col2.metric("Tracción", f"{g_tr:,.0f} kWh", f"{(g_tr/g_t*100 if g_t>0 else 0):.1f}%"); col3.metric("12 KV", f"{g_kv:,.0f} kWh", f"{(g_kv/g_t*100 if g_t>0 else 0):.1f}%")
             st.dataframe(df_seat[["Fecha","Total [kWh]","Tracción [kWh]","% Tracción","12 KV [kWh]","% 12 KV"]].style.format({"Total [kWh]":"{:,.0f}","Tracción [kWh]":"{:,.0f}","12 KV [kWh]":"{:,.0f}","% Tracción":"{:.2f}%","% 12 KV":"{:.2f}%"}), use_container_width=True)
 
-    with tabs[5]: # FACTURACIÓN
+    with tabs[5]: # FACTURACIÓN ANALÍTICA
         if not df_fact_h.empty:
-            st.write("### 📅 Resumen Diario de Facturación (Cruzado con SEAT)")
-            st.dataframe(df_fact_d.style.format({"Total Facturado [kWh]":"{:,.1f}", "% Tracción":"{:.2f}%", "% 12 KV":"{:.2f}%"}), use_container_width=True)
+            st.write("### 📅 Resumen Diario de Facturación (Distribución por SEAT)")
+            # Columnas a mostrar en la tabla diaria
+            cols_show = ["Fecha", "Total Facturado [kWh]"]
+            if "Energía Tracción Facturación [kWh]" in df_fact_d.columns:
+                cols_show += ["Energía Tracción Facturación [kWh]", "Energía 12kV Facturación [kWh]"]
+            
+            st.dataframe(df_fact_d[cols_show].style.format({
+                "Total Facturado [kWh]":"{:,.1f}", 
+                "Energía Tracción Facturación [kWh]":"{:,.1f}", 
+                "Energía 12kV Facturación [kWh]":"{:,.1f}"
+            }), use_container_width=True)
+            
             st.divider()
             st.write("### 🕒 Energía Total por Hora (Factura)")
             st.dataframe(df_fact_h[["Fecha y Hora", "Consumo Horario [kWh]"]].style.format({"Consumo Horario [kWh]": "{:,.2f}"}), use_container_width=True)
