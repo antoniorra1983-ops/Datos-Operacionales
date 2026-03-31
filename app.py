@@ -8,8 +8,11 @@ from datetime import datetime
 
 # --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="EFE Valparaíso - Dashboard SGE", layout="wide", page_icon="🚆")
+
+# Configuración de feriados de Chile
 chile_holidays = holidays.Chile()
 
+# Estilo para métricas
 st.markdown("""
     <style>
     .stMetric { 
@@ -72,15 +75,20 @@ all_data_ops = []
 all_data_trenes = []
 all_data_seat = []
 
-# Procesar archivos UMR / Trenes (Lógica ya validada)
+# Procesar archivos UMR
 if f_umr_list:
     for f in f_umr_list:
         try:
             xl = pd.ExcelFile(f)
+            # Resumen UMR
             sn_res = next((s for s in xl.sheet_names if 'UMR' in s.upper() and 'RESUMEN' in s.upper()), None)
             if sn_res:
                 df_raw_res = pd.read_excel(f, sheet_name=sn_res, header=None)
-                hdr_row = next((i for i in range(min(50, len(df_raw_res))) if 'ODO' in " ".join(df_raw_res.iloc[i].astype(str)).upper()), None)
+                hdr_row = None
+                for i in range(min(100, len(df_raw_res))):
+                    fila_txt = " ".join(df_raw_res.iloc[i].astype(str)).upper()
+                    if ('ODO' in fila_txt or 'FECHA' in fila_txt) and 'TREN' in fila_txt:
+                        hdr_row = i; break
                 if hdr_row is not None:
                     cols_orig = df_raw_res.iloc[hdr_row].astype(str).tolist()
                     cols_clean = [re.sub(r'[^A-Z]', '', c.upper().replace('Ó','O')) for c in cols_orig]
@@ -101,6 +109,7 @@ if f_umr_list:
                                 "Odómetro [km]": o, "Tren-Km [km]": t, "UMR [%]": (t / o * 100) if o > 0 else 0,
                                 "Timestamp": fch, "Archivo": f.name
                             })
+            # Odómetro Tren
             sn_trenes = next((s for s in xl.sheet_names if 'ODO' in s.upper() and 'KIL' in s.upper()), None)
             if sn_trenes:
                 df_raw_tr = pd.read_excel(f, sheet_name=sn_trenes, header=None)
@@ -127,7 +136,7 @@ if f_umr_list:
                                     })
         except: continue
 
-# Procesar archivos Energía SEAT (Con cálculo de porcentajes)
+# Procesar archivos Energía SEAT
 if f_seat_list:
     for f in f_seat_list:
         try:
@@ -138,17 +147,11 @@ if f_seat_list:
                 for i in range(len(df_raw_s)):
                     fch_s = pd.to_datetime(df_raw_s.iloc[i, 1], errors='coerce')
                     if pd.notna(fch_s) and fch_s.year in f_anio_list and fch_s.month in meses_num and fch_s.day in f_dias:
-                        tot = parse_latam_number(df_raw_s.iloc[i, 3])
-                        trac = parse_latam_number(df_raw_s.iloc[i, 5])
-                        kv12 = parse_latam_number(df_raw_s.iloc[i, 7])
-                        
                         all_data_seat.append({
                             "Fecha": fch_s.strftime('%d/%m/%Y'),
-                            "Total [kWh]": tot,
-                            "Tracción [kWh]": trac,
-                            "12 KV [kWh]": kv12,
-                            "% Tracción": (trac / tot * 100) if tot > 0 else 0,
-                            "% 12 KV": (kv12 / tot * 100) if tot > 0 else 0,
+                            "Total [kWh]": parse_latam_number(df_raw_s.iloc[i, 3]),
+                            "Tracción [kWh]": parse_latam_number(df_raw_s.iloc[i, 5]),
+                            "12 KV [kWh]": parse_latam_number(df_raw_s.iloc[i, 7]),
                             "Timestamp": fch_s
                         })
         except: continue
@@ -198,34 +201,17 @@ if all_data_ops or all_data_seat:
     with tab_seat:
         if not df_seat_final.empty:
             st.subheader("Consumo de Energía SEAT")
-            
-            # Métricas consolidadas de Energía
             e1, e2, e3 = st.columns(3)
-            global_tot = df_seat_final['Total [kWh]'].sum()
-            global_trac = df_seat_final['Tracción [kWh]'].sum()
-            global_kv12 = df_seat_final['12 KV [kWh]'].sum()
-            
-            g_perc_trac = (global_trac / global_tot * 100) if global_tot > 0 else 0
-            g_perc_kv12 = (global_kv12 / global_tot * 100) if global_tot > 0 else 0
-            
-            e1.metric("Consumo Total", f"{global_tot:,.0f} kWh")
-            e2.metric("Tracción", f"{global_trac:,.0f} kWh", f"{g_perc_trac:.1f}% del total")
-            e3.metric("12 KV", f"{global_kv12:,.0f} kWh", f"{g_perc_kv12:.1f}% del total")
-            
+            e1.metric("Consumo Total", f"{df_seat_final['Total [kWh]'].sum():,.0f} kWh")
+            e2.metric("Tracción", f"{df_seat_final['Tracción [kWh]'].sum():,.0f} kWh")
+            e3.metric("12 KV", f"{df_seat_final['12 KV [kWh]'].sum():,.0f} kWh")
             st.divider()
-            st.write("### Desglose Diario y Distribución Porcentual")
-            
-            # Definimos columnas visibles
-            cols_energia = ["Fecha", "Total [kWh]", "Tracción [kWh]", "% Tracción", "12 KV [kWh]", "% 12 KV"]
-            
-            # Aplicamos formato específico para evitar el ValueError anterior
+            # CORRECCIÓN AQUÍ: Definimos el formato solo para las columnas numéricas
             st.dataframe(
-                df_seat_final[cols_energia].style.format({
+                df_seat_final[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].style.format({
                     "Total [kWh]": "{:,.0f}", 
                     "Tracción [kWh]": "{:,.0f}", 
-                    "12 KV [kWh]": "{:,.0f}",
-                    "% Tracción": "{:.2f}%",
-                    "% 12 KV": "{:.2f}%"
+                    "12 KV [kWh]": "{:,.0f}"
                 }), use_container_width=True
             )
         else:
