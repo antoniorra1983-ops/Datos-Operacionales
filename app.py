@@ -80,10 +80,9 @@ if f_umr_list:
     for f in f_umr_list:
         try:
             xl = pd.ExcelFile(f)
-            # Resumen UMR
-            sn_res = next((s for s in xl.sheet_names if 'UMR' in s.upper() and 'RESUMEN' in s.upper()), None)
-            if sn_res:
-                df_raw_res = pd.read_excel(f, sheet_name=sn_res, header=None)
+            sn_resumen = next((s for s in xl.sheet_names if 'UMR' in s.upper() and 'RESUMEN' in s.upper()), None)
+            if sn_resumen:
+                df_raw_res = pd.read_excel(f, sheet_name=sn_resumen, header=None)
                 hdr_row = None
                 for i in range(min(100, len(df_raw_res))):
                     fila_txt = " ".join(df_raw_res.iloc[i].astype(str)).upper()
@@ -109,7 +108,6 @@ if f_umr_list:
                                 "Odómetro [km]": o, "Tren-Km [km]": t, "UMR [%]": (t / o * 100) if o > 0 else 0,
                                 "Timestamp": fch, "Archivo": f.name
                             })
-            # Odómetro Tren
             sn_trenes = next((s for s in xl.sheet_names if 'ODO' in s.upper() and 'KIL' in s.upper()), None)
             if sn_trenes:
                 df_raw_tr = pd.read_excel(f, sheet_name=sn_trenes, header=None)
@@ -147,11 +145,16 @@ if f_seat_list:
                 for i in range(len(df_raw_s)):
                     fch_s = pd.to_datetime(df_raw_s.iloc[i, 1], errors='coerce')
                     if pd.notna(fch_s) and fch_s.year in f_anio_list and fch_s.month in meses_num and fch_s.day in f_dias:
+                        tot = parse_latam_number(df_raw_s.iloc[i, 3])
+                        trac = parse_latam_number(df_raw_s.iloc[i, 5])
+                        kv12 = parse_latam_number(df_raw_s.iloc[i, 7])
                         all_data_seat.append({
                             "Fecha": fch_s.strftime('%d/%m/%Y'),
-                            "Total [kWh]": parse_latam_number(df_raw_s.iloc[i, 3]),
-                            "Tracción [kWh]": parse_latam_number(df_raw_s.iloc[i, 5]),
-                            "12 KV [kWh]": parse_latam_number(df_raw_s.iloc[i, 7]),
+                            "Total [kWh]": tot,
+                            "Tracción [kWh]": trac,
+                            "12 KV [kWh]": kv12,
+                            "% Tracción": (trac / tot * 100) if tot > 0 else 0,
+                            "% 12 KV": (kv12 / tot * 100) if tot > 0 else 0,
                             "Timestamp": fch_s
                         })
         except: continue
@@ -201,17 +204,25 @@ if all_data_ops or all_data_seat:
     with tab_seat:
         if not df_seat_final.empty:
             st.subheader("Consumo de Energía SEAT")
+            
+            # Cálculos globales para métricas
+            g_tot = df_seat_final['Total [kWh]'].sum()
+            g_trac = df_seat_final['Tracción [kWh]'].sum()
+            g_kv12 = df_seat_final['12 KV [kWh]'].sum()
+            
             e1, e2, e3 = st.columns(3)
-            e1.metric("Consumo Total", f"{df_seat_final['Total [kWh]'].sum():,.0f} kWh")
-            e2.metric("Tracción", f"{df_seat_final['Tracción [kWh]'].sum():,.0f} kWh")
-            e3.metric("12 KV", f"{df_seat_final['12 KV [kWh]'].sum():,.0f} kWh")
+            e1.metric("Consumo Total", f"{g_tot:,.0f} kWh")
+            e2.metric("Tracción", f"{g_trac:,.0f} kWh", f"{(g_trac/g_tot*100 if g_tot>0 else 0):.1f}% del total")
+            e3.metric("12 KV", f"{g_kv12:,.0f} kWh", f"{(g_kv12/g_tot*100 if g_tot>0 else 0):.1f}% del total")
+            
             st.divider()
-            # CORRECCIÓN AQUÍ: Definimos el formato solo para las columnas numéricas
             st.dataframe(
-                df_seat_final[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].style.format({
+                df_seat_final[["Fecha", "Total [kWh]", "Tracción [kWh]", "% Tracción", "12 KV [kWh]", "% 12 KV"]].style.format({
                     "Total [kWh]": "{:,.0f}", 
                     "Tracción [kWh]": "{:,.0f}", 
-                    "12 KV [kWh]": "{:,.0f}"
+                    "12 KV [kWh]": "{:,.0f}",
+                    "% Tracción": "{:.2f}%",
+                    "% 12 KV": "{:.2f}%"
                 }), use_container_width=True
             )
         else:
