@@ -42,24 +42,16 @@ def color_umr(val):
     elif val < 96.4: return 'color: red; font-weight: bold;'
     return 'color: black;'
 
-# --- 3. SIDEBAR ---
-MESES_NOMBRES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-MESES_NUM_MAP = {nombre: i+1 for i, nombre in enumerate(MESES_NOMBRES)}
+# --- 3. PROCESAMIENTO INICIAL (SIN FILTROS) ---
+all_resumen_raw = []
+all_trenes_raw = []
 
 with st.sidebar:
     st.header("📂 Gestión de Archivos")
     f_umr_list = st.file_uploader("Subir archivos Excel (UMR/Odómetro)", type=["xlsx"], accept_multiple_files=True)
     st.divider()
-    f_anio_list = st.multiselect("Años", [2024, 2025, 2026], default=[2025, 2026])
-    f_mes_list = st.multiselect("Meses", MESES_NOMBRES, default=[MESES_NOMBRES[datetime.now().month - 1]])
-    meses_num = [MESES_NUM_MAP[m] for m in f_mes_list]
-    f_dias = st.multiselect("Días", list(range(1, 32)), default=list(range(1, 32)))
 
-# --- 4. PROCESAMIENTO ---
 if f_umr_list:
-    all_resumen = []
-    all_trenes = []
-    
     for f in f_umr_list:
         try:
             xl = pd.ExcelFile(f)
@@ -81,51 +73,63 @@ if f_umr_list:
                     if idx_fch is not None:
                         df_ext = df_raw.iloc[hdr_row+1:].copy()
                         df_ext['_dt'] = pd.to_datetime(df_ext.iloc[:, idx_fch], errors='coerce')
-                        mask = (df_ext['_dt'].dt.day.isin(f_dias)) & (df_ext['_dt'].dt.month.isin(meses_num)) & (df_ext['_dt'].dt.year.isin(f_anio_list))
-                        for _, row in df_ext[mask].iterrows():
+                        
+                        for _, row in df_ext.dropna(subset=['_dt']).iterrows():
                             fch = row.iloc[idx_fch]
-                            if not isinstance(fch, (datetime, pd.Timestamp)): continue
                             nom_dia = fch.strftime('%A')
                             t_dia = "D/F" if (fch in chile_holidays or nom_dia == 'Sunday') else ("S" if nom_dia == 'Saturday' else "L")
                             o, t = parse_latam_number(row.iloc[idx_odo]), parse_latam_number(row.iloc[idx_tkm])
-                            all_resumen.append({"Fecha": fch.strftime('%d/%m/%Y'), "Tipo Día": t_dia, "N° Semana": fch.isocalendar()[1], "Odómetro [km]": o, "Tren-Km [km]": t, "UMR [%]": (t/o*100 if o>0 else 0), "Timestamp": fch})
+                            all_resumen_raw.append({
+                                "Fecha_DT": fch, "Fecha": fch.strftime('%d/%m/%Y'), "Tipo Día": t_dia, 
+                                "N° Semana": fch.isocalendar()[1], "Odómetro [km]": o, 
+                                "Tren-Km [km]": t, "UMR [%]": (t/o*100 if o>0 else 0), "Año": fch.year, "Mes": fch.month
+                            })
 
-            # --- PARTE B: ODOMETRO-KILOMETRAJE (BASADO EN TU IMAGEN) ---
+            # --- PARTE B: ODOMETRO POR TREN (MEJORADO) ---
             sn_tren = next((s for s in xl.sheet_names if 'ODO' in s.upper() and 'KIL' in s.upper()), None)
             if sn_tren:
                 df_tr_raw = pd.read_excel(f, sheet_name=sn_tren, header=None)
-                # Buscamos la fila que dice "Tren" o "M01"
                 row_tren = next((i for i in range(min(50, len(df_tr_raw))) if 'TREN' in str(df_tr_raw.iloc[i, 0]).upper() or 'M01' in str(df_tr_raw.iloc[i, 0]).upper()), None)
-                
                 if row_tren is not None:
-                    # Las fechas suelen estar 1 o 2 filas arriba de los trenes
-                    fila_fechas = row_tren - 1 if row_tren > 0 else 0
-                    col_map = {} # {dia_num: col_index}
+                    fila_fechas = row_tren - 1
+                    col_map = {} # {col_idx: datetime_obj}
                     for c_idx, val in enumerate(df_tr_raw.iloc[fila_fechas]):
-                        try:
-                            # Intentamos extraer el día de formatos como "01-04-2025" o simplemente "1"
-                            if isinstance(val, (datetime, pd.Timestamp)): d_val = val.day
-                            else:
-                                match = re.search(r'(\d{1,2})', str(val))
-                                d_val = int(match.group(1)) if match else None
-                            if d_val and 1 <= d_val <= 31: col_map[d_val] = c_idx
-                        except: continue
+                        f_parsed = pd.to_datetime(val, errors='coerce')
+                        if pd.notna(f_parsed): col_map[c_idx] = f_parsed
                     
-                    # Extraer kilometraje por tren
                     for r_idx in range(row_tren, len(df_tr_raw)):
                         nombre = str(df_tr_raw.iloc[r_idx, 0]).strip().upper()
                         if re.match(r'^(M\d{1,2}|XM\d{1,2})', nombre):
-                            for d_sel in f_dias:
-                                if d_sel in col_map:
-                                    val_km = parse_latam_number(df_tr_raw.iloc[r_idx, col_map[d_sel]])
-                                    if val_km >= 0: # Incluimos 0 para ver si el tren estuvo parado
-                                        all_trenes.append({"Tren": nombre, "Día": d_sel, "Kilometraje": val_km})
+                            for c_idx, f_dt in col_map.items():
+                                val_km = parse_latam_number(df_tr_raw.iloc[r_idx, c_idx])
+                                all_trenes_raw.append({
+                                    "Tren": nombre, "Fecha": f_dt, "Kilometraje": val_km, 
+                                    "Año": f_dt.year, "Mes": f_dt.month, "Día": f_dt.day
+                                })
         except Exception as e:
             st.error(f"Error en {f.name}: {e}")
 
+# --- 4. FILTROS DINÁMICOS (POST-PROCESAMIENTO) ---
+if all_resumen_raw:
+    df_base_res = pd.DataFrame(all_resumen_raw).drop_duplicates(subset=['Fecha'], keep='last')
+    df_base_tr = pd.DataFrame(all_trenes_raw)
+
+    with st.sidebar:
+        st.subheader("📅 Filtros Activos")
+        anios_disp = sorted(df_base_res['Año'].unique())
+        f_anios = st.multiselect("Filtrar por Año", anios_disp, default=anios_disp)
+        
+        meses_disp = sorted(df_base_res['Mes'].unique())
+        MESES_NOMBRES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        f_meses_nombres = st.multiselect("Filtrar por Mes", MESES_NOMBRES, default=[MESES_NOMBRES[m-1] for m in meses_disp])
+        f_meses_num = [MESES_NOMBRES.index(m)+1 for m in f_meses_nombres]
+
+    # Aplicar Filtros
+    df_res = df_base_res[df_base_res['Año'].isin(f_anios) & df_base_res['Mes'].isin(f_meses_num)].sort_values("Fecha_DT")
+    df_tr = df_base_tr[df_base_tr['Año'].isin(f_anios) & df_base_tr['Mes'].isin(f_meses_num)]
+
     # --- 5. RENDERIZADO ---
-    if all_resumen:
-        df_res = pd.DataFrame(all_resumen).drop_duplicates(subset=['Fecha'], keep='last').sort_values("Timestamp")
+    if not df_res.empty:
         t_res, t_datos, t_trenes = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren"])
         
         with t_res:
@@ -137,16 +141,22 @@ if f_umr_list:
             st.table(df_res.groupby("Tipo Día")["UMR [%]"].mean().reset_index().style.format({"UMR [%]": "{:.2f}%"}))
 
         with t_datos:
-            st.dataframe(df_res[["Fecha", "Tipo Día", "N° Semana", "Odómetro [km]", "Tren-Km [km]", "UMR [%]"]].style.format({"Odómetro [km]": "{:,.1f}", "Tren-Km [km]": "{:,.1f}", "UMR [%]": "{:.2f}%"}).applymap(color_umr, subset=['UMR [%]']), use_container_width=True)
+            cols_op = ["Fecha", "Tipo Día", "N° Semana", "Odómetro [km]", "Tren-Km [km]", "UMR [%]"]
+            st.dataframe(df_res[cols_op].style.format({"Odómetro [km]": "{:,.1f}", "Tren-Km [km]": "{:,.1f}", "UMR [%]": "{:.2f}%"}).applymap(color_umr, subset=['UMR [%]']), use_container_width=True)
 
         with t_trenes:
-            if all_trenes:
-                df_tr_final = pd.DataFrame(all_trenes).pivot_table(index="Tren", columns="Día", values="Kilometraje", aggfunc='sum').fillna(0)
-                st.write("### Matriz de Kilometraje por Unidad (M/XM)")
-                st.dataframe(df_tr_final.style.format("{:,.1f}"), use_container_width=True)
+            if not df_tr.empty:
+                pivot_tr = df_tr.pivot_table(index="Tren", columns="Día", values="Kilometraje", aggfunc='sum').fillna(0)
+                st.write(f"### Kilometraje por Unidad - {f_meses_nombres[0] if f_meses_nombres else ''}")
+                st.dataframe(pivot_tr.style.format("{:,.1f}"), use_container_width=True)
             else:
-                st.warning("⚠️ No se pudieron extraer datos de la hoja Odómetro-Kilometraje. Revisa que el nombre de los trenes esté en la columna A.")
+                st.warning("No hay datos de trenes para el periodo seleccionado.")
         
-        st.download_button("📥 Descargar Reporte (Excel)", to_excel({"Resumen": df_res, "Odometro_por_Tren": pd.DataFrame(all_trenes)}), "Reporte_SGE_EFE.xlsx")
+        st.download_button("📥 Descargar Reporte (Excel)", to_excel({"Resumen": df_res, "Odometro_por_Tren": df_tr}), "Reporte_SGE_EFE.xlsx")
     else:
-        st.warning("No se encontraron registros válidos.")
+        st.warning("No hay datos que coincidan con los filtros seleccionados.")
+else:
+    if f_umr_list:
+        st.error("❌ No se detectaron datos válidos en los archivos. Revisa que las hojas se llamen 'UMR Resumen' y 'Odometro-Kilometraje'.")
+    else:
+        st.info("👋 Sube los archivos Excel para comenzar el análisis.")
