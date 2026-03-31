@@ -9,6 +9,7 @@ from datetime import datetime
 # --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="EFE Valparaíso - Auditoría UMR", layout="wide", page_icon="🚆")
 
+# Mapeo de días y feriados
 DIAS_MAP = {'Monday': 'Lun', 'Tuesday': 'Mar', 'Wednesday': 'Mié', 'Thursday': 'Jue', 'Friday': 'Vie', 'Saturday': 'Sáb', 'Sunday': 'Dom'}
 chile_holidays = holidays.Chile()
 
@@ -45,8 +46,9 @@ with st.sidebar:
     st.header("📂 Carga de Datos")
     f_umr_list = st.file_uploader("Subir archivos UMR", type=["xlsx"], accept_multiple_files=True)
     st.divider()
-    f_anio_list = st.multiselect("Años", [2024, 2025, 2026], default=[2025, 2026])
-    f_mes_list = st.multiselect("Meses", MESES_NOMBRES, default=[MESES_NOMBRES[datetime.now().month - 1]])
+    # Años y Meses multiselección
+    f_anio_list = st.multiselect("Años", [2024, 2025, 2026], default=[2024, 2025, 2026])
+    f_mes_list = st.multiselect("Meses", MESES_NOMBRES, default=MESES_NOMBRES)
     meses_seleccionados_num = [MESES_NUM_MAP[m] for m in f_mes_list]
     f_dias = st.multiselect("Días", list(range(1, 32)), default=list(range(1, 32)))
 
@@ -65,38 +67,51 @@ if f_umr_list:
             
             df_raw = pd.read_excel(f, sheet_name=sn_umr, header=None)
             
-            # Buscador de cabeceras mejorado
+            # Buscador dinámico de fila de títulos (Busca palabras clave en la fila)
             hdr_row = None
             for i in range(min(100, len(df_raw))):
-                fila_scan = " ".join(df_raw.iloc[i].astype(str)).upper()
-                if 'ODO' in fila_scan or 'FECHA' in fila_scan:
+                fila_txt = " ".join(df_raw.iloc[i].astype(str)).upper()
+                if ('ODO' in fila_txt or 'FECHA' in fila_txt) and 'TREN' in fila_txt:
                     hdr_row = i
                     break
             
             if hdr_row is None:
-                st.warning(f"⚠️ {f.name}: No se detectó la fila de títulos.")
+                st.warning(f"⚠️ {f.name}: No se detectó la fila de títulos (Fecha/Odo/Tren).")
                 continue
 
-            cols_str = [str(c).strip().upper() for c in df_raw.iloc[hdr_row]]
+            # Limpiamos los nombres de las columnas para la búsqueda
+            cols_orig = df_raw.iloc[hdr_row].astype(str).tolist()
+            cols_clean = [re.sub(r'[^A-Z]', '', c.upper().replace('Ó','O').replace('Á','A')) for c in cols_orig]
             
-            # Identificación flexible de columnas
-            def find_col(keywords, columns):
-                for i, c in enumerate(columns):
-                    if all(k in c for k in keywords): return i
+            # --- BUSCADOR FLEXIBLE POR ALIAS ---
+            def encontrar_columna(alias_list, lista_columnas, original_cols):
+                for i, col_limpia in enumerate(lista_columnas):
+                    # No buscamos si la columna original dice "ACUMULADO"
+                    if 'ACUM' in original_cols[i].upper(): continue
+                    if any(alias in col_limpia for alias in alias_list):
+                        return i
                 return None
 
-            idx_fecha = find_col(['FECHA'], cols_str)
-            idx_odo = find_col(['ODO'], [c if 'ACUM' not in c else '' for c in cols_str])
-            idx_tkm = find_col(['TREN', 'KM'], [c if 'ACUM' not in c else '' for c in cols_str])
+            idx_fecha = encontrar_columna(['FECHA', 'FCH', 'DATE'], cols_clean, cols_orig)
+            idx_odo   = encontrar_columna(['ODO', 'METRO', 'KILO', 'KM'], cols_clean, cols_orig)
+            idx_tkm   = encontrar_columna(['TRENKM', 'TK', 'TRKM', 'KMTR'], cols_clean, cols_orig)
+
+            # Si el ODO falló, intentamos una búsqueda más desesperada (la primera columna numérica después de fecha)
+            if idx_odo is None and idx_fecha is not None:
+                idx_odo = idx_fecha + 1 
 
             if None in [idx_fecha, idx_odo, idx_tkm]:
-                missing = [k for k, v in {"Fecha": idx_fecha, "Odo": idx_odo, "Tren-Km": idx_tkm}.items() if v is None]
-                st.error(f"❌ {f.name}: Faltan columnas: {', '.join(missing)}")
+                missing = []
+                if idx_fecha is None: missing.append("Fecha")
+                if idx_odo is None: missing.append("Odómetro")
+                if idx_tkm is None: missing.append("Tren-Km")
+                st.error(f"❌ {f.name}: Faltan columnas críticas: {', '.join(missing)}. Detectadas: {cols_orig}")
                 continue
 
             df_data = df_raw.iloc[hdr_row + 1:].copy()
             df_data['_dt'] = pd.to_datetime(df_data.iloc[:, idx_fecha], errors='coerce')
             
+            # Filtro por selección del usuario
             mask = (
                 (df_data['_dt'].dt.day.isin(f_dias)) & 
                 (df_data['_dt'].dt.month.isin(meses_seleccionados_num)) & 
@@ -110,6 +125,8 @@ if f_umr_list:
                 
                 v_odo = parse_latam_number(row.iloc[idx_odo])
                 v_tkm = parse_latam_number(row.iloc[idx_tkm])
+                
+                # Ecuación solicitada: (Tren-Km / Odómetro) * 100
                 v_umr_calc = (v_tkm / v_odo * 100) if v_odo > 0 else 0
                 
                 nombre_dia_en = fecha_dt.strftime('%A')
@@ -127,20 +144,23 @@ if f_umr_list:
                     "Archivo": f.name
                 })
         except Exception as e:
-            st.error(f"💥 Error crítico en {f.name}: {str(e)}")
+            st.error(f"💥 Error en {f.name}: {str(e)}")
 
     if all_res_diario:
         df_final = pd.DataFrame(all_res_diario).drop_duplicates(subset=['Fecha'], keep='last').sort_values("Timestamp")
         
-        st.write(f"## 📊 Consolidado Operacional")
+        st.write(f"## 📊 Consolidado Operacional EFE Valparaíso")
         
+        # Métricas Globales
         c1, c2, c3 = st.columns(3)
         t_odo, t_tkm = df_final["Odómetro [km]"].sum(), df_final["Tren-Km [km]"].sum()
         c1.metric("Odómetro Total", f"{t_odo:,.1f} km")
         c2.metric("Tren-Km Total", f"{t_tkm:,.1f} km")
-        c3.metric("UMR Global", f"{(t_tkm/t_odo*100 if t_odo>0 else 0):.2f} %")
+        c3.metric("UMR Global (KPI)", f"{(t_tkm/t_odo*100 if t_odo>0 else 0):.2f} %")
         
         st.divider()
+        
+        # Tabla Principal con el semáforo del 96.4%
         st.dataframe(
             df_final[["Fecha", "Día", "Festivo", "Odómetro [km]", "Tren-Km [km]", "UMR [%]", "Archivo"]]
             .style.format({"Odómetro [km]": "{:,.1f}", "Tren-Km [km]": "{:,.1f}", "UMR [%]": "{:.2f}%"})
@@ -148,4 +168,4 @@ if f_umr_list:
             use_container_width=True
         )
     else:
-        st.warning("⚠️ No se encontraron registros que coincidan con los filtros de Mes/Año seleccionados.")
+        st.warning("⚠️ No se encontraron registros. Asegúrate de que el Año y Mes seleccionados en el filtro coincidan con tus archivos.")
