@@ -2,11 +2,21 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import holidays  # Librería fundamental para feriados en Chile
 from io import BytesIO
 from datetime import datetime
 
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="EFE Valparaíso - Dashboard UMR", layout="wide", page_icon="🚆")
+st.set_page_config(page_title="EFE Valparaíso - Control Operacional UMR", layout="wide", page_icon="🚆")
+
+# Mapeo de días abreviados
+DIAS_MAP = {
+    'Monday': 'Lun', 'Tuesday': 'Mar', 'Wednesday': 'Mié', 
+    'Thursday': 'Jue', 'Friday': 'Vie', 'Saturday': 'Sáb', 'Sunday': 'Dom'
+}
+
+# Configuración de feriados de Chile
+chile_holidays = holidays.Chile()
 
 st.markdown("""
     <style>
@@ -38,122 +48,114 @@ def parse_latam_number(val):
 def to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Reporte_SGE_UMR')
+        df.to_excel(writer, index=False, sheet_name='Reporte_UMR_EFE')
     return output.getvalue()
 
-# --- 3. LÓGICA DE COLOR (CONDICIONAL) ---
 def color_umr(val):
-    """Aplica colores según el umbral de 96.4%"""
-    if val > 96.4:
-        return 'color: green; font-weight: bold;'
-    elif val < 96.4:
-        return 'color: red; font-weight: bold;'
-    else:
-        return 'color: black;'
+    if val > 96.4: return 'color: green; font-weight: bold;'
+    elif val < 96.4: return 'color: red; font-weight: bold;'
+    else: return 'color: black;'
 
-# --- 4. SIDEBAR ---
+# --- 3. SIDEBAR ---
 MESES_NOMBRES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 MESES_NUM_MAP = {nombre: i+1 for i, nombre in enumerate(MESES_NOMBRES)}
 
 with st.sidebar:
-    st.header("📂 Gestión de Archivos")
+    st.header("📂 Carga de Datos")
     f_umr_list = st.file_uploader("Subir archivos Excel de UMR", type=["xlsx"], accept_multiple_files=True)
     
     st.divider()
-    st.subheader("📅 Filtros Multi-Periodo")
+    st.subheader("📅 Filtros de Tiempo")
     f_anio_list = st.multiselect("Años", [2024, 2025, 2026], default=[2026])
     f_mes_list = st.multiselect("Meses", MESES_NOMBRES, default=[MESES_NOMBRES[datetime.now().month - 1]])
     meses_seleccionados_num = [MESES_NUM_MAP[m] for m in f_mes_list]
     f_dias = st.multiselect("Días", list(range(1, 32)), default=list(range(1, 32)))
 
-# --- 5. PROCESAMIENTO ---
+# --- 4. PROCESAMIENTO ---
 if f_umr_list and f_anio_list and f_mes_list:
     all_res_diario = []
     
-    with st.spinner("Consolidando datos operativos..."):
-        for f in f_umr_list:
-            try:
-                xl = pd.ExcelFile(f)
-                sn_umr = next((s for s in xl.sheet_names if 'UMR' in s.upper() and 'RESUMEN' in s.upper()), None)
+    for f in f_umr_list:
+        try:
+            xl = pd.ExcelFile(f)
+            sn_umr = next((s for s in xl.sheet_names if 'UMR' in s.upper() and 'RESUMEN' in s.upper()), None)
+            
+            if sn_umr:
+                df_raw = pd.read_excel(f, sheet_name=sn_umr, header=None)
                 
-                if sn_umr:
-                    df_raw = pd.read_excel(f, sheet_name=sn_umr, header=None)
-                    
-                    hdr_row = None
-                    for i in range(min(100, len(df_raw))):
-                        fila_scan = " ".join(df_raw.iloc[i].astype(str)).upper()
-                        if 'ODO' in fila_scan or 'FECHA' in fila_scan:
-                            hdr_row = i
-                            break
-                    
-                    if hdr_row is not None:
-                        cols_str = [str(c).strip().upper().replace('Ó','O').replace('Á','A') for c in df_raw.iloc[hdr_row]]
-                        idx_fecha = next(i for i, c in enumerate(cols_str) if 'FECHA' in c)
-                        idx_odo   = next(i for i, c in enumerate(cols_str) if 'ODO' in c and 'ACUM' not in c)
-                        idx_tkm   = next(i for i, c in enumerate(cols_str) if 'TREN' in c and 'KM' in c and 'ACUM' not in c)
+                # Buscador dinámico de fila de títulos
+                hdr_row = None
+                for i in range(min(100, len(df_raw))):
+                    fila_scan = " ".join(df_raw.iloc[i].astype(str)).upper()
+                    if 'ODO' in fila_scan or 'FECHA' in fila_scan:
+                        hdr_row = i
+                        break
+                
+                if hdr_row is not None:
+                    cols_str = [str(c).strip().upper() for c in df_raw.iloc[hdr_row]]
+                    idx_fecha = next(i for i, c in enumerate(cols_str) if 'FECHA' in c)
+                    idx_odo   = next(i for i, c in enumerate(cols_str) if 'ODO' in c and 'ACUM' not in c)
+                    idx_tkm   = next(i for i, c in enumerate(cols_str) if 'TREN' in c and 'KM' in c and 'ACUM' not in c)
 
-                        df_data = df_raw.iloc[hdr_row + 1:].copy()
-                        df_data['_dt'] = pd.to_datetime(df_data.iloc[:, idx_fecha], errors='coerce')
+                    df_data = df_raw.iloc[hdr_row + 1:].copy()
+                    df_data['_dt'] = pd.to_datetime(df_data.iloc[:, idx_fecha], errors='coerce')
+                    
+                    mask = (
+                        (df_data['_dt'].dt.day.isin(f_dias)) & 
+                        (df_data['_dt'].dt.month.isin(meses_seleccionados_num)) & 
+                        (df_data['_dt'].dt.year.isin(f_anio_list))
+                    )
+                    row_found = df_data[mask]
+                    
+                    for _, row in row_found.iterrows():
+                        fecha_dt = row.iloc[idx_fecha]
+                        if not isinstance(fecha_dt, datetime): continue
                         
-                        mask = (
-                            (df_data['_dt'].dt.day.isin(f_dias)) & 
-                            (df_data['_dt'].dt.month.isin(meses_seleccionados_num)) & 
-                            (df_data['_dt'].dt.year.isin(f_anio_list))
-                        )
-                        row_found = df_data[mask]
+                        v_odo = parse_latam_number(row.iloc[idx_odo])
+                        v_tkm = parse_latam_number(row.iloc[idx_tkm])
+                        v_umr_calc = (v_tkm / v_odo * 100) if v_odo > 0 else 0
                         
-                        for _, row in row_found.iterrows():
-                            v_odo = parse_latam_number(row.iloc[idx_odo])
-                            v_tkm = parse_latam_number(row.iloc[idx_tkm])
-                            # Ecuación: (Tren-Km / Odómetro) * 100
-                            v_umr_calc = (v_tkm / v_odo * 100) if v_odo > 0 else 0
-                            
-                            all_res_diario.append({
-                                "Fecha": row.iloc[idx_fecha].strftime('%d/%m/%Y') if isinstance(row.iloc[idx_fecha], datetime) else str(row.iloc[idx_fecha]),
-                                "Timestamp": row.iloc[idx_fecha],
-                                "Odómetro [km]": v_odo,
-                                "Tren-Km [km]": v_tkm,
-                                "UMR [%]": v_umr_calc,
-                                "Archivo": f.name
-                            })
-            except Exception as e:
-                st.error(f"Error en archivo {f.name}: {e}")
+                        # NUEVA LÓGICA: Día y Festivo
+                        nombre_dia_en = fecha_dt.strftime('%A')
+                        dia_abr = DIAS_MAP.get(nombre_dia_en, nombre_dia_en[:3])
+                        es_festivo = "SÍ" if fecha_dt in chile_holidays else "NO"
+                        
+                        all_res_diario.append({
+                            "Fecha": fecha_dt.strftime('%d/%m/%Y'),
+                            "Día": dia_abr,
+                            "Festivo": es_festivo,
+                            "Timestamp": fecha_dt,
+                            "Odómetro [km]": v_odo,
+                            "Tren-Km [km]": v_tkm,
+                            "UMR [%]": v_umr_calc,
+                            "Archivo": f.name
+                        })
+        except Exception as e:
+            st.error(f"Error en {f.name}: {e}")
 
     if all_res_diario:
         df_final = pd.DataFrame(all_res_diario).drop_duplicates(subset=['Fecha'], keep='last').sort_values("Timestamp")
         
-        # --- 6. RENDERIZADO ---
-        st.write(f"## 📊 Seguimiento de Eficiencia Operacional")
+        st.write(f"## 📊 Análisis Consolidado con Auditoría de Feriados")
         
         c1, c2, c3 = st.columns(3)
-        t_odo = df_final["Odómetro [km]"].sum()
-        t_tkm = df_final["Tren-Km [km]"].sum()
-        prom_umr = (t_tkm / t_odo * 100) if t_odo > 0 else 0
-        
-        c1.metric("Odómetro Consolidado", f"{t_odo:,.1f} km")
-        c2.metric("Tren-Km Consolidado", f"{t_tkm:,.1f} km")
-        c3.metric("UMR Global", f"{prom_umr:.2f} %")
+        t_odo, t_tkm = df_final["Odómetro [km]"].sum(), df_final["Tren-Km [km]"].sum()
+        c1.metric("Odómetro Total", f"{t_odo:,.1f} km")
+        c2.metric("Tren-Km Total", f"{t_tkm:,.1f} km")
+        c3.metric("UMR Global", f"{(t_tkm/t_odo*100 if t_odo>0 else 0):.2f} %")
         
         st.divider()
-        st.subheader("Semáforo de Utilización por Jornada")
         
-        # --- APLICACIÓN DE FORMATO CONDICIONAL ---
-        styled_df = df_final[["Fecha", "Odómetro [km]", "Tren-Km [km]", "UMR [%]", "Archivo"]].style.format({
-            "Odómetro [km]": "{:,.1f}",
-            "Tren-Km [km]": "{:,.1f}",
-            "UMR [%]": "{:.2f}%"
-        }).applymap(color_umr, subset=['UMR [%]']) # <--- AQUÍ ESTÁ EL REQUERIMIENTO
-
-        st.dataframe(styled_df, use_container_width=True)
+        # Tabla con formato
+        st.dataframe(
+            df_final[["Fecha", "Día", "Festivo", "Odómetro [km]", "Tren-Km [km]", "UMR [%]", "Archivo"]]
+            .style.format({"Odómetro [km]": "{:,.1f}", "Tren-Km [km]": "{:,.1f}", "UMR [%]": "{:.2f}%"})
+            .applymap(color_umr, subset=['UMR [%]']), 
+            use_container_width=True
+        )
         
-        st.download_button("📥 Descargar Reporte Semáforo (Excel)", to_excel(df_final), "Reporte_UMR_EFE.xlsx")
-        
-        # Análisis Crítico Breve
-        if prom_umr < 96.4:
-            st.warning(f"⚠️ El UMR Global ({prom_umr:.2f}%) está por debajo del objetivo de 96,4%. Se recomienda revisar servicios suprimidos.")
-        else:
-            st.success(f"✅ Cumplimiento de meta operativa alcanzado ({prom_umr:.2f}%).")
+        st.download_button("📥 Descargar Reporte Completo", to_excel(df_final), "Reporte_EFE_Festivos.xlsx")
     else:
-        st.warning("No se encontraron registros para los criterios seleccionados.")
+        st.warning("No se encontraron registros.")
 else:
-    st.info("👋 Sube los archivos UMR y selecciona los periodos para activar el semáforo operacional.")
+    st.info("👋 Sube tus archivos UMR para analizar el cumplimiento operativo.")
