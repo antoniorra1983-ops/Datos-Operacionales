@@ -329,10 +329,15 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             
             c1, c2, c3 = st.columns(3)
             f_reg_anio = c1.selectbox("Año", sorted(df_reg['Año'].unique()), index=len(df_reg['Año'].unique())-1)
-            f_reg_jor = c2.selectbox("Tipo de Jornada", ['L', 'S', 'D/F'])
+            # --- AJUSTE: Selector de Jornada ahora incluye 'Total' ---
+            f_reg_jor = c2.selectbox("Tipo de Jornada", ['Total', 'L', 'S', 'D/F'])
             f_reg_hora = c3.selectbox("Hora específica", range(6))
             
-            df_plot = df_reg[(df_reg['Año'] == f_reg_anio) & (df_reg['Tipo Día'] == f_reg_jor) & (df_reg['Hora'] == f_reg_hora)].sort_values('Fecha')
+            # --- AJUSTE: Lógica de filtrado dinámico ---
+            if f_reg_jor == 'Total':
+                df_plot = df_reg[(df_reg['Año'] == f_reg_anio) & (df_reg['Hora'] == f_reg_hora)].sort_values('Fecha')
+            else:
+                df_plot = df_reg[(df_reg['Año'] == f_reg_anio) & (df_reg['Tipo Día'] == f_reg_jor) & (df_reg['Hora'] == f_reg_hora)].sort_values('Fecha')
             
             if len(df_plot) > 1:
                 Q1 = df_plot['Consumo Horario [kWh]'].quantile(0.25)
@@ -360,7 +365,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     y_pred = m * x + n
                     r_squared = 1 - (np.sum((y - y_pred)**2) / np.sum((y - np.mean(y))**2))
                     
-                    # --- NUEVO CÁLCULO: TOTAL DEL PERÍODO LIMPIO ---
                     total_consumo = np.sum(y)
                     
                     c1, c2 = st.columns([2, 1])
@@ -369,15 +373,14 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     
                     with c2:
                         st.metric("Consumo Total Acumulado", f"{total_consumo:,.2f} kWh", help="Suma de la energía en esta hora para el período filtrado (sin outliers)")
-                        st.metric("Pendiente (m)", f"{m:.4f}", help="Incremento/decremento de kWh por día")
+                        # --- AJUSTE: Nomenclatura "por hora" en vez de "por día" ---
+                        st.metric("Pendiente (m)", f"{m:.4f}", help="Incremento/decremento de kWh por hora")
                         st.metric("Consumo Inicial (n)", f"{n:.2f} kWh")
                         st.metric("Coeficiente R²", f"{r_squared:.4f}")
                         
                         if not df_outliers.empty:
                             st.error(f"⚠️ {len(df_outliers)} datos atípicos excluidos.")
                     
-                    # --- NUEVO RELATO DINÁMICO ---
-                    # Lógica para la tendencia
                     if m > 0.5:
                         tendencia_txt = "al alza (posible alerta de equipos quedando encendidos de forma progresiva)"
                         icono_tendencia = "📈"
@@ -388,9 +391,9 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         tendencia_txt = "estable (fluctuaciones menores propias de la operación base)"
                         icono_tendencia = "➖"
                         
-                    # Lógica para la confiabilidad (ajustada a la realidad de 12kV nocturno)
+                    # --- AJUSTE: Nomenclatura "instalaciones" en vez de "maestranza" ---
                     if r_squared < 0.3:
-                        confianza_txt = "aleatorio y sin una tendencia cronológica fuerte. **Esto es completamente normal para un consumo basal de baja tensión/12kV**, ya que indica que la energía responde a eventos puntuales (clima, mantenimientos en maestranza) y no a una degradación sistemática de la red a través de los días."
+                        confianza_txt = "aleatorio y sin una tendencia cronológica fuerte. **Esto es completamente normal para un consumo basal de baja tensión/12kV**, ya que indica que la energía responde a eventos puntuales (clima, mantenimientos en instalaciones) y no a una degradación sistemática de la red a través del tiempo."
                     elif r_squared < 0.7:
                         confianza_txt = "de variabilidad moderada, mostrando cierta correlación con el paso de los días."
                     else:
@@ -400,7 +403,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     st.info(f"""
                     Durante el período analizado, la instalación partió con un consumo inactivo base estimado de **{n:.2f} kWh**. 
                     
-                    Al observar la evolución a través de los días, la tendencia de este consumo se muestra **{tendencia_txt}**, variando a un ritmo de **{m:.4f} kWh** diarios.
+                    Al observar la evolución a través de los días, la tendencia de este consumo se muestra **{tendencia_txt}**, variando a un ritmo de **{m:.4f} kWh por hora**.
                     
                     Desde la óptica estadística del Sistema de Gestión ($R^2 = {r_squared:.4f}$), este comportamiento es **{confianza_txt}**. En total, durante este bloque horario y período específico, se han consumido **{total_consumo:,.2f} kWh** (excluyendo datos anómalos).
                     """)
@@ -430,7 +433,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.write("#### 📊 Análisis Causa Raíz")
             st.write("Si estos valores son inusualmente altos, te sugiero revisar las bitácoras operacionales para identificar:")
             st.markdown("""
-            * Trabajos de mantenimiento pesado en las maestranzas durante la madrugada.
+            * Trabajos de mantenimiento pesado en las instalaciones durante la madrugada.
             * Climatización o sistemas auxiliares de trenes que no fueron apagados según el protocolo.
             * Errores puntuales en la lectura de los medidores PRMTE.
             """)
