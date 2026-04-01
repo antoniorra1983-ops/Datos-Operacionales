@@ -73,7 +73,7 @@ with st.sidebar:
     f_seat_f = st.file_uploader("2. Energía SEAT", type=["xlsx"], accept_multiple_files=True)
     f_prmte_f = st.file_uploader("3. Facturación / PRMTE", type=["xlsx"], accept_multiple_files=True)
 
-# --- 4. MOTOR DE PROCESAMIENTO (DATOS RECUPERADOS) ---
+# --- 4. MOTOR DE PROCESAMIENTO ---
 a_ops, a_tr, a_tr_a, a_seat, a_prm_15, a_fact_h = [], [], [], [], [], []
 todos = (f_umr or []) + (f_seat_f or []) + (f_prmte_f or [])
 
@@ -98,7 +98,6 @@ for f in todos:
                     idx_o = next((i for i, c in enumerate(cols) if 'ODO' in c and 'ACUM' not in c), None)
                     idx_t = next((i for i, c in enumerate(cols) if 'TREN' in c and 'KM' in c), None)
                     
-                    # Corrección vital: `is not None` evita perder datos si la columna es la 0
                     if idx_f is not None:
                         for _, r in df_p.iterrows():
                             fch = pd.to_datetime(r.iloc[idx_f], errors='coerce')
@@ -156,8 +155,16 @@ for f in todos:
     except: continue
 
 # --- 5. ENSAMBLAJE DE JERARQUÍA ---
-df_ops, df_tr, df_tr_a, df_seat, df_prm_15, df_fact_h = [pd.DataFrame()] * 6
-df_prm_d, df_fact_d, df_energy_master = [pd.DataFrame()] * 3
+# Inicialización segura
+df_ops = pd.DataFrame()
+df_tr = pd.DataFrame()
+df_tr_a = pd.DataFrame()
+df_seat = pd.DataFrame()
+df_prm_15 = pd.DataFrame()
+df_fact_h = pd.DataFrame()
+df_prm_d = pd.DataFrame()
+df_fact_d = pd.DataFrame()
+df_energy_master = pd.DataFrame()
 
 if any([a_ops, a_tr, a_tr_a, a_seat, a_prm_15, a_fact_h]):
     if a_ops: df_ops = pd.DataFrame(a_ops).drop_duplicates(subset=['Fecha']).sort_values("Fecha")
@@ -191,71 +198,91 @@ if any([a_ops, a_tr, a_tr_a, a_seat, a_prm_15, a_fact_h]):
     if not df_ops.empty and not df_energy_master.empty:
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
 
-# --- 6. RENDERIZADO DE TABS CON FILTROS INDIVIDUALES ---
-if not df_ops.empty or not df_tr.empty or not df_seat.empty:
+# --- 6. RENDERIZADO DE TABS CON FILTROS INDIVIDUALES (SEGUROS) ---
+if not df_ops.empty or not df_tr.empty or not df_seat.empty or not df_prm_15.empty or not df_fact_h.empty:
     tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
     
     with tabs[0]: # RESUMEN
-        st.write("#### 🔍 Filtro Resumen")
-        jornadas_disponibles = df_ops['Tipo Día'].unique().tolist() if not df_ops.empty else ["L", "S", "D/F"]
-        f_res_jornada = st.multiselect("Filtrar por Jornada:", jornadas_disponibles, default=jornadas_disponibles, key="f_res_jor")
-        
-        df_res_filtered = df_ops[df_ops['Tipo Día'].isin(f_res_jornada)] if not df_ops.empty else df_ops
-        
-        if not df_res_filtered.empty:
-            c1, c2, c3 = st.columns(3)
-            to, tk = df_res_filtered["Odómetro [km]"].sum(), df_res_filtered["Tren-Km [km]"].sum()
-            c1.metric("Odómetro Total", f"{to:,.1f} km"); c2.metric("Tren-Km Total", f"{tk:,.1f} km"); c3.metric("UMR Global", f"{(tk/to*100 if to>0 else 0):.2f} %")
-            st.divider()
+        if not df_ops.empty:
+            st.write("#### 🔍 Filtro Resumen")
+            jornadas_disponibles = df_ops['Tipo Día'].unique().tolist()
+            f_res_jornada = st.multiselect("Filtrar por Jornada:", jornadas_disponibles, default=jornadas_disponibles, key="f_res_jor")
             
-            df_res_filtered['Tipo Día'] = pd.Categorical(df_res_filtered['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
-            res = df_res_filtered.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean", "E_Total":"sum", "E_Tr":"sum", "E_12":"sum"}).reset_index()
-            st.write("#### Balance Consumo vs Operación")
-            st.table(res.style.format("{:,.1f}", subset=["Odómetro [km]", "Tren-Km [km]"]).format("{:,.2f}%", subset=["UMR [%]"]).format("{:,.0f}", subset=["E_Total", "E_Tr", "E_12"]))
+            df_res_filtered = df_ops[df_ops['Tipo Día'].isin(f_res_jornada)]
+            
+            if not df_res_filtered.empty:
+                c1, c2, c3 = st.columns(3)
+                to, tk = df_res_filtered["Odómetro [km]"].sum(), df_res_filtered["Tren-Km [km]"].sum()
+                c1.metric("Odómetro Total", f"{to:,.1f} km"); c2.metric("Tren-Km Total", f"{tk:,.1f} km"); c3.metric("UMR Global", f"{(tk/to*100 if to>0 else 0):.2f} %")
+                st.divider()
+                
+                df_res_filtered['Tipo Día'] = pd.Categorical(df_res_filtered['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
+                res = df_res_filtered.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean", "E_Total":"sum", "E_Tr":"sum", "E_12":"sum"}).reset_index()
+                st.write("#### Balance Consumo vs Operación")
+                st.table(res.style.format("{:,.1f}", subset=["Odómetro [km]", "Tren-Km [km]"]).format("{:,.2f}%", subset=["UMR [%]"]).format("{:,.0f}", subset=["E_Total", "E_Tr", "E_12"]))
+        else:
+            st.info("Sube el archivo UMR para ver el resumen operacional.")
 
     with tabs[1]: # OPERACIONES
-        st.write("#### 🔍 Filtros Operacionales")
-        c1, c2 = st.columns(2)
-        semanas_disp = sorted(df_ops['N° Semana'].unique().tolist()) if not df_ops.empty else []
-        f_ops_sem = c1.multiselect("Filtrar por N° Semana:", semanas_disp, key="f_ops_sem")
-        f_ops_jor = c2.multiselect("Filtrar por Jornada:", jornadas_disponibles, default=jornadas_disponibles, key="f_ops_jor")
-        
-        df_ops_filtered = df_ops.copy()
-        if f_ops_sem: df_ops_filtered = df_ops_filtered[df_ops_filtered['N° Semana'].isin(f_ops_sem)]
-        if f_ops_jor: df_ops_filtered = df_ops_filtered[df_ops_filtered['Tipo Día'].isin(f_ops_jor)]
-        
-        if not df_ops_filtered.empty:
-            st.dataframe(df_ops_filtered.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%", "E_Total":"{:,.0f}", "E_Tr":"{:,.0f}", "E_12":"{:,.0f}"}), use_container_width=True)
+        if not df_ops.empty:
+            st.write("#### 🔍 Filtros Operacionales")
+            c1, c2 = st.columns(2)
+            semanas_disp = sorted(df_ops['N° Semana'].unique().tolist())
+            f_ops_sem = c1.multiselect("Filtrar por N° Semana:", semanas_disp, key="f_ops_sem")
+            
+            jornadas_disp2 = df_ops['Tipo Día'].unique().tolist()
+            f_ops_jor = c2.multiselect("Filtrar por Jornada:", jornadas_disp2, default=jornadas_disp2, key="f_ops_jor2")
+            
+            df_ops_filtered = df_ops.copy()
+            if f_ops_sem: df_ops_filtered = df_ops_filtered[df_ops_filtered['N° Semana'].isin(f_ops_sem)]
+            if f_ops_jor: df_ops_filtered = df_ops_filtered[df_ops_filtered['Tipo Día'].isin(f_ops_jor)]
+            
+            if not df_ops_filtered.empty:
+                st.dataframe(df_ops_filtered.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%", "E_Total":"{:,.0f}", "E_Tr":"{:,.0f}", "E_12":"{:,.0f}"}), use_container_width=True)
+            else:
+                st.warning("No hay datos para la selección actual.")
+        else:
+            st.info("Sube el archivo UMR para ver las operaciones.")
 
     with tabs[2]: # TRENES
-        st.write("#### 🔍 Filtro de Flota")
-        trenes_disp = sorted(pd.concat([df_tr['Tren'] if not df_tr.empty else pd.Series(), df_tr_a['Tren'] if not df_tr_a.empty else pd.Series()]).unique().tolist())
-        f_tr_tren = st.multiselect("Seleccionar Tren(es):", trenes_disp, key="f_tr_tren")
-        
-        df_tr_filt = df_tr[df_tr['Tren'].isin(f_tr_tren)] if f_tr_tren and not df_tr.empty else df_tr
-        df_tra_filt = df_tr_a[df_tr_a['Tren'].isin(f_tr_tren)] if f_tr_tren and not df_tr_a.empty else df_tr_a
+        if not df_tr.empty or not df_tr_a.empty:
+            st.write("#### 🔍 Filtro de Flota")
+            trenes_disp = sorted(pd.concat([df_tr['Tren'] if not df_tr.empty else pd.Series(), df_tr_a['Tren'] if not df_tr_a.empty else pd.Series()]).unique().tolist())
+            f_tr_tren = st.multiselect("Seleccionar Tren(es):", trenes_disp, key="f_tr_tren")
+            
+            df_tr_filt = df_tr[df_tr['Tren'].isin(f_tr_tren)] if f_tr_tren and not df_tr.empty else df_tr
+            df_tra_filt = df_tr_a[df_tr_a['Tren'].isin(f_tr_tren)] if f_tr_tren and not df_tr_a.empty else df_tr_a
 
-        if not df_tr_filt.empty:
-            st.write("#### Kilometraje Diario [km]")
-            st.dataframe(df_tr_filt.pivot_table(index="Tren", columns=df_tr_filt["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0).style.format("{:,.1f}"), use_container_width=True)
-        if not df_tra_filt.empty:
-            st.divider(); st.write("#### Lectura Odómetro Acumulado [km]")
-            st.dataframe(df_tra_filt.pivot_table(index="Tren", columns=df_tra_filt["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0).style.format("{:,.0f}"), use_container_width=True)
+            if not df_tr_filt.empty:
+                st.write("#### Kilometraje Diario [km]")
+                st.dataframe(df_tr_filt.pivot_table(index="Tren", columns=df_tr_filt["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0).style.format("{:,.1f}"), use_container_width=True)
+            if not df_tra_filt.empty:
+                st.divider(); st.write("#### Lectura Odómetro Acumulado [km]")
+                st.dataframe(df_tra_filt.pivot_table(index="Tren", columns=df_tra_filt["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0).style.format("{:,.0f}"), use_container_width=True)
+        else:
+            st.info("Sube los archivos de Kilómetros por Tren.")
 
     with tabs[3]: # SEAT
-        st.write("#### ⚡ Registro Consolidado SEAT")
-        if not df_seat.empty: st.dataframe(df_seat.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "Total [kWh]":"{:,.0f}", "Tracción [kWh]":"{:,.0f}", "12 KV [kWh]":"{:,.0f}", "% Tracción":"{:.2f}%", "% 12 KV":"{:.2f}%"}), use_container_width=True)
+        if not df_seat.empty:
+            st.write("#### ⚡ Registro Consolidado SEAT")
+            st.dataframe(df_seat.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "Total [kWh]":"{:,.0f}", "Tracción [kWh]":"{:,.0f}", "12 KV [kWh]":"{:,.0f}", "% Tracción":"{:.2f}%", "% 12 KV":"{:.2f}%"}), use_container_width=True)
+        else:
+            st.info("Sube el archivo de energía SEAT.")
 
     with tabs[4]: # PRMTE
         if not df_prm_d.empty:
-            st.write("#### 📅 Resumen Diario PRMTE (Distribuido)"); st.dataframe(df_prm_d.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "kWh":"{:,.1f}", "E_Tr":"{:,.1f}", "E_12":"{:,.1f}"}), use_container_width=True)
+            st.write("#### 📅 Resumen Diario PRMTE (Distribuido)"); st.dataframe(df_prm_d.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "E_Total":"{:,.1f}", "E_Tr":"{:,.1f}", "E_12":"{:,.1f}"}), use_container_width=True)
             st.write("#### 🕒 Detalle 15 Minutos"); st.dataframe(df_prm_15.style.format({"kWh":"{:,.2f}"}), use_container_width=True)
+        else:
+            st.info("Sube el archivo de medidas PRMTE.")
 
     with tabs[5]: # FACTURA
         if not df_fact_d.empty:
-            st.write("#### 📅 Resumen Diario Facturación"); st.dataframe(df_fact_d.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "kWh":"{:,.1f}", "E_Tr":"{:,.1f}", "E_12":"{:,.1f}"}), use_container_width=True)
+            st.write("#### 📅 Resumen Diario Facturación"); st.dataframe(df_fact_d.style.format({"Fecha": lambda x: x.strftime('%d/%m/%Y'), "E_Total":"{:,.1f}", "E_Tr":"{:,.1f}", "E_12":"{:,.1f}"}), use_container_width=True)
             st.write("#### 🕒 Detalle Horario"); st.dataframe(df_fact_h.style.format({"kWh":"{:,.2f}"}), use_container_width=True)
+        else:
+            st.info("Sube el archivo de Facturación.")
 
     st.sidebar.download_button("📥 Descargar Excel", to_excel_consolidado(df_ops, df_tr, df_tr_a, df_seat, df_prm_d, df_fact_d), "Reporte_SGE_EFE.xlsx")
 else:
-    st.info("👋 Sube los archivos (UMR, SEAT, PRMTE/Factura) en el panel lateral para comenzar.")
+    st.info("👋 Sube los archivos en el panel lateral para comenzar el análisis.")
