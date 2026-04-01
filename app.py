@@ -142,9 +142,20 @@ if any([all_ops, all_tr, all_seat, all_prmte_15, all_fact_h]):
     if all_ops: df_ops = pd.DataFrame(all_ops).drop_duplicates(subset=['Fecha']).sort_values("Timestamp")
     if all_tr: df_tr = pd.DataFrame(all_tr).sort_values(["Timestamp", "Tren"])
     if all_seat: df_seat = pd.DataFrame(all_seat).drop_duplicates(subset=['Fecha']).sort_values("Timestamp")
+    
+    # PROCESAMIENTO PRMTE (Diario + Cálculo Proporcional SEAT)
     if all_prmte_15:
         df_prm_15 = pd.DataFrame(all_prmte_15).sort_values("Timestamp")
-        df_prm_d = df_prm_15.groupby("Fecha")["Energía PRMTE [kWh]"].sum().reset_index().rename(columns={"Energía PRMTE [kWh]":"Total Diario [kWh]"})
+        df_prm_d = df_prm_15.groupby("Fecha")["Energía PRMTE [kWh]"].sum().reset_index().rename(columns={"Energía PRMTE [kWh]":"Total Diario PRMTE [kWh]"})
+        if not df_seat.empty:
+            df_prm_d['Fecha_dt'] = pd.to_datetime(df_prm_d['Fecha'])
+            df_seat['Fecha_dt'] = pd.to_datetime(df_seat['Fecha'])
+            df_prm_d = pd.merge(df_prm_d, df_seat[["Fecha_dt", "% Tracción", "% 12 KV"]], on="Fecha_dt", how="left")
+            df_prm_d["Energía Tracción PRMTE [kWh]"] = df_prm_d["Total Diario PRMTE [kWh]"] * (df_prm_d["% Tracción"] / 100)
+            df_prm_d["Energía 12kV PRMTE [kWh]"] = df_prm_d["Total Diario PRMTE [kWh]"] * (df_prm_d["% 12 KV"] / 100)
+            df_prm_d = df_prm_d.drop(columns=['Fecha_dt'])
+
+    # PROCESAMIENTO FACTURACIÓN (Diario + Cálculo Proporcional SEAT)
     if all_fact_h:
         df_fact_h = pd.DataFrame(all_fact_h).sort_values("Timestamp")
         df_fact_d = df_fact_h.groupby("Fecha")["Consumo Horario [kWh]"].sum().reset_index().rename(columns={"Consumo Horario [kWh]":"Total Factura [kWh]"})
@@ -154,6 +165,7 @@ if any([all_ops, all_tr, all_seat, all_prmte_15, all_fact_h]):
             df_fact_d = pd.merge(df_fact_d, df_seat[["Fecha_dt", "% Tracción", "% 12 KV"]], on="Fecha_dt", how="left")
             df_fact_d["Energía Tracción Facturación [kWh]"] = df_fact_d["Total Factura [kWh]"] * (df_fact_d["% Tracción"] / 100)
             df_fact_d["Energía 12kV Facturación [kWh]"] = df_fact_d["Total Factura [kWh]"] * (df_fact_d["% 12 KV"] / 100)
+            df_fact_d = df_fact_d.drop(columns=['Fecha_dt'])
 
     tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación"])
     
@@ -178,15 +190,27 @@ if any([all_ops, all_tr, all_seat, all_prmte_15, all_fact_h]):
 
     with tabs[4]:
         if not df_prm_15.empty:
-            st.write("#### 📅 Resumen Diario PRMTE"); st.dataframe(df_prm_d.style.format({"Total Diario [kWh]": "{:,.1f}"}), use_container_width=True)
+            st.write("#### 📅 Resumen Diario PRMTE (Proporcional SEAT)")
+            # Mostramos el desglose diario calculado con los % de la SEAT
+            st.dataframe(df_prm_d.style.format({
+                "Total Diario PRMTE [kWh]": "{:,.1f}",
+                "Energía Tracción PRMTE [kWh]": "{:,.1f}",
+                "Energía 12kV PRMTE [kWh]": "{:,.1f}",
+                "% Tracción": "{:.2f}%",
+                "% 12 KV": "{:.2f}%"
+            }), use_container_width=True)
             st.divider()
             st.write("#### 🕒 Detalle cada 15 Minutos")
-            # FIX: Aplicar formato solo a la columna numérica, no a la fecha (texto)
             st.dataframe(df_prm_15[["Fecha y Hora", "Energía PRMTE [kWh]"]].style.format({"Energía PRMTE [kWh]": "{:,.2f}"}), use_container_width=True)
 
     with tabs[5]:
         if not df_fact_h.empty:
-            st.write("#### 📅 Distribución Proporcional (kWh)"); st.dataframe(df_fact_d[["Fecha", "Total Factura [kWh]", "Energía Tracción Facturación [kWh]", "Energía 12kV Facturación [kWh]"]].style.format({"Total Factura [kWh]":"{:,.1f}", "Energía Tracción Facturación [kWh]":"{:,.1f}", "Energía 12kV Facturación [kWh]":"{:,.1f}"}), use_container_width=True)
+            st.write("#### 📅 Distribución Proporcional Facturación (kWh)"); 
+            st.dataframe(df_fact_d[["Fecha", "Total Factura [kWh]", "Energía Tracción Facturación [kWh]", "Energía 12kV Facturación [kWh]"]].style.format({
+                "Total Factura [kWh]":"{:,.1f}", 
+                "Energía Tracción Facturación [kWh]":"{:,.1f}", 
+                "Energía 12kV Facturación [kWh]":"{:,.1f}"
+            }), use_container_width=True)
             st.divider()
             st.write("#### 🕒 Detalle Horario")
             st.dataframe(df_fact_h[["Fecha y Hora", "Consumo Horario [kWh]"]].style.format({"Consumo Horario [kWh]": "{:,.2f}"}), use_container_width=True)
