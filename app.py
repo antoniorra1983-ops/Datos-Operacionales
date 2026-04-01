@@ -204,8 +204,16 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             if f_jor: mask &= df['Tipo Día'].isin(f_jor)
         return df[mask]
 
-    # --- 6. RENDERIZADO DE PESTAÑAS ---
-    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparación Energía por hr.", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
+    # --- 6. RENDERIZADO DE PESTAÑAS (ESTRUCTURA ACTUALIZADA) ---
+    tabs = st.tabs([
+        "📊 Resumen", 
+        "📑 Datos operacionales", 
+        "📑 Odómetro por Tren", 
+        "⚡ Energía", 
+        "⚖️ Comparación Energía por hr.", 
+        "📈 Regresión Nocturna", 
+        "🚨 Datos Atípicos"
+    ])
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
@@ -256,31 +264,36 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     if f_tren: df_tra_f = df_tra_f[df_tra_f['Tren'].isin(f_tren)]
                     st.divider(); st.write("### 📈 Lectura de Odómetro / Acumulado [km]"); st.dataframe(df_tra_f.pivot_table(index="Tren", columns=df_tra_f["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0).style.format("{:,.0f}"), use_container_width=True)
 
-    with tabs[3]: # SEAT
-        if not df_seat.empty:
-            st.write("#### Filtros Energía")
-            df_seat_f = get_filtros(df_seat, "seat")
-            st.dataframe(df_seat_f.style.format({"Total [kWh]":"{:,.0f}", "Tracción [kWh]":"{:,.0f}", "12 KV [kWh]":"{:,.0f}", "% Tracción":"{:.2f}%", "% 12 KV":"{:.2f}%"}), use_container_width=True)
+    # --- NUEVA ESTRUCTURA: PESTAÑA PRINCIPAL "ENERGÍA" CON SUB-PESTAÑAS ---
+    with tabs[3]: 
+        st.write("#### ⚡ Módulo de Facturación y Medición de Energía")
+        subtabs_energia = st.tabs(["⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación"])
+        
+        with subtabs_energia[0]: # Antiguo SEAT
+            if not df_seat.empty:
+                st.write("#### Filtros Energía")
+                df_seat_f = get_filtros(df_seat, "seat")
+                st.dataframe(df_seat_f.style.format({"Total [kWh]":"{:,.0f}", "Tracción [kWh]":"{:,.0f}", "12 KV [kWh]":"{:,.0f}", "% Tracción":"{:.2f}%", "% 12 KV":"{:.2f}%"}), use_container_width=True)
 
-    with tabs[4]: # PRMTE
-        if not df_p_d.empty:
-            st.write("#### 📅 Resumen Diario PRMTE"); df_prm_f = get_filtros(df_p_d, "prm")
-            fmt_dict = {"Energía PRMTE [kWh]":"{:,.1f}"}
-            for col in ["E_Tr", "E_12"]:
-                if col in df_prm_f.columns: fmt_dict[col] = "{:,.1f}"
-            st.dataframe(df_prm_f.style.format(fmt_dict), use_container_width=True)
-            st.write("#### 🕒 Detalle 15 Minutos"); st.dataframe(pd.DataFrame(all_prmte_15).style.format({"Energía PRMTE [kWh]":"{:,.2f}"}), use_container_width=True)
+        with subtabs_energia[1]: # Antiguo PRMTE
+            if not df_p_d.empty:
+                st.write("#### 📅 Resumen Diario PRMTE"); df_prm_f = get_filtros(df_p_d, "prm")
+                fmt_dict = {"Energía PRMTE [kWh]":"{:,.1f}"}
+                for col in ["E_Tr", "E_12"]:
+                    if col in df_prm_f.columns: fmt_dict[col] = "{:,.1f}"
+                st.dataframe(df_prm_f.style.format(fmt_dict), use_container_width=True)
+                st.write("#### 🕒 Detalle 15 Minutos"); st.dataframe(pd.DataFrame(all_prmte_15).style.format({"Energía PRMTE [kWh]":"{:,.2f}"}), use_container_width=True)
 
-    with tabs[5]: # FACTURA
-        if not df_f_d.empty:
-            st.write("#### 📅 Resumen Diario Facturación"); df_fact_f = get_filtros(df_f_d, "fact")
-            fmt_dict = {"Consumo Horario [kWh]":"{:,.1f}"}
-            for col in ["E_Tr", "E_12"]:
-                if col in df_fact_f.columns: fmt_dict[col] = "{:,.1f}"
-            st.dataframe(df_fact_f.style.format(fmt_dict), use_container_width=True)
-            st.write("#### 🕒 Detalle Horario"); st.dataframe(pd.DataFrame(all_fact_h).style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
+        with subtabs_energia[2]: # Antigua Facturación
+            if not df_f_d.empty:
+                st.write("#### 📅 Resumen Diario Facturación"); df_fact_f = get_filtros(df_f_d, "fact")
+                fmt_dict = {"Consumo Horario [kWh]":"{:,.1f}"}
+                for col in ["E_Tr", "E_12"]:
+                    if col in df_fact_f.columns: fmt_dict[col] = "{:,.1f}"
+                st.dataframe(df_fact_f.style.format(fmt_dict), use_container_width=True)
+                st.write("#### 🕒 Detalle Horario"); st.dataframe(pd.DataFrame(all_fact_h).style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
 
-    with tabs[6]: # Comparación por hr.
+    with tabs[4]: # Comparación por hr.
         if all_comp_full:
             df_comp = pd.DataFrame(all_comp_full).groupby(['Fecha', 'Hora', 'Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
             fechas_con_factura = df_comp[df_comp['Fuente'] == 'Factura']['Fecha'].unique()
@@ -313,7 +326,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
     df_outliers_global = pd.DataFrame()
     df_normal_global = pd.DataFrame()
 
-    with tabs[7]: # REGRESIÓN NOCTURNA
+    with tabs[5]: # REGRESIÓN NOCTURNA
         st.write("#### 📈 Regresión Lineal del Consumo Basal (00:00 - 05:00 hrs)")
         st.info("💡 Análisis de tendencia limpio: El sistema excluye automáticamente los datos anómalos (outliers) utilizando el Método del Rango Intercuartílico (IQR).")
         
@@ -329,11 +342,9 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             
             c1, c2, c3 = st.columns(3)
             f_reg_anio = c1.selectbox("Año", sorted(df_reg['Año'].unique()), index=len(df_reg['Año'].unique())-1)
-            # --- AJUSTE: Selector de Jornada ahora incluye 'Total' ---
             f_reg_jor = c2.selectbox("Tipo de Jornada", ['Total', 'L', 'S', 'D/F'])
             f_reg_hora = c3.selectbox("Hora específica", range(6))
             
-            # --- AJUSTE: Lógica de filtrado dinámico ---
             if f_reg_jor == 'Total':
                 df_plot = df_reg[(df_reg['Año'] == f_reg_anio) & (df_reg['Hora'] == f_reg_hora)].sort_values('Fecha')
             else:
@@ -373,7 +384,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     
                     with c2:
                         st.metric("Consumo Total Acumulado", f"{total_consumo:,.2f} kWh", help="Suma de la energía en esta hora para el período filtrado (sin outliers)")
-                        # --- AJUSTE: Nomenclatura "por hora" en vez de "por día" ---
                         st.metric("Pendiente (m)", f"{m:.4f}", help="Incremento/decremento de kWh por hora")
                         st.metric("Consumo Inicial (n)", f"{n:.2f} kWh")
                         st.metric("Coeficiente R²", f"{r_squared:.4f}")
@@ -391,7 +401,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         tendencia_txt = "estable (fluctuaciones menores propias de la operación base)"
                         icono_tendencia = "➖"
                         
-                    # --- AJUSTE: Nomenclatura "instalaciones" en vez de "maestranza" ---
                     if r_squared < 0.3:
                         confianza_txt = "aleatorio y sin una tendencia cronológica fuerte. **Esto es completamente normal para un consumo basal de baja tensión/12kV**, ya que indica que la energía responde a eventos puntuales (clima, mantenimientos en instalaciones) y no a una degradación sistemática de la red a través del tiempo."
                     elif r_squared < 0.7:
@@ -417,12 +426,23 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         else:
             st.warning("Sube archivos de energía para procesar la regresión.")
 
-    with tabs[8]: # DATOS ATÍPICOS
+    with tabs[6]: # DATOS ATÍPICOS
         st.write("#### 🚨 Registro de Datos Atípicos (Outliers)")
         st.info("💡 Aquí se muestran los registros que fueron excluidos automáticamente de la **Regresión Nocturna** mediante el método matemático del Rango Intercuartílico (IQR).")
         
         if not df_outliers_global.empty:
             st.error(f"Se detectaron **{len(df_outliers_global)}** registros anómalos para el filtro seleccionado.")
+            
+            # --- NUEVO: BOTÓN DE EXPORTACIÓN EXCLUSIVO PARA MANTENIMIENTO ---
+            csv = df_outliers_global.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Descargar Anomalías para Mantenimiento (CSV)",
+                data=csv,
+                file_name="Anomalias_Energia_Instalaciones.csv",
+                mime="text/csv",
+                help="Descarga este listado en formato CSV para gestionar las revisiones con el equipo de mantenimiento de maestranza e instalaciones."
+            )
+            
             st.dataframe(
                 df_outliers_global[['Fecha', 'Hora', 'Consumo Horario [kWh]', 'Fuente', 'Tipo Día']].style.format({
                     "Fecha": lambda x: x.strftime('%d/%m/%Y'),
@@ -443,6 +463,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             else:
                 st.write("Selecciona parámetros en la pestaña 'Regresión Nocturna' para evaluar anomalías.")
 
-    st.sidebar.download_button("📥 Descargar Reporte", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
+    st.sidebar.download_button("📥 Descargar Reporte Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
     st.info("👋 Sube los archivos en el panel lateral para comenzar el análisis.")
