@@ -142,15 +142,12 @@ for f in todos:
                     df_prm_d = pd.read_excel(f, sheet_name=sn, header=h_idx)
                     df_prm_d['Timestamp'] = pd.to_datetime(df_prm_d[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'})) + pd.to_timedelta(df_prm_d['INICIO INTERVALO'].astype(int), unit='m')
                     
-                    # Suma dinámica de columnas "Retiro_Energia_Activa"
                     cols_energia = [c for c in df_prm_d.columns if 'Retiro_Energia_Activa (kWhD)' in str(c)]
                     
-                    # Iteramos sin filtro para cargar la memoria histórica
                     for _, r in df_prm_d.iterrows():
                         ts = r['Timestamp']
                         suma_prmte = sum([parse_latam_number(r[col]) for col in cols_energia])
                         
-                        # 1. Guardar en memoria de comparación anual
                         all_comp_full.append({
                             "Fecha": ts.normalize(),
                             "Hora": ts.hour,
@@ -158,7 +155,6 @@ for f in todos:
                             "Fuente": "PRMTE"
                         })
                         
-                        # 2. Guardar en memoria de pestañas principales si entra en el calendario
                         if start_date <= ts.date() <= end_date:
                             all_prmte_15.append({"Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), "Fecha": ts.normalize(), "Energía PRMTE [kWh]": suma_prmte})
 
@@ -166,12 +162,10 @@ for f in todos:
                 df_f = pd.read_excel(f, sheet_name=sn); df_f.columns = ['FechaHora', 'Valor']
                 df_f['Timestamp'] = pd.to_datetime(df_f['FechaHora'], errors='coerce')
                 
-                # Iteramos sin filtro para cargar la memoria histórica
                 for _, r in df_f.dropna(subset=['Timestamp']).iterrows():
                     ts = r['Timestamp']
                     val = abs(parse_latam_number(r['Valor']))
                     
-                    # 1. Guardar en memoria de comparación anual
                     all_comp_full.append({
                         "Fecha": ts.normalize(),
                         "Hora": ts.hour,
@@ -179,7 +173,6 @@ for f in todos:
                         "Fuente": "Factura"
                     })
                     
-                    # 2. Guardar en memoria de pestañas principales si entra en el calendario
                     if start_date <= ts.date() <= end_date:
                         all_fact_h.append({"Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), "Fecha": ts.normalize(), "Consumo Horario [kWh]": val})
     except: continue
@@ -194,7 +187,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
     if all_tr_acum: df_tr_acum = pd.DataFrame(all_tr_acum).sort_values(["Fecha", "Tren"])
     if all_seat: df_seat = pd.DataFrame(all_seat).drop_duplicates(subset=['Fecha']).sort_values("Fecha")
     
-    # Lógica de Jerarquía de Energía
     if not df_seat.empty:
         df_energy_master = df_seat[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].copy().rename(columns={"Total [kWh]":"E_Total", "Tracción [kWh]":"E_Tr", "12 KV [kWh]":"E_12"})
         df_energy_master["Fuente"] = "SEAT"
@@ -402,37 +394,44 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             else:
                 st.warning("Selecciona al menos una fecha para generar la matriz comparativa.")
                 
-            # --- NUEVA SECCIÓN: TABLA INDEPENDIENTE (MEDIANA, TOTAL POR JORNADA Y AÑO) ---
+            # --- NUEVA SECCIÓN: TABLA INDEPENDIENTE ESTADÍSTICA (SOLO MEDIANAS) ---
             st.divider()
-            st.write("#### 📊 Análisis Estadístico: 2025 vs 2026 por Jornada")
-            st.info("💡 Tabla independiente con la Mediana y el Total de consumo por cada hora, separado por año y tipo de día (L: Laboral, S: Sábado, D/F: Domingo/Festivo).")
+            st.write("#### 📊 Análisis Estadístico: Mediana de Consumo 2025 vs 2026")
+            st.info("💡 Se muestra el consumo típico (Mediana Total) junto al desglose por tipo de jornada, excluyendo distorsiones por suma directa.")
             
-            # Extraer el Año y el Tipo de Día usando la función que ya existe
+            # Extraer el Año y el Tipo de Día
             df_comp_final['Año'] = df_comp_final['Fecha'].dt.year
             df_comp_final['Tipo Día'] = df_comp_final['Fecha'].apply(get_tipo_dia)
             
             # Filtrar solo 2025 y 2026
-            df_stats = df_comp_final[df_comp_final['Año'].isin([2025, 2026])]
+            df_stats = df_comp_final[df_comp_final['Año'].isin([2025, 2026])].copy()
             
             if not df_stats.empty:
-                # Asegurar un orden lógico en el Tipo de Día (Lunes a Viernes, Sábado, Domingo/Festivo)
                 df_stats['Tipo Día'] = pd.Categorical(df_stats['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
                 
-                # Crear la tabla pivote agrupando Hora vs (Año, Tipo Día), calculando Mediana y Suma
-                pivot_stats = df_stats.pivot_table(
-                    index="Hora", 
-                    columns=["Año", "Tipo Día"], 
-                    values="Consumo Horario [kWh]", 
-                    aggfunc=['median', 'sum']
-                ).fillna(0)
+                # 1. Mediana por Jornada
+                pivot_jor = df_stats.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=False).fillna(0)
                 
-                # Renombramos para mejor legibilidad
-                pivot_stats = pivot_stats.rename(columns={'median': 'Mediana [kWh]', 'sum': 'Total [kWh]'})
+                # 2. Mediana Total (General, combinando todos los días del año)
+                pivot_tot = df_stats.pivot_table(index="Hora", columns=["Año"], values="Consumo Horario [kWh]", aggfunc='median').fillna(0)
                 
-                # Asegurar siempre que se vean de 0 a 23 horas, incluso si falta algún dato
-                pivot_stats = pivot_stats.reindex(range(24)).fillna(0)
+                # Ensamblar tabla con columnas ordenadas (Mediana Total, L, S, D/F) por cada año
+                frames = []
+                for anio in sorted(df_stats['Año'].unique()):
+                    temp = pd.DataFrame(index=range(24))
+                    # Columna Total
+                    temp[f"{anio} - Mediana Total"] = pivot_tot.get(anio, pd.Series(0, index=range(24)))
+                    # Columnas Desglosadas
+                    for jor in ['L', 'S', 'D/F']:
+                        if (anio, jor) in pivot_jor.columns:
+                            temp[f"{anio} - Mediana {jor}"] = pivot_jor[(anio, jor)]
+                        else:
+                            temp[f"{anio} - Mediana {jor}"] = 0
+                    frames.append(temp)
                 
-                st.dataframe(pivot_stats.style.format("{:,.1f}"), use_container_width=True)
+                final_stats = pd.concat(frames, axis=1).fillna(0)
+                
+                st.dataframe(final_stats.style.format("{:,.1f}"), use_container_width=True)
             else:
                 st.warning("No se encontraron datos históricos de 2025 o 2026 para generar la estadística anual.")
 
