@@ -50,7 +50,7 @@ def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_prm_d, df_prm_15
 # --- 3. CARGA Y FILTROS ---
 with st.sidebar:
     st.header("📅 Filtro Global")
-    # Selector de calendario tipo rango (Corrección de fecha por defecto)
+    # Selector de calendario tipo rango
     today = date.today()
     if today.day == 1:
         start_of_month = today.replace(month=today.month-1 if today.month > 1 else 12, year=today.year if today.month > 1 else today.year-1, day=1)
@@ -72,7 +72,7 @@ with st.sidebar:
 
 # --- 4. MOTOR DE DATOS ---
 all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h = [], [], [], [], [], []
-all_fact_h_full = [] # Memoria paralela para la nueva pestaña comparativa
+all_comp_full = [] # Memoria paralela unificada para la pestaña de Comparación por hora
 
 todos = (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
 
@@ -141,32 +141,47 @@ for f in todos:
                 if h_idx is not None:
                     df_prm_d = pd.read_excel(f, sheet_name=sn, header=h_idx)
                     df_prm_d['Timestamp'] = pd.to_datetime(df_prm_d[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'})) + pd.to_timedelta(df_prm_d['INICIO INTERVALO'].astype(int), unit='m')
-                    mask_p = (df_prm_d['Timestamp'].dt.date >= start_date) & (df_prm_d['Timestamp'].dt.date <= end_date)
+                    
+                    # Suma dinámica de columnas "Retiro_Energia_Activa"
                     cols_energia = [c for c in df_prm_d.columns if 'Retiro_Energia_Activa (kWhD)' in str(c)]
-                    for _, r in df_prm_d[mask_p].iterrows():
+                    
+                    # Iteramos sin filtro para cargar la memoria histórica
+                    for _, r in df_prm_d.iterrows():
+                        ts = r['Timestamp']
                         suma_prmte = sum([parse_latam_number(r[col]) for col in cols_energia])
-                        all_prmte_15.append({"Fecha y Hora": r['Timestamp'].strftime('%d/%m/%Y %H:%M'), "Fecha": r['Timestamp'].normalize(), "Energía PRMTE [kWh]": suma_prmte})
+                        
+                        # 1. Guardar en memoria de comparación anual
+                        all_comp_full.append({
+                            "Fecha": ts.normalize(),
+                            "Hora": ts.hour,
+                            "Consumo Horario [kWh]": suma_prmte,
+                            "Fuente": "PRMTE"
+                        })
+                        
+                        # 2. Guardar en memoria de pestañas principales si entra en el calendario
+                        if start_date <= ts.date() <= end_date:
+                            all_prmte_15.append({"Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), "Fecha": ts.normalize(), "Energía PRMTE [kWh]": suma_prmte})
 
             if any(k in sn_up for k in ['FACTURA', 'CONSUMO']):
                 df_f = pd.read_excel(f, sheet_name=sn); df_f.columns = ['FechaHora', 'Valor']
                 df_f['Timestamp'] = pd.to_datetime(df_f['FechaHora'], errors='coerce')
                 
+                # Iteramos sin filtro para cargar la memoria histórica
                 for _, r in df_f.dropna(subset=['Timestamp']).iterrows():
                     ts = r['Timestamp']
                     val = abs(parse_latam_number(r['Valor']))
-                    data_dict = {
-                        "Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), 
-                        "Fecha": ts.normalize(), 
+                    
+                    # 1. Guardar en memoria de comparación anual
+                    all_comp_full.append({
+                        "Fecha": ts.normalize(),
+                        "Hora": ts.hour,
                         "Consumo Horario [kWh]": val,
-                        "Hora": ts.hour
-                    }
+                        "Fuente": "Factura"
+                    })
                     
-                    # 1. Memoria paralela completa para comparar
-                    all_fact_h_full.append(data_dict)
-                    
-                    # 2. Memoria normal afectada por calendario global
+                    # 2. Guardar en memoria de pestañas principales si entra en el calendario
                     if start_date <= ts.date() <= end_date:
-                        all_fact_h.append(data_dict)
+                        all_fact_h.append({"Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), "Fecha": ts.normalize(), "Consumo Horario [kWh]": val})
     except: continue
 
 # --- 5. JERARQUÍA Y PRE-FILTRADO ---
@@ -227,7 +242,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         return df[mask]
 
     # --- 6. RENDERIZADO DE PESTAÑAS ---
-    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparativo Anual"])
+    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparación Energía por hr."])
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
@@ -333,18 +348,28 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.write("#### 🕒 Detalle Horario")
             st.dataframe(pd.DataFrame(all_fact_h).style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
 
-    with tabs[6]: # COMPARATIVO ANUAL DE FACTURACIÓN (TABLA EXACTA SOLICITADA)
+    with tabs[6]: # COMPARACIÓN ENERGÍA POR HR. (NUEVA PESTAÑA)
         st.write("#### ⚖️ Matriz Comparativa por Fechas Específicas")
-        st.info("💡 Selecciona fechas puntuales de distintos años o meses para comparar su consumo horario lado a lado.")
+        st.info("💡 Esta pestaña jerarquiza automáticamente: Utiliza los datos de Factura si existen para la fecha seleccionada; si no, usa el consolidado por hora del PRMTE.")
         
-        if all_fact_h_full:
-            df_comp = pd.DataFrame(all_fact_h_full)
-            # Damos formato a la fecha para que se vea como xx/xx/xx (ej: 14/03/26)
-            df_comp['Fecha_str'] = df_comp['Fecha'].dt.strftime('%d/%m/%y')
+        if all_comp_full:
+            # 1. Creamos el DataFrame histórico general
+            df_comp = pd.DataFrame(all_comp_full)
             
-            fechas_disp = sorted(df_comp['Fecha'].dt.date.unique())
+            # 2. Agrupamos por Fecha, Hora y Fuente para sumar bloques de 15 min (si es PRMTE) a 1 hora
+            df_comp = df_comp.groupby(['Fecha', 'Hora', 'Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
             
-            # Selector de fechas individuales
+            # 3. Jerarquía (Factura manda sobre PRMTE por día)
+            fechas_con_factura = df_comp[df_comp['Fuente'] == 'Factura']['Fecha'].unique()
+            # Si para un día hay Factura, descartamos cualquier dato de PRMTE de ese mismo día
+            mask_descarta_prmte = (df_comp['Fuente'] == 'PRMTE') & (df_comp['Fecha'].isin(fechas_con_factura))
+            df_comp_final = df_comp[~mask_descarta_prmte].copy()
+            
+            # Formatear la fecha como solicitaste: xx/xx/xx
+            df_comp_final['Fecha_str'] = df_comp_final['Fecha'].dt.strftime('%d/%m/%y')
+            fechas_disp = sorted(df_comp_final['Fecha'].dt.date.unique())
+            
+            # Selector múltiple de fechas a comparar
             f_comp_fechas = st.multiselect(
                 "Selecciona las fechas a comparar (xx/xx/xx):", 
                 fechas_disp, 
@@ -353,9 +378,9 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             )
             
             if f_comp_fechas:
-                df_comp_f = df_comp[df_comp['Fecha'].dt.date.isin(f_comp_fechas)]
+                df_comp_f = df_comp_final[df_comp_final['Fecha'].dt.date.isin(f_comp_fechas)]
                 
-                # Pivotando para que "Hora" sea el índice y "Fecha_str" sean las columnas
+                # 4. Tabla Pivote exacta de la imagen (Filas: Horas 0-23, Columnas: xx/xx/xx)
                 pivot_compare = df_comp_f.pivot_table(
                     index="Hora", 
                     columns="Fecha_str", 
@@ -363,10 +388,10 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     aggfunc='sum'
                 ).fillna(0)
                 
-                # Aseguramos que la tabla contenga las 24 horas exactas como en tu imagen
+                # Rellenar con ceros las horas faltantes para siempre mostrar de 0 a 23
                 pivot_compare = pivot_compare.reindex(range(24)).fillna(0)
                 
-                # Ordenamos las columnas cronológicamente de izquierda a derecha
+                # Ordenar columnas de fechas cronológicamente de izquierda a derecha
                 cols_ordenadas = sorted(pivot_compare.columns, key=lambda x: datetime.strptime(x, '%d/%m/%y'))
                 pivot_compare = pivot_compare[cols_ordenadas]
                 
@@ -378,7 +403,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             else:
                 st.warning("Selecciona al menos una fecha para generar la matriz comparativa.")
         else:
-            st.warning("Sube archivos de Facturación para habilitar esta comparativa.")
+            st.warning("Sube archivos de Facturación o PRMTE para habilitar esta comparativa.")
 
     st.sidebar.download_button("📥 Descargar Reporte", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
