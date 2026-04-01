@@ -50,6 +50,7 @@ def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_prm_d, df_prm_15
 # --- 3. CARGA Y FILTROS ---
 with st.sidebar:
     st.header("📅 Filtro Global")
+    # Selector de calendario tipo rango (Corrección de fecha por defecto)
     today = date.today()
     if today.day == 1:
         start_of_month = today.replace(month=today.month-1 if today.month > 1 else 12, year=today.year if today.month > 1 else today.year-1, day=1)
@@ -157,15 +158,13 @@ for f in todos:
                         "Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), 
                         "Fecha": ts.normalize(), 
                         "Consumo Horario [kWh]": val,
-                        "Hora": ts.hour,
-                        "Mes": ts.month,
-                        "Año": ts.year
+                        "Hora": ts.hour
                     }
                     
-                    # 1. Guardamos en la memoria paralela (sin filtro de fecha)
+                    # 1. Memoria paralela completa para comparar
                     all_fact_h_full.append(data_dict)
                     
-                    # 2. Guardamos en la memoria principal (con filtro del sidebar)
+                    # 2. Memoria normal afectada por calendario global
                     if start_date <= ts.date() <= end_date:
                         all_fact_h.append(data_dict)
     except: continue
@@ -228,7 +227,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         return df[mask]
 
     # --- 6. RENDERIZADO DE PESTAÑAS ---
-    # Añadimos la pestaña número 7: Comparativo Anual
     tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparativo Anual"])
     
     with tabs[0]: # Resumen
@@ -335,37 +333,52 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.write("#### 🕒 Detalle Horario")
             st.dataframe(pd.DataFrame(all_fact_h).style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
 
-    with tabs[6]: # COMPARATIVO ANUAL DE FACTURACIÓN (NUEVA PESTAÑA)
-        st.write("#### ⚖️ Análisis Comparativo Interanual de Facturación")
-        st.info("💡 Esta pestaña usa el historial completo de los archivos de facturación subidos, ignorando el calendario global, para permitir la comparación entre diferentes años.")
+    with tabs[6]: # COMPARATIVO ANUAL DE FACTURACIÓN (TABLA EXACTA SOLICITADA)
+        st.write("#### ⚖️ Matriz Comparativa por Fechas Específicas")
+        st.info("💡 Selecciona fechas puntuales de distintos años o meses para comparar su consumo horario lado a lado.")
         
         if all_fact_h_full:
             df_comp = pd.DataFrame(all_fact_h_full)
+            # Damos formato a la fecha para que se vea como xx/xx/xx (ej: 14/03/26)
+            df_comp['Fecha_str'] = df_comp['Fecha'].dt.strftime('%d/%m/%y')
             
-            c1, c2 = st.columns(2)
-            anios_disp = sorted(df_comp['Año'].unique().tolist())
-            meses_disp = sorted(df_comp['Mes'].unique().tolist())
+            fechas_disp = sorted(df_comp['Fecha'].dt.date.unique())
             
-            f_comp_anos = c1.multiselect("Años a comparar:", anios_disp, default=anios_disp, key="comp_a")
-            f_comp_meses = c2.multiselect("Meses a incluir:", meses_disp, default=meses_disp, key="comp_m")
+            # Selector de fechas individuales
+            f_comp_fechas = st.multiselect(
+                "Selecciona las fechas a comparar (xx/xx/xx):", 
+                fechas_disp, 
+                default=fechas_disp[:min(5, len(fechas_disp))], 
+                key="comp_f"
+            )
             
-            df_comp_f = df_comp[(df_comp['Año'].isin(f_comp_anos)) & (df_comp['Mes'].isin(f_comp_meses))]
-            
-            if not df_comp_f.empty:
-                st.write("#### 📉 Curva de Carga: Promedio por Hora [kWh]")
-                # Promedio por hora para ver el perfil de consumo típico a cada hora del día
-                pivot_mean = df_comp_f.pivot_table(index="Hora", columns="Año", values="Consumo Horario [kWh]", aggfunc='mean').fillna(0)
-                st.line_chart(pivot_mean)
-                st.dataframe(pivot_mean.style.format("{:,.1f}"), use_container_width=True)
+            if f_comp_fechas:
+                df_comp_f = df_comp[df_comp['Fecha'].dt.date.isin(f_comp_fechas)]
                 
-                st.write("#### 🔋 Consumo Total Acumulado por Hora [kWh]")
-                # Suma bruta de consumo por cada hora
-                pivot_sum = df_comp_f.pivot_table(index="Hora", columns="Año", values="Consumo Horario [kWh]", aggfunc='sum').fillna(0)
-                st.dataframe(pivot_sum.style.format("{:,.0f}"), use_container_width=True)
+                # Pivotando para que "Hora" sea el índice y "Fecha_str" sean las columnas
+                pivot_compare = df_comp_f.pivot_table(
+                    index="Hora", 
+                    columns="Fecha_str", 
+                    values="Consumo Horario [kWh]", 
+                    aggfunc='sum'
+                ).fillna(0)
+                
+                # Aseguramos que la tabla contenga las 24 horas exactas como en tu imagen
+                pivot_compare = pivot_compare.reindex(range(24)).fillna(0)
+                
+                # Ordenamos las columnas cronológicamente de izquierda a derecha
+                cols_ordenadas = sorted(pivot_compare.columns, key=lambda x: datetime.strptime(x, '%d/%m/%y'))
+                pivot_compare = pivot_compare[cols_ordenadas]
+                
+                st.write("#### 📋 Detalle de Consumo por Hora [kWh]")
+                st.dataframe(pivot_compare.style.format("{:,.1f}"), use_container_width=True)
+                
+                st.write("#### 📉 Curva de Carga Horaria")
+                st.line_chart(pivot_compare)
             else:
-                st.warning("No hay datos para la combinación de años y meses seleccionada.")
+                st.warning("Selecciona al menos una fecha para generar la matriz comparativa.")
         else:
-            st.warning("Sube archivos de Facturación con historial para habilitar esta comparativa.")
+            st.warning("Sube archivos de Facturación para habilitar esta comparativa.")
 
     st.sidebar.download_button("📥 Descargar Reporte", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
