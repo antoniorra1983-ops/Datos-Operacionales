@@ -205,7 +205,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         return df[mask]
 
     # --- 6. RENDERIZADO DE PESTAÑAS ---
-    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparación Energía por hr.", "📈 Regresión Nocturna (0-5 hrs)"])
+    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparación Energía por hr.", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
@@ -309,15 +309,17 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     frames.append(temp)
                 st.dataframe(pd.concat(frames, axis=1).fillna(0).style.format("{:,.1f}"), use_container_width=True)
 
-    with tabs[7]: # NUEVA PESTAÑA: REGRESIÓN NOCTURNA
+    # --- VARIABLES GLOBALES PARA OUTLIERS ---
+    df_outliers_global = pd.DataFrame()
+    df_normal_global = pd.DataFrame()
+
+    with tabs[7]: # REGRESIÓN NOCTURNA
         st.write("#### 📈 Regresión Lineal del Consumo Basal (00:00 - 05:00 hrs)")
-        st.info("💡 Análisis de tendencia para detectar desviaciones en el consumo inactivo por tipo de jornada y año.")
+        st.info("💡 Análisis de tendencia limpio: El sistema excluye automáticamente los datos anómalos (outliers) para no distorsionar la ecuación.")
         
         if all_comp_full:
-            # 1. Preparar datos históricos (0-5 hrs)
             df_reg = pd.DataFrame(all_comp_full)
             df_reg = df_reg.groupby(['Fecha', 'Hora', 'Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
-            # Jerarquía
             fechas_f = df_reg[df_reg['Fuente'] == 'Factura']['Fecha'].unique()
             df_reg = df_reg[~((df_reg['Fuente'] == 'PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
             
@@ -330,38 +332,95 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             f_reg_jor = c2.selectbox("Tipo de Jornada", ['L', 'S', 'D/F'])
             f_reg_hora = c3.selectbox("Hora específica", range(6))
             
-            # 2. Filtrar para regresión
             df_plot = df_reg[(df_reg['Año'] == f_reg_anio) & (df_reg['Tipo Día'] == f_reg_jor) & (df_reg['Hora'] == f_reg_hora)].sort_values('Fecha')
             
             if len(df_plot) > 1:
-                # Eje X: Número de día en la serie
-                x = np.arange(len(df_plot))
-                y = df_plot['Consumo Horario [kWh]'].values
+                # --- DETECCIÓN DE OUTLIERS (Z-SCORE a 2 Desviaciones) ---
+                promedio = df_plot['Consumo Horario [kWh]'].mean()
+                desviacion = df_plot['Consumo Horario [kWh]'].std()
                 
-                # Cálculo Regresión y R^2
-                m, n = np.polyfit(x, y, 1)
-                y_pred = m * x + n
-                r_squared = 1 - (np.sum((y - y_pred)**2) / np.sum((y - np.mean(y))**2))
+                if pd.isna(desviacion) or desviacion == 0:
+                    df_normal = df_plot.copy()
+                    df_outliers = pd.DataFrame()
+                else:
+                    limite_superior = promedio + (2 * desviacion)
+                    limite_inferior = promedio - (2 * desviacion)
+                    
+                    df_normal = df_plot[(df_plot['Consumo Horario [kWh]'] >= limite_inferior) & (df_plot['Consumo Horario [kWh]'] <= limite_superior)].copy()
+                    df_outliers = df_plot[(df_plot['Consumo Horario [kWh]'] < limite_inferior) | (df_plot['Consumo Horario [kWh]'] > limite_superior)].copy()
                 
-                # Visualización
-                c1, c2 = st.columns([2, 1])
-                chart_data = pd.DataFrame({'Días': df_plot['Fecha'].dt.strftime('%d/%m'), 'Consumo Real': y, 'Tendencia': y_pred}).set_index('Días')
-                c1.line_chart(chart_data)
+                # Guardamos los outliers para la pestaña 8
+                df_outliers_global = df_outliers
+                df_normal_global = df_normal
                 
-                with c2:
-                    st.metric("Pendiente (m)", f"{m:.4f}", help="Incremento/decremento de kWh por día")
-                    st.metric("Consumo Inicial (n)", f"{n:.2f} kWh")
-                    st.metric("Coeficiente R²", f"{r_squared:.4f}")
-                    if r_squared > 0.7: st.success("Modelo Confiable")
-                    elif r_squared > 0.4: st.warning("Variabilidad Moderada")
-                    else: st.error("Alta Variabilidad / Poco Predecible")
-                
-                st.write(f"**Ecuación del Desempeño:** $Consumo = {m:.4f} \cdot x + {n:.2f}$")
-                st.dataframe(df_plot[['Fecha', 'Consumo Horario [kWh]']].style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
+                if len(df_normal) > 1:
+                    x = np.arange(len(df_normal))
+                    y = df_normal['Consumo Horario [kWh]'].values
+                    
+                    m, n = np.polyfit(x, y, 1)
+                    y_pred = m * x + n
+                    r_squared = 1 - (np.sum((y - y_pred)**2) / np.sum((y - np.mean(y))**2))
+                    
+                    c1, c2 = st.columns([2, 1])
+                    chart_data = pd.DataFrame({'Días': df_normal['Fecha'].dt.strftime('%d/%m'), 'Consumo Real (Limpio)': y, 'Tendencia': y_pred}).set_index('Días')
+                    c1.line_chart(chart_data)
+                    
+                    with c2:
+                        st.metric("Pendiente (m)", f"{m:.4f}", help="Incremento/decremento de kWh por día")
+                        st.metric("Consumo Inicial (n)", f"{n:.2f} kWh")
+                        st.metric("Coeficiente R²", f"{r_squared:.4f}")
+                        if r_squared > 0.7: st.success("Modelo Confiable")
+                        elif r_squared > 0.4: st.warning("Variabilidad Moderada")
+                        else: st.error("Alta Variabilidad / Poco Predecible")
+                        
+                        if not df_outliers.empty:
+                            st.error(f"⚠️ {len(df_outliers)} datos excluidos. Ver pestaña 'Datos Atípicos'.")
+                    
+                    st.write(f"**Ecuación del Desempeño:** $Consumo = {m:.4f} \cdot x + {n:.2f}$")
+                    st.info(f"""
+                    **💡 Cómo interpretar esta ecuación:**
+                    * **$x$** = Es el número del día secuencial (El primer día del gráfico es $x=0$).
+                    * **Tendencia:** Actualmente el consumo basal cambia a un ritmo de **{m:.4f} kWh** por cada día que pasa.
+                    * **Consumo Base:** El consumo inicial estimado al inicio de este período fue de **{n:.2f} kWh**.
+                    """)
+                    
+                    st.dataframe(df_normal[['Fecha', 'Consumo Horario [kWh]']].style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
+                else:
+                    st.warning("Al excluir los datos atípicos, no quedaron suficientes registros para trazar la regresión.")
             else:
                 st.warning("No hay suficientes datos para calcular la regresión en la selección actual.")
         else:
             st.warning("Sube archivos de energía para procesar la regresión.")
+
+    with tabs[8]: # NUEVA PESTAÑA: DATOS ATÍPICOS
+        st.write("#### 🚨 Registro de Datos Atípicos (Outliers)")
+        st.info("💡 Aquí se muestran los registros que fueron excluidos automáticamente de la **Regresión Nocturna** por superar estadísticamente el margen de 2 desviaciones estándar.")
+        
+        if not df_outliers_global.empty:
+            st.error(f"Se detectaron **{len(df_outliers_global)}** registros anómalos para el filtro seleccionado.")
+            
+            # Mostramos la tabla con los datos atípicos
+            st.dataframe(
+                df_outliers_global[['Fecha', 'Hora', 'Consumo Horario [kWh]', 'Fuente', 'Tipo Día']].style.format({
+                    "Fecha": lambda x: x.strftime('%d/%m/%Y'),
+                    "Consumo Horario [kWh]": "{:,.2f}"
+                }), 
+                use_container_width=True
+            )
+            
+            st.write("#### 📊 Análisis Causa Raíz (Recomendación ISO 50001)")
+            st.write("Si estos valores son inusualmente altos, te sugiero revisar las bitácoras operacionales de esas fechas para identificar:")
+            st.markdown("""
+            * Trabajos de mantenimiento pesado en las maestranzas durante la madrugada.
+            * Climatización o sistemas auxiliares de trenes que no fueron apagados según el protocolo.
+            * Errores puntuales en la lectura de los medidores PRMTE.
+            """)
+        else:
+            # Si se corrió la regresión y no hubo outliers
+            if not df_normal_global.empty:
+                st.success("✅ Excelente. No se detectaron anomalías matemáticas extremas en la selección actual. El consumo nocturno está dentro de los márgenes estadísticos esperados.")
+            else:
+                st.write("Selecciona parámetros en la pestaña 'Regresión Nocturna' para evaluar anomalías.")
 
     st.sidebar.download_button("📥 Descargar Reporte", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
