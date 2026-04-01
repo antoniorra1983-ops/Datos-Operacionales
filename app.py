@@ -315,7 +315,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
 
     with tabs[7]: # REGRESIÓN NOCTURNA
         st.write("#### 📈 Regresión Lineal del Consumo Basal (00:00 - 05:00 hrs)")
-        st.info("💡 Análisis de tendencia limpio: El sistema excluye automáticamente los datos anómalos (outliers) para no distorsionar la ecuación.")
+        st.info("💡 Análisis de tendencia limpio: El sistema excluye automáticamente los datos anómalos (outliers) utilizando el Método del Rango Intercuartílico (IQR).")
         
         if all_comp_full:
             df_reg = pd.DataFrame(all_comp_full)
@@ -335,16 +335,17 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             df_plot = df_reg[(df_reg['Año'] == f_reg_anio) & (df_reg['Tipo Día'] == f_reg_jor) & (df_reg['Hora'] == f_reg_hora)].sort_values('Fecha')
             
             if len(df_plot) > 1:
-                # --- DETECCIÓN DE OUTLIERS (Z-SCORE a 2 Desviaciones) ---
-                promedio = df_plot['Consumo Horario [kWh]'].mean()
-                desviacion = df_plot['Consumo Horario [kWh]'].std()
+                # --- DETECCIÓN DE OUTLIERS (MÉTODO IQR) ---
+                Q1 = df_plot['Consumo Horario [kWh]'].quantile(0.25)
+                Q3 = df_plot['Consumo Horario [kWh]'].quantile(0.75)
+                IQR = Q3 - Q1
                 
-                if pd.isna(desviacion) or desviacion == 0:
+                if IQR == 0 and Q1 == Q3:
                     df_normal = df_plot.copy()
                     df_outliers = pd.DataFrame()
                 else:
-                    limite_superior = promedio + (2 * desviacion)
-                    limite_inferior = promedio - (2 * desviacion)
+                    limite_superior = Q3 + (1.5 * IQR)
+                    limite_inferior = Q1 - (1.5 * IQR)
                     
                     df_normal = df_plot[(df_plot['Consumo Horario [kWh]'] >= limite_inferior) & (df_plot['Consumo Horario [kWh]'] <= limite_superior)].copy()
                     df_outliers = df_plot[(df_plot['Consumo Horario [kWh]'] < limite_inferior) | (df_plot['Consumo Horario [kWh]'] > limite_superior)].copy()
@@ -392,14 +393,13 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         else:
             st.warning("Sube archivos de energía para procesar la regresión.")
 
-    with tabs[8]: # NUEVA PESTAÑA: DATOS ATÍPICOS
+    with tabs[8]: # DATOS ATÍPICOS
         st.write("#### 🚨 Registro de Datos Atípicos (Outliers)")
-        st.info("💡 Aquí se muestran los registros que fueron excluidos automáticamente de la **Regresión Nocturna** por superar estadísticamente el margen de 2 desviaciones estándar.")
+        st.info("💡 Aquí se muestran los registros que fueron excluidos automáticamente de la **Regresión Nocturna** mediante el método matemático del Rango Intercuartílico (IQR).")
         
         if not df_outliers_global.empty:
             st.error(f"Se detectaron **{len(df_outliers_global)}** registros anómalos para el filtro seleccionado.")
             
-            # Mostramos la tabla con los datos atípicos
             st.dataframe(
                 df_outliers_global[['Fecha', 'Hora', 'Consumo Horario [kWh]', 'Fuente', 'Tipo Día']].style.format({
                     "Fecha": lambda x: x.strftime('%d/%m/%Y'),
@@ -416,9 +416,8 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             * Errores puntuales en la lectura de los medidores PRMTE.
             """)
         else:
-            # Si se corrió la regresión y no hubo outliers
             if not df_normal_global.empty:
-                st.success("✅ Excelente. No se detectaron anomalías matemáticas extremas en la selección actual. El consumo nocturno está dentro de los márgenes estadísticos esperados.")
+                st.success("✅ Excelente. No se detectaron anomalías matemáticas extremas en la selección actual. El consumo nocturno está dentro de los márgenes estadísticos esperados del IQR.")
             else:
                 st.write("Selecciona parámetros en la pestaña 'Regresión Nocturna' para evaluar anomalías.")
 
