@@ -50,7 +50,6 @@ def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_prm_d, df_prm_15
 # --- 3. CARGA Y FILTROS ---
 with st.sidebar:
     st.header("📅 Filtro Global")
-    # Selector de calendario tipo rango (Corrección de fecha por defecto)
     today = date.today()
     if today.day == 1:
         start_of_month = today.replace(month=today.month-1 if today.month > 1 else 12, year=today.year if today.month > 1 else today.year-1, day=1)
@@ -72,6 +71,8 @@ with st.sidebar:
 
 # --- 4. MOTOR DE DATOS ---
 all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h = [], [], [], [], [], []
+all_fact_h_full = [] # Memoria paralela para la nueva pestaña comparativa
+
 todos = (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
 
 for f in todos:
@@ -140,26 +141,33 @@ for f in todos:
                     df_prm_d = pd.read_excel(f, sheet_name=sn, header=h_idx)
                     df_prm_d['Timestamp'] = pd.to_datetime(df_prm_d[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'})) + pd.to_timedelta(df_prm_d['INICIO INTERVALO'].astype(int), unit='m')
                     mask_p = (df_prm_d['Timestamp'].dt.date >= start_date) & (df_prm_d['Timestamp'].dt.date <= end_date)
-                    
-                    # MEJORA: Buscar todas las columnas que tengan "Retiro_Energia_Activa (kWhD)" y sumarlas
                     cols_energia = [c for c in df_prm_d.columns if 'Retiro_Energia_Activa (kWhD)' in str(c)]
-                    
                     for _, r in df_prm_d[mask_p].iterrows():
-                        # Sumar el valor de todas las columnas encontradas en este renglón
                         suma_prmte = sum([parse_latam_number(r[col]) for col in cols_energia])
-                        
-                        all_prmte_15.append({
-                            "Fecha y Hora": r['Timestamp'].strftime('%d/%m/%Y %H:%M'), 
-                            "Fecha": r['Timestamp'].normalize(), 
-                            "Energía PRMTE [kWh]": suma_prmte
-                        })
+                        all_prmte_15.append({"Fecha y Hora": r['Timestamp'].strftime('%d/%m/%Y %H:%M'), "Fecha": r['Timestamp'].normalize(), "Energía PRMTE [kWh]": suma_prmte})
 
             if any(k in sn_up for k in ['FACTURA', 'CONSUMO']):
                 df_f = pd.read_excel(f, sheet_name=sn); df_f.columns = ['FechaHora', 'Valor']
                 df_f['Timestamp'] = pd.to_datetime(df_f['FechaHora'], errors='coerce')
-                mask_f = (df_f['Timestamp'].dt.date >= start_date) & (df_f['Timestamp'].dt.date <= end_date)
-                for _, r in df_f[mask_f].dropna(subset=['Timestamp']).iterrows():
-                    all_fact_h.append({"Fecha y Hora": r['Timestamp'].strftime('%d/%m/%Y %H:%M'), "Fecha": r['Timestamp'].normalize(), "Consumo Horario [kWh]": abs(parse_latam_number(r['Valor']))})
+                
+                for _, r in df_f.dropna(subset=['Timestamp']).iterrows():
+                    ts = r['Timestamp']
+                    val = abs(parse_latam_number(r['Valor']))
+                    data_dict = {
+                        "Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), 
+                        "Fecha": ts.normalize(), 
+                        "Consumo Horario [kWh]": val,
+                        "Hora": ts.hour,
+                        "Mes": ts.month,
+                        "Año": ts.year
+                    }
+                    
+                    # 1. Guardamos en la memoria paralela (sin filtro de fecha)
+                    all_fact_h_full.append(data_dict)
+                    
+                    # 2. Guardamos en la memoria principal (con filtro del sidebar)
+                    if start_date <= ts.date() <= end_date:
+                        all_fact_h.append(data_dict)
     except: continue
 
 # --- 5. JERARQUÍA Y PRE-FILTRADO ---
@@ -196,7 +204,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
     if not df_ops.empty and not df_energy_master.empty:
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
 
-    # Función general de filtrado para Pestañas (Protección de variables vacías)
     def get_filtros(df, prefijo):
         if df.empty: return df
         c1, c2, c3 = st.columns(3)
@@ -221,26 +228,24 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         return df[mask]
 
     # --- 6. RENDERIZADO DE PESTAÑAS ---
-    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación"])
+    # Añadimos la pestaña número 7: Comparativo Anual
+    tabs = st.tabs(["📊 Resumen", "📑 Datos operacionales", "📑 Odómetro por Tren", "⚡ Energía SEAT", "📈 Medidas PRMTE", "💰 Facturación", "⚖️ Comparativo Anual"])
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
             st.write("#### Filtros Resumen")
             df_res_f = get_filtros(df_ops, "res")
             if not df_res_f.empty:
-                # --- TARJETAS DE INDICADORES GLOBALES (NUEVO) ---
                 st.write("#### 📈 Indicadores Globales (Período Filtrado)")
                 to_val = df_res_f["Odómetro [km]"].sum()
                 tk_val = df_res_f["Tren-Km [km]"].sum()
                 umr_val = (tk_val / to_val * 100) if to_val > 0 else 0
                 
-                # Fila 1: Operacionales
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Odómetro Total", f"{to_val:,.1f} km")
                 c2.metric("Tren-Km Total", f"{tk_val:,.1f} km")
                 c3.metric("UMR Global", f"{umr_val:.2f} %")
                 
-                # Fila 2: Energéticos (Si existen en los datos cargados)
                 if "E_Total" in df_res_f.columns:
                     e_tot = df_res_f["E_Total"].sum()
                     e_tr = df_res_f["E_Tr"].sum() if "E_Tr" in df_res_f.columns else 0
@@ -252,11 +257,8 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     c6.metric("12 kV", f"{e_12:,.0f} kWh")
                 
                 st.divider()
-                # ------------------------------------------------
 
                 df_res_f['Tipo Día'] = pd.Categorical(df_res_f['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
-                
-                # Formato dinámico para evitar KeyError si faltan archivos
                 agg_cols = {"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}
                 fmt_dict = {"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}
                 for col in ["E_Total", "E_Tr", "E_12"]:
@@ -332,6 +334,38 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.dataframe(df_fact_f.style.format(fmt_dict), use_container_width=True)
             st.write("#### 🕒 Detalle Horario")
             st.dataframe(pd.DataFrame(all_fact_h).style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
+
+    with tabs[6]: # COMPARATIVO ANUAL DE FACTURACIÓN (NUEVA PESTAÑA)
+        st.write("#### ⚖️ Análisis Comparativo Interanual de Facturación")
+        st.info("💡 Esta pestaña usa el historial completo de los archivos de facturación subidos, ignorando el calendario global, para permitir la comparación entre diferentes años.")
+        
+        if all_fact_h_full:
+            df_comp = pd.DataFrame(all_fact_h_full)
+            
+            c1, c2 = st.columns(2)
+            anios_disp = sorted(df_comp['Año'].unique().tolist())
+            meses_disp = sorted(df_comp['Mes'].unique().tolist())
+            
+            f_comp_anos = c1.multiselect("Años a comparar:", anios_disp, default=anios_disp, key="comp_a")
+            f_comp_meses = c2.multiselect("Meses a incluir:", meses_disp, default=meses_disp, key="comp_m")
+            
+            df_comp_f = df_comp[(df_comp['Año'].isin(f_comp_anos)) & (df_comp['Mes'].isin(f_comp_meses))]
+            
+            if not df_comp_f.empty:
+                st.write("#### 📉 Curva de Carga: Promedio por Hora [kWh]")
+                # Promedio por hora para ver el perfil de consumo típico a cada hora del día
+                pivot_mean = df_comp_f.pivot_table(index="Hora", columns="Año", values="Consumo Horario [kWh]", aggfunc='mean').fillna(0)
+                st.line_chart(pivot_mean)
+                st.dataframe(pivot_mean.style.format("{:,.1f}"), use_container_width=True)
+                
+                st.write("#### 🔋 Consumo Total Acumulado por Hora [kWh]")
+                # Suma bruta de consumo por cada hora
+                pivot_sum = df_comp_f.pivot_table(index="Hora", columns="Año", values="Consumo Horario [kWh]", aggfunc='sum').fillna(0)
+                st.dataframe(pivot_sum.style.format("{:,.0f}"), use_container_width=True)
+            else:
+                st.warning("No hay datos para la combinación de años y meses seleccionada.")
+        else:
+            st.warning("Sube archivos de Facturación con historial para habilitar esta comparativa.")
 
     st.sidebar.download_button("📥 Descargar Reporte", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
