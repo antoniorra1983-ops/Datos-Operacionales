@@ -217,6 +217,32 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.write("#### Filtros Resumen")
             df_res_f = get_filtros(df_ops, "res")
             if not df_res_f.empty:
+                # --- TARJETAS DE INDICADORES GLOBALES (NUEVO) ---
+                st.write("#### 📈 Indicadores Globales (Período Filtrado)")
+                to_val = df_res_f["Odómetro [km]"].sum()
+                tk_val = df_res_f["Tren-Km [km]"].sum()
+                umr_val = (tk_val / to_val * 100) if to_val > 0 else 0
+                
+                # Fila 1: Operacionales
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Odómetro Total", f"{to_val:,.1f} km")
+                c2.metric("Tren-Km Total", f"{tk_val:,.1f} km")
+                c3.metric("UMR Global", f"{umr_val:.2f} %")
+                
+                # Fila 2: Energéticos (Si existen en los datos cargados)
+                if "E_Total" in df_res_f.columns:
+                    e_tot = df_res_f["E_Total"].sum()
+                    e_tr = df_res_f["E_Tr"].sum() if "E_Tr" in df_res_f.columns else 0
+                    e_12 = df_res_f["E_12"].sum() if "E_12" in df_res_f.columns else 0
+                    
+                    c4, c5, c6 = st.columns(3)
+                    c4.metric("Energía Total", f"{e_tot:,.0f} kWh")
+                    c5.metric("Tracción", f"{e_tr:,.0f} kWh")
+                    c6.metric("12 kV", f"{e_12:,.0f} kWh")
+                
+                st.divider()
+                # ------------------------------------------------
+
                 df_res_f['Tipo Día'] = pd.Categorical(df_res_f['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
                 
                 # Formato dinámico para evitar KeyError si faltan archivos
@@ -228,6 +254,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         fmt_dict[col] = "{:,.0f}"
                         
                 res = df_res_f.groupby("Tipo Día", observed=True).agg(agg_cols).reset_index()
+                st.write("#### Tabla Resumen por Tipo de Día")
                 st.table(res.style.format(fmt_dict))
 
     with tabs[1]: # Datos Operacionales
