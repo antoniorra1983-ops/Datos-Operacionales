@@ -140,8 +140,19 @@ for f in todos:
                     df_prm_d = pd.read_excel(f, sheet_name=sn, header=h_idx)
                     df_prm_d['Timestamp'] = pd.to_datetime(df_prm_d[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'})) + pd.to_timedelta(df_prm_d['INICIO INTERVALO'].astype(int), unit='m')
                     mask_p = (df_prm_d['Timestamp'].dt.date >= start_date) & (df_prm_d['Timestamp'].dt.date <= end_date)
+                    
+                    # MEJORA: Buscar todas las columnas que tengan "Retiro_Energia_Activa (kWhD)" y sumarlas
+                    cols_energia = [c for c in df_prm_d.columns if 'Retiro_Energia_Activa (kWhD)' in str(c)]
+                    
                     for _, r in df_prm_d[mask_p].iterrows():
-                        all_prmte_15.append({"Fecha y Hora": r['Timestamp'].strftime('%d/%m/%Y %H:%M'), "Fecha": r['Timestamp'].normalize(), "Energía PRMTE [kWh]": parse_latam_number(r['Retiro_Energia_Activa (kWhD)'])})
+                        # Sumar el valor de todas las columnas encontradas en este renglón
+                        suma_prmte = sum([parse_latam_number(r[col]) for col in cols_energia])
+                        
+                        all_prmte_15.append({
+                            "Fecha y Hora": r['Timestamp'].strftime('%d/%m/%Y %H:%M'), 
+                            "Fecha": r['Timestamp'].normalize(), 
+                            "Energía PRMTE [kWh]": suma_prmte
+                        })
 
             if any(k in sn_up for k in ['FACTURA', 'CONSUMO']):
                 df_f = pd.read_excel(f, sheet_name=sn); df_f.columns = ['FechaHora', 'Valor']
