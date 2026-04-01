@@ -348,7 +348,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.write("#### 🕒 Detalle Horario")
             st.dataframe(pd.DataFrame(all_fact_h).style.format({"Consumo Horario [kWh]":"{:,.2f}"}), use_container_width=True)
 
-    with tabs[6]: # COMPARACIÓN ENERGÍA POR HR. (NUEVA PESTAÑA)
+    with tabs[6]: # COMPARACIÓN ENERGÍA POR HR.
         st.write("#### ⚖️ Matriz Comparativa por Fechas Específicas")
         st.info("💡 Esta pestaña jerarquiza automáticamente: Utiliza los datos de Factura si existen para la fecha seleccionada; si no, usa el consolidado por hora del PRMTE.")
         
@@ -361,7 +361,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             
             # 3. Jerarquía (Factura manda sobre PRMTE por día)
             fechas_con_factura = df_comp[df_comp['Fuente'] == 'Factura']['Fecha'].unique()
-            # Si para un día hay Factura, descartamos cualquier dato de PRMTE de ese mismo día
             mask_descarta_prmte = (df_comp['Fuente'] == 'PRMTE') & (df_comp['Fecha'].isin(fechas_con_factura))
             df_comp_final = df_comp[~mask_descarta_prmte].copy()
             
@@ -380,7 +379,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             if f_comp_fechas:
                 df_comp_f = df_comp_final[df_comp_final['Fecha'].dt.date.isin(f_comp_fechas)]
                 
-                # 4. Tabla Pivote exacta de la imagen (Filas: Horas 0-23, Columnas: xx/xx/xx)
+                # 4. Tabla Pivote exacta
                 pivot_compare = df_comp_f.pivot_table(
                     index="Hora", 
                     columns="Fecha_str", 
@@ -391,7 +390,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 # Rellenar con ceros las horas faltantes para siempre mostrar de 0 a 23
                 pivot_compare = pivot_compare.reindex(range(24)).fillna(0)
                 
-                # Ordenar columnas de fechas cronológicamente de izquierda a derecha
+                # Ordenar columnas cronológicamente
                 cols_ordenadas = sorted(pivot_compare.columns, key=lambda x: datetime.strptime(x, '%d/%m/%y'))
                 pivot_compare = pivot_compare[cols_ordenadas]
                 
@@ -402,6 +401,41 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 st.line_chart(pivot_compare)
             else:
                 st.warning("Selecciona al menos una fecha para generar la matriz comparativa.")
+                
+            # --- NUEVA SECCIÓN: TABLA INDEPENDIENTE (MEDIANA, TOTAL POR JORNADA Y AÑO) ---
+            st.divider()
+            st.write("#### 📊 Análisis Estadístico: 2025 vs 2026 por Jornada")
+            st.info("💡 Tabla independiente con la Mediana y el Total de consumo por cada hora, separado por año y tipo de día (L: Laboral, S: Sábado, D/F: Domingo/Festivo).")
+            
+            # Extraer el Año y el Tipo de Día usando la función que ya existe
+            df_comp_final['Año'] = df_comp_final['Fecha'].dt.year
+            df_comp_final['Tipo Día'] = df_comp_final['Fecha'].apply(get_tipo_dia)
+            
+            # Filtrar solo 2025 y 2026
+            df_stats = df_comp_final[df_comp_final['Año'].isin([2025, 2026])]
+            
+            if not df_stats.empty:
+                # Asegurar un orden lógico en el Tipo de Día (Lunes a Viernes, Sábado, Domingo/Festivo)
+                df_stats['Tipo Día'] = pd.Categorical(df_stats['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
+                
+                # Crear la tabla pivote agrupando Hora vs (Año, Tipo Día), calculando Mediana y Suma
+                pivot_stats = df_stats.pivot_table(
+                    index="Hora", 
+                    columns=["Año", "Tipo Día"], 
+                    values="Consumo Horario [kWh]", 
+                    aggfunc=['median', 'sum']
+                ).fillna(0)
+                
+                # Renombramos para mejor legibilidad
+                pivot_stats = pivot_stats.rename(columns={'median': 'Mediana [kWh]', 'sum': 'Total [kWh]'})
+                
+                # Asegurar siempre que se vean de 0 a 23 horas, incluso si falta algún dato
+                pivot_stats = pivot_stats.reindex(range(24)).fillna(0)
+                
+                st.dataframe(pivot_stats.style.format("{:,.1f}"), use_container_width=True)
+            else:
+                st.warning("No se encontraron datos históricos de 2025 o 2026 para generar la estadística anual.")
+
         else:
             st.warning("Sube archivos de Facturación o PRMTE para habilitar esta comparativa.")
 
