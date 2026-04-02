@@ -8,7 +8,7 @@ from datetime import datetime, date
 # Librerías para PPTX
 from pptx import Presentation
 from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor  # Importación corregida
+from pptx.dml.color import RGBColor
 
 # --- 1. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
@@ -28,13 +28,11 @@ def to_pptx(title_text, df=None, metrics_dict=None):
     slide_layout = prs.slide_layouts[5] 
     slide = prs.slides.add_slide(slide_layout)
     
-    # Título de la diapositiva
     title = slide.shapes.title
     title.text = f"EFE Valparaíso: {title_text}"
     
     y_cursor = Inches(1.5)
     
-    # Agregar Métricas si existen
     if metrics_dict:
         txBox = slide.shapes.add_textbox(Inches(0.5), y_cursor, Inches(9), Inches(1))
         tf = txBox.text_frame
@@ -43,38 +41,30 @@ def to_pptx(title_text, df=None, metrics_dict=None):
             p.text = f"• {k}: {v}"
             p.font.size = Pt(16)
             p.font.bold = True
-            p.font.color.rgb = RGBColor(0, 81, 149) # Azul EFE para el texto
+            p.font.color.rgb = RGBColor(0, 81, 149)
         y_cursor += Inches(1.2)
 
-    # Agregar Tabla si existe
     if df is not None and not df.empty:
-        # Limitamos a 12 filas para asegurar que quepa bien en la diapositiva
         df_display = df.head(12).reset_index(drop=True)
         rows, cols = df_display.shape
         table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(3)).table
         
-        # Estilo de Encabezados (Header)
         for c, col_name in enumerate(df_display.columns):
             cell = table.cell(0, c)
             cell.text = str(col_name)
-            
-            # Fondo Azul EFE
             cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(0, 81, 149) # ATRIBUTO CORREGIDO
-            
-            # Texto Blanco y Negrita
+            cell.fill.fore_color.rgb = RGBColor(0, 81, 149) 
             p = cell.text_frame.paragraphs[0]
             p.font.color.rgb = RGBColor(255, 255, 255)
-            p.font.size = Pt(12)
+            p.font.size = Pt(10)
             p.font.bold = True
         
-        # Llenar datos de la tabla
         for r in range(rows):
             for c in range(cols):
                 val = df_display.iloc[r, c]
-                formatted_val = str(val) if not isinstance(val, float) else f"{val:,.2f}"
+                formatted_val = str(val) if not isinstance(val, float) else f"{val:,.1f}"
                 table.cell(r + 1, c).text = formatted_val
-                table.cell(r + 1, c).text_frame.paragraphs[0].font.size = Pt(10)
+                table.cell(r + 1, c).text_frame.paragraphs[0].font.size = Pt(9)
 
     binary_output = BytesIO()
     prs.save(binary_output)
@@ -246,11 +236,10 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{umr_val:.2f} %")
                 e_tot = df_res_f["E_Total"].sum() if "E_Total" in df_res_f.columns else 0
+                st.metric("Energía Total", f"{e_tot:,.0f} kWh")
                 st.write("#### Resumen por Jornada")
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
-                
-                # BOTÓN PPTX
                 m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{e_tot:,.0f} kWh"}
                 st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
 
@@ -260,16 +249,34 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.dataframe(df_ops_f, use_container_width=True)
             st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f), "EFE_Operaciones.pptx")
 
-    with tabs[2]: # Trenes
+    with tabs[2]: # Trenes (RESTAURADO COMPLETO)
         if not df_tr.empty or not df_tr_acum.empty:
-            df_tr_c = pd.concat([df_tr, df_tr_acum])
+            st.write("#### Filtros Trenes")
+            df_tr_comb = pd.concat([df_tr, df_tr_acum])
             c1, c2 = st.columns(2)
-            f_tren = c2.multiselect("Trenes", sorted(df_tr_c['Tren'].unique()), key="tr_t")
-            df_tr_f = df_tr_c[df_tr_c['Tren'].isin(f_tren)] if f_tren else df_tr_c
-            st.write("### 🚗 Kilometraje Diario")
-            pivot_tr = df_tr_f.pivot_table(index="Tren", columns=df_tr_f["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
-            st.dataframe(pivot_tr.style.format("{:,.1f}"), use_container_width=True)
-            st.download_button("📥 Descargar Trenes (PPTX)", to_pptx("Odómetro por Tren", pivot_tr.reset_index()), "EFE_Trenes.pptx")
+            meses_tr = sorted(df_tr_comb['Fecha'].dt.month.unique())
+            trenes_tr = sorted(df_tr_comb['Tren'].unique())
+            f_mes_tr = c1.multiselect("Mes", meses_tr, default=meses_tr, key="tr_m")
+            f_tren_tr = c2.multiselect("Tren(es)", trenes_tr, key="tr_t")
+            
+            if not df_tr.empty:
+                st.write("### 🚗 Kilometraje Diario [km]")
+                df_tr_f = df_tr[df_tr['Fecha'].dt.month.isin(f_mes_tr)]
+                if f_tren_tr: df_tr_f = df_tr_f[df_tr_f['Tren'].isin(f_tren_tr)]
+                if not df_tr_f.empty:
+                    piv_diario = df_tr_f.pivot_table(index="Tren", columns=df_tr_f["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
+                    st.dataframe(piv_diario.style.format("{:,.1f}"), use_container_width=True)
+                    st.download_button("📥 Descargar Kilometraje (PPTX)", to_pptx("Kilometraje Diario Trenes", piv_diario.reset_index()), "EFE_Kilometraje.pptx")
+            
+            if not df_tr_acum.empty:
+                st.divider()
+                st.write("### 📈 Lectura de Odómetro / Acumulado [km]")
+                df_tra_f = df_tr_acum[df_tr_acum['Fecha'].dt.month.isin(f_mes_tr)]
+                if f_tren_tr: df_tra_f = df_tra_f[df_tra_f['Tren'].isin(f_tren_tr)]
+                if not df_tra_f.empty:
+                    piv_acum = df_tra_f.pivot_table(index="Tren", columns=df_tra_f["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0)
+                    st.dataframe(piv_acum.style.format("{:,.0f}"), use_container_width=True)
+                    st.download_button("📥 Descargar Acumulados (PPTX)", to_pptx("Odómetro Acumulado", piv_acum.reset_index()), "EFE_Acumulados.pptx")
 
     with tabs[3]: # Energía (Subpestañas)
         st.write("#### ⚡ Módulo de Medición")
@@ -303,7 +310,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
                 st.download_button("📥 Descargar Comparativa (PPTX)", to_pptx("Comparación Energía por hr", pivot_st.reset_index()), "EFE_Comparativa.pptx")
 
-    # Memoria temporal para outliers
     if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
 
     with tabs[5]: # Regresión
@@ -333,10 +339,8 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     m, n = np.polyfit(x, y, 1)
                     r2 = 1 - (np.sum((y - (m*x+n))**2) / np.sum((y - np.mean(y))**2))
                     st.line_chart(pd.DataFrame({'Real': y, 'Tendencia': m*x+n}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
-                    
                     st.markdown(f"**Ecuación:** $Consumo = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
                     st.info(f"Instalación basal inicial: {n:.2f} kWh. Variación cronológica: {m:.4f} kWh por hora.")
-                    
                     m_reg = {"Ecuación": f"Consumo = {m:.4f}x + {n:.2f}", "R2": f"{r2:.4f}", "Total Limpio": f"{y.sum():,.1f} kWh"}
                     st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión Nocturna - Hora {f_rh}", df_norm[['Fecha','Consumo Horario [kWh]']], m_reg), "EFE_Regresion.pptx")
 
