@@ -241,18 +241,77 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             if not df_res_f.empty:
                 to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
                 umr_val = (tk_val/to_val*100) if to_val>0 else 0
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Odómetro Total", f"{to_val:,.1f} km")
-                c2.metric("Tren-Km Total", f"{tk_val:,.1f} km")
-                c3.metric("UMR Global", f"{umr_val:.2f} %")
+                
+                # --- NUEVO: Gráfico semanal (izquierda) y tarjetas (derecha) ---
+                st.write("#### 📊 Evolución Diaria por Semana (Odómetro, Tren-Km y UMR)")
+                
+                # Preparar datos diarios
+                df_diario = df_res_f.copy()
+                df_diario['Año_Semana'] = df_diario['Fecha'].dt.strftime('%Y-Semana%W')
+                semanas_unicas = sorted(df_diario['Año_Semana'].unique())
+                
+                # Crear dos columnas: izquierda para gráfico, derecha para tarjetas
+                col_graf, col_tarjetas = st.columns([2, 1])
+                
+                with col_graf:
+                    if semanas_unicas:
+                        semana_seleccionada = st.selectbox("Selecciona una semana", semanas_unicas, key="semana_graf")
+                        df_semana = df_diario[df_diario['Año_Semana'] == semana_seleccionada].sort_values('Fecha')
+                        
+                        if not df_semana.empty:
+                            fig = make_subplots(specs=[[{"secondary_y": True}]])
+                            
+                            fig.add_trace(go.Bar(
+                                x=df_semana['Fecha'].dt.strftime('%d/%m'),
+                                y=df_semana['Odómetro [km]'] / 1000,
+                                name='Odómetro (miles km)',
+                                marker_color='#005195',
+                            ), secondary_y=False)
+                            
+                            fig.add_trace(go.Bar(
+                                x=df_semana['Fecha'].dt.strftime('%d/%m'),
+                                y=df_semana['Tren-Km [km]'] / 1000,
+                                name='Tren-Km (miles km)',
+                                marker_color='#4CAF50',
+                            ), secondary_y=False)
+                            
+                            fig.add_trace(go.Scatter(
+                                x=df_semana['Fecha'].dt.strftime('%d/%m'),
+                                y=df_semana['UMR [%]'],
+                                name='UMR (%)',
+                                mode='lines+markers',
+                                line=dict(color='#FF5733', width=3),
+                                marker=dict(size=8),
+                            ), secondary_y=True)
+                            
+                            fig.update_layout(
+                                title=f"Semana {semana_seleccionada}",
+                                xaxis_title="Día del mes",
+                                barmode='group',
+                                legend_title="Métrica",
+                                height=400,
+                                hovermode='x unified'
+                            )
+                            fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
+                            fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No hay datos para la semana seleccionada.")
+                    else:
+                        st.info("No hay suficientes datos para mostrar el gráfico semanal.")
+                
+                with col_tarjetas:
+                    # Tarjetas apiladas verticalmente
+                    st.metric("Odómetro Total", f"{to_val:,.1f} km")
+                    st.metric("Tren-Km Total", f"{tk_val:,.1f} km")
+                    st.metric("UMR Global", f"{umr_val:.2f} %")
+                # ---------------------------------------------------------
                 
                 # --- ENERGÍA CON PRIORIDAD: FACTURA > PRMTE > SEAT ---
-                # Crear un DataFrame consolidado de energía por fecha con prioridad
                 energia_fechas = []
-                # Obtener todas las fechas únicas de df_ops (o de los datos disponibles)
                 todas_fechas = df_res_f['Fecha'].unique()
                 for fecha in todas_fechas:
-                    # Buscar Factura
                     if not df_f_d.empty and fecha in df_f_d['Fecha'].values:
                         row = df_f_d[df_f_d['Fecha'] == fecha].iloc[0]
                         energia_fechas.append({
@@ -290,7 +349,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         })
                 df_energia_prioridad = pd.DataFrame(energia_fechas)
                 
-                # Mostrar métricas de energía en fila
                 st.markdown("#### ⚡ Energía (prioridad: Factura > PRMTE > SEAT)")
                 col_e1, col_e2, col_e3, col_e4 = st.columns(4)
                 total_energia = df_energia_prioridad['E_Total'].sum()
@@ -301,77 +359,15 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 col_e2.metric("Energía Tracción", f"{total_traccion:,.0f} kWh")
                 col_e3.metric("Energía 12 kV", f"{total_12kv:,.0f} kWh")
                 col_e4.metric("Fuente principal", fuente_usada)
-                # Porcentajes de participación
                 if total_energia > 0:
                     st.caption(f"⚡ Composición: Tracción {total_traccion/total_energia*100:.1f}% | 12 kV {total_12kv/total_energia*100:.1f}%")
                 
-                # Tabla resumen por jornada (igual que antes)
+                # Tabla resumen por jornada
                 st.write("#### Resumen por Jornada")
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
                 res_j['Tipo Día'] = pd.Categorical(res_j['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
                 res_j = res_j.sort_values('Tipo Día').reset_index(drop=True)
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
-
-                # --- NUEVO GRÁFICO DIARIO CON FILTRO POR SEMANA ---
-                st.write("#### 📊 Evolución Diaria por Semana (Odómetro, Tren-Km y UMR)")
-                # Preparar datos diarios
-                df_diario = df_res_f.copy()
-                # Generar lista de semanas disponibles (año-semana)
-                df_diario['Año_Semana'] = df_diario['Fecha'].dt.strftime('%Y-Semana%W')
-                semanas_unicas = sorted(df_diario['Año_Semana'].unique())
-                
-                if semanas_unicas:
-                    # Selector de semana (filtro independiente)
-                    semana_seleccionada = st.selectbox("Selecciona una semana", semanas_unicas, key="semana_graf")
-                    # Filtrar datos de esa semana
-                    df_semana = df_diario[df_diario['Año_Semana'] == semana_seleccionada].sort_values('Fecha')
-                    
-                    if not df_semana.empty:
-                        # Crear gráfico combinado más pequeño (altura 400)
-                        fig = make_subplots(specs=[[{"secondary_y": True}]])
-                        
-                        # Barras para Odómetro y Tren-Km (en miles)
-                        fig.add_trace(go.Bar(
-                            x=df_semana['Fecha'].dt.strftime('%d/%m'),
-                            y=df_semana['Odómetro [km]'] / 1000,
-                            name='Odómetro (miles km)',
-                            marker_color='#005195',
-                        ), secondary_y=False)
-                        
-                        fig.add_trace(go.Bar(
-                            x=df_semana['Fecha'].dt.strftime('%d/%m'),
-                            y=df_semana['Tren-Km [km]'] / 1000,
-                            name='Tren-Km (miles km)',
-                            marker_color='#4CAF50',
-                        ), secondary_y=False)
-                        
-                        # Línea para UMR (%)
-                        fig.add_trace(go.Scatter(
-                            x=df_semana['Fecha'].dt.strftime('%d/%m'),
-                            y=df_semana['UMR [%]'],
-                            name='UMR (%)',
-                            mode='lines+markers',
-                            line=dict(color='#FF5733', width=3),
-                            marker=dict(size=8),
-                        ), secondary_y=True)
-                        
-                        fig.update_layout(
-                            title=f"Semana {semana_seleccionada}",
-                            xaxis_title="Día del mes",
-                            barmode='group',
-                            legend_title="Métrica",
-                            height=400,  # más pequeño
-                            hovermode='x unified'
-                        )
-                        fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
-                        fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No hay datos para la semana seleccionada.")
-                else:
-                    st.info("No hay suficientes datos para mostrar el gráfico semanal.")
-                # ---------------------------------------------------------
 
                 m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{total_energia:,.0f} kWh"}
                 st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
