@@ -220,21 +220,50 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
     if not df_ops.empty and not df_energy_master.empty:
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
 
-    def get_filtros(df, prefijo):
-        if df.empty: return df
+    # --- FILTROS COMPARTIDOS (guardados en session_state) ---
+    if 'filtros_compartidos' not in st.session_state:
+        st.session_state.filtros_compartidos = {
+            'anios': [],
+            'meses': [],
+            'semanas': [],
+            'jornadas': []
+        }
+
+    def mostrar_filtros_compartidos(df):
+        """Muestra los selectores de filtro y actualiza session_state."""
+        if df.empty:
+            return
         c1, c2, c3 = st.columns(3)
-        anios, meses = sorted(df['Fecha'].dt.year.unique()), sorted(df['Fecha'].dt.month.unique())
-        f_ano = c1.multiselect(f"Año", anios, default=anios, key=f"{prefijo}_a")
-        f_mes = c2.multiselect(f"Mes", meses, default=meses, key=f"{prefijo}_m")
-        mask = df['Fecha'].dt.year.isin(f_ano) & df['Fecha'].dt.month.isin(f_mes)
+        anios = sorted(df['Fecha'].dt.year.unique())
+        meses = sorted(df['Fecha'].dt.month.unique())
+        f_ano = c1.multiselect("Año", anios, default=st.session_state.filtros_compartidos['anios'] or anios, key="filtro_ano")
+        f_mes = c2.multiselect("Mes", meses, default=st.session_state.filtros_compartidos['meses'] or meses, key="filtro_mes")
+        st.session_state.filtros_compartidos['anios'] = f_ano
+        st.session_state.filtros_compartidos['meses'] = f_mes
         if 'N° Semana' in df.columns:
-            f_sem = c3.multiselect("N° Semana", sorted(df[mask]['N° Semana'].unique()) if not df[mask].empty else [], key=f"{prefijo}_s")
-            if f_sem: mask &= df['N° Semana'].isin(f_sem)
+            semanas = sorted(df['N° Semana'].unique())
+            f_sem = c3.multiselect("N° Semana", semanas, default=st.session_state.filtros_compartidos['semanas'] or semanas, key="filtro_sem")
+            st.session_state.filtros_compartidos['semanas'] = f_sem
         if 'Tipo Día' in df.columns:
-            unique_vals = df[mask]['Tipo Día'].unique()
-            ordered_vals = [d for d in ORDEN_TIPO_DIA if d in unique_vals]
-            f_jor = st.multiselect("Jornada", ordered_vals, default=ordered_vals, key=f"{prefijo}_j")
-            if f_jor: mask &= df['Tipo Día'].isin(f_jor)
+            unique_jor = df['Tipo Día'].unique()
+            ordered_jor = [d for d in ORDEN_TIPO_DIA if d in unique_jor]
+            # Mostrar selector de jornada en una nueva fila si es necesario (opcional)
+            f_jor = st.multiselect("Jornada", ordered_jor, default=st.session_state.filtros_compartidos['jornadas'] or ordered_jor, key="filtro_jor")
+            st.session_state.filtros_compartidos['jornadas'] = f_jor
+
+    def aplicar_filtros_compartidos(df):
+        """Aplica los filtros guardados en session_state a un DataFrame."""
+        if df.empty:
+            return df
+        mask = pd.Series(True, index=df.index)
+        if st.session_state.filtros_compartidos['anios']:
+            mask &= df['Fecha'].dt.year.isin(st.session_state.filtros_compartidos['anios'])
+        if st.session_state.filtros_compartidos['meses']:
+            mask &= df['Fecha'].dt.month.isin(st.session_state.filtros_compartidos['meses'])
+        if 'N° Semana' in df.columns and st.session_state.filtros_compartidos['semanas']:
+            mask &= df['N° Semana'].isin(st.session_state.filtros_compartidos['semanas'])
+        if 'Tipo Día' in df.columns and st.session_state.filtros_compartidos['jornadas']:
+            mask &= df['Tipo Día'].isin(st.session_state.filtros_compartidos['jornadas'])
         return df[mask]
 
     # --- 5. RENDERIZADO DE PESTAÑAS ---
@@ -242,7 +271,8 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
-            df_res_f = get_filtros(df_ops, "res")
+            mostrar_filtros_compartidos(df_ops)
+            df_res_f = aplicar_filtros_compartidos(df_ops)
             if not df_res_f.empty:
                 to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
                 umr_val = (tk_val/to_val*100) if to_val>0 else 0
@@ -365,6 +395,161 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                             df_datos_semanales=None
                         )
                         st.download_button("⬇️ Descargar XLSX", excel_data, "Resumen_EFE.xlsx", use_container_width=True)
+            else:
+                st.info("No hay datos con los filtros seleccionados.")
+        else:
+            st.info("No hay datos de operaciones cargados.")
 
-    # --- Las demás pestañas permanecen igual (Operaciones, Trenes, Energía, Comparación, Regresión, Atípicos) ---
-    # (Se incluye el código completo pero aquí se omite por brevedad; en la respuesta final se entrega todo)
+    with tabs[1]: # Operaciones
+        if not df_ops.empty:
+            df_ops_f = aplicar_filtros_compartidos(df_ops)
+            st.dataframe(df_ops_f, use_container_width=True)
+            st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f), "EFE_Operaciones.pptx")
+        else:
+            st.info("No hay datos de operaciones para mostrar.")
+
+    with tabs[2]: # Trenes
+        if not df_tr.empty or not df_tr_acum.empty:
+            st.write("#### Filtros Trenes")
+            df_tr_comb = pd.concat([df_tr, df_tr_acum])
+            c1, c2 = st.columns(2)
+            meses_tr = sorted(df_tr_comb['Fecha'].dt.month.unique())
+            trenes_tr = sorted(df_tr_comb['Tren'].unique())
+            f_mes_tr = c1.multiselect("Mes", meses_tr, default=meses_tr, key="tr_m")
+            f_tren_tr = c2.multiselect("Tren(es)", trenes_tr, key="tr_t")
+            
+            if not df_tr.empty:
+                st.write("### 🚗 Kilometraje Diario [km]")
+                df_tr_f = df_tr[df_tr['Fecha'].dt.month.isin(f_mes_tr)]
+                if f_tren_tr: df_tr_f = df_tr_f[df_tr_f['Tren'].isin(f_tren_tr)]
+                if not df_tr_f.empty:
+                    piv_diario = df_tr_f.pivot_table(index="Tren", columns=df_tr_f["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
+                    st.dataframe(piv_diario.style.format("{:,.1f}"), use_container_width=True)
+                    st.download_button("📥 Descargar Kilometraje (PPTX)", to_pptx("Kilometraje Diario Trenes", piv_diario.reset_index()), "EFE_Kilometraje.pptx")
+            
+            if not df_tr_acum.empty:
+                st.divider()
+                st.write("### 📈 Lectura de Odómetro / Acumulado [km]")
+                df_tra_f = df_tr_acum[df_tr_acum['Fecha'].dt.month.isin(f_mes_tr)]
+                if f_tren_tr: df_tra_f = df_tra_f[df_tra_f['Tren'].isin(f_tren_tr)]
+                if not df_tra_f.empty:
+                    piv_acum = df_tra_f.pivot_table(index="Tren", columns=df_tra_f["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0)
+                    st.dataframe(piv_acum.style.format("{:,.0f}"), use_container_width=True)
+                    st.download_button("📥 Descargar Acumulados (PPTX)", to_pptx("Odómetro Acumulado", piv_acum.reset_index()), "EFE_Acumulados.pptx")
+        else:
+            st.info("No hay datos de trenes cargados.")
+
+    with tabs[3]: # Energía
+        st.write("#### ⚡ Módulo de Medición")
+        sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
+        with sub_e[0]:
+            if not df_seat.empty:
+                # Filtros independientes para SEAT (podrían compartirse, pero se dejan igual)
+                c1, c2 = st.columns(2)
+                anios_s = sorted(df_seat['Fecha'].dt.year.unique())
+                meses_s = sorted(df_seat['Fecha'].dt.month.unique())
+                f_ano_s = c1.multiselect("Año SEAT", anios_s, default=anios_s, key="seat_a")
+                f_mes_s = c2.multiselect("Mes SEAT", meses_s, default=meses_s, key="seat_m")
+                mask = df_seat['Fecha'].dt.year.isin(f_ano_s) & df_seat['Fecha'].dt.month.isin(f_mes_s)
+                df_s_f = df_seat[mask]
+                st.dataframe(df_s_f, use_container_width=True)
+                st.download_button("📥 Descargar SEAT (PPTX)", to_pptx("Energía SEAT", df_s_f), "EFE_SEAT.pptx")
+            else:
+                st.info("No hay datos SEAT cargados.")
+        with sub_e[1]:
+            if not df_p_d.empty:
+                c1, c2 = st.columns(2)
+                anios_p = sorted(df_p_d['Fecha'].dt.year.unique())
+                meses_p = sorted(df_p_d['Fecha'].dt.month.unique())
+                f_ano_p = c1.multiselect("Año PRMTE", anios_p, default=anios_p, key="prm_a")
+                f_mes_p = c2.multiselect("Mes PRMTE", meses_p, default=meses_p, key="prm_m")
+                mask = df_p_d['Fecha'].dt.year.isin(f_ano_p) & df_p_d['Fecha'].dt.month.isin(f_mes_p)
+                df_p_f = df_p_d[mask]
+                st.dataframe(df_p_f, use_container_width=True)
+                st.download_button("📥 Descargar PRMTE (PPTX)", to_pptx("Medidas PRMTE", df_p_f), "EFE_PRMTE.pptx")
+            else:
+                st.info("No hay datos PRMTE cargados.")
+        with sub_e[2]:
+            if not df_f_d.empty:
+                c1, c2 = st.columns(2)
+                anios_f = sorted(df_f_d['Fecha'].dt.year.unique())
+                meses_f = sorted(df_f_d['Fecha'].dt.month.unique())
+                f_ano_f = c1.multiselect("Año Factura", anios_f, default=anios_f, key="fact_a")
+                f_mes_f = c2.multiselect("Mes Factura", meses_f, default=meses_f, key="fact_m")
+                mask = df_f_d['Fecha'].dt.year.isin(f_ano_f) & df_f_d['Fecha'].dt.month.isin(f_mes_f)
+                df_f_f = df_f_d[mask]
+                st.dataframe(df_f_f, use_container_width=True)
+                st.download_button("📥 Descargar Facturación (PPTX)", to_pptx("Facturación", df_f_f), "EFE_Facturacion.pptx")
+            else:
+                st.info("No hay datos de facturación cargados.")
+
+    with tabs[4]: # Comparación hr
+        if all_comp_full:
+            df_c = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
+            fechas_f = df_c[df_c['Fuente']=='Factura']['Fecha'].unique()
+            df_cf = df_c[~((df_c['Fuente']=='PRMTE') & (df_c['Fecha'].isin(fechas_f)))].copy()
+            df_cf['Año'], df_cf['Tipo Día'] = df_cf['Fecha'].dt.year, df_cf['Fecha'].apply(get_tipo_dia)
+            st.write("#### Mediana de Consumo 2025 vs 2026")
+            df_st = df_cf[df_cf['Año'].isin([2025, 2026])]
+            if not df_st.empty:
+                pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=False).fillna(0)
+                st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
+                st.download_button("📥 Descargar Comparativa (PPTX)", to_pptx("Comparación Energía por hr", pivot_st.reset_index()), "EFE_Comparativa.pptx")
+            else:
+                st.info("No hay datos suficientes para la comparación.")
+        else:
+            st.info("No hay datos de consumo horario cargados.")
+
+    if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
+
+    with tabs[5]: # Regresión
+        if all_comp_full:
+            df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
+            fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
+            df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
+            df_reg = df_reg[df_reg['Hora']<=5]
+            df_reg['Año'], df_reg['Tipo Día'] = df_reg['Fecha'].dt.year, df_reg['Fecha'].apply(get_tipo_dia)
+            
+            c1, c2, c3 = st.columns(3)
+            f_ra, f_rj, f_rh = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a"), c2.selectbox("Jornada", ['Total', 'L', 'S', 'D/F'], key="reg_j"), c3.selectbox("Hora", range(6), key="reg_h")
+            
+            df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
+            if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
+            df_pl = df_pl.sort_values('Fecha')
+
+            if len(df_pl) > 1:
+                Q1, Q3 = df_pl['Consumo Horario [kWh]'].quantile(0.25), df_pl['Consumo Horario [kWh]'].quantile(0.75)
+                IQR = Q3 - Q1
+                lim_sup, lim_inf = Q3 + 1.5*IQR, Q1 - 1.5*IQR
+                df_norm = df_pl[(df_pl['Consumo Horario [kWh]']>=lim_inf) & (df_pl['Consumo Horario [kWh]']<=lim_sup)].copy()
+                st.session_state.outliers = df_pl[(df_pl['Consumo Horario [kWh]']<lim_inf) | (df_pl['Consumo Horario [kWh]']>lim_sup)].copy()
+                
+                if len(df_norm) > 1:
+                    x, y = np.arange(len(df_norm)), df_norm['Consumo Horario [kWh]'].values
+                    m, n = np.polyfit(x, y, 1)
+                    r2 = 1 - (np.sum((y - (m*x+n))**2) / np.sum((y - np.mean(y))**2))
+                    st.line_chart(pd.DataFrame({'Real': y, 'Tendencia': m*x+n}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
+                    st.markdown(f"**Ecuación:** $Consumo = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
+                    st.info(f"Instalación basal inicial: {n:.2f} kWh. Variación cronológica: {m:.4f} kWh por hora.")
+                    m_reg = {"Ecuación": f"Consumo = {m:.4f}x + {n:.2f}", "R2": f"{r2:.4f}", "Total Limpio": f"{y.sum():,.1f} kWh"}
+                    st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión Nocturna - Hora {f_rh}", df_norm[['Fecha','Consumo Horario [kWh]']], m_reg), "EFE_Regresion.pptx")
+                else:
+                    st.warning("No hay suficientes datos limpios para la regresión.")
+            else:
+                st.warning("Se necesitan al menos 2 puntos para la regresión.")
+        else:
+            st.info("No hay datos de consumo horario cargados para regresión.")
+
+    with tabs[6]: # Atípicos
+        if not st.session_state.outliers.empty:
+            st.error(f"Se detectaron {len(st.session_state.outliers)} anomalías.")
+            st.dataframe(st.session_state.outliers, use_container_width=True)
+            csv = st.session_state.outliers.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Descargar CSV", csv, "Anomalias.csv", "text/csv")
+            st.download_button("📥 Descargar Atípicos (PPTX)", to_pptx("Datos Atípicos de Instalaciones", st.session_state.outliers), "EFE_Atipicos.pptx")
+        else:
+            st.success("No hay anomalías detectadas en la selección actual.")
+
+    st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
+else:
+    st.info("👋 Sube los archivos en el panel lateral para comenzar el análisis.")
