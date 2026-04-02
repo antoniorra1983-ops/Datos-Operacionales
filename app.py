@@ -14,6 +14,9 @@ from pptx.dml.color import RGBColor
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
 chile_holidays = holidays.Chile()
 
+# --- ORDEN FIJO PARA TIPOS DE DÍA (L, S, D/F) ---
+ORDEN_TIPO_DIA = ["L", "S", "D/F"]
+
 st.markdown("""
     <style>
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; border-left: 5px solid #005195; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
@@ -220,7 +223,10 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             f_sem = c3.multiselect("N° Semana", sorted(df[mask]['N° Semana'].unique()) if not df[mask].empty else [], key=f"{prefijo}_s")
             if f_sem: mask &= df['N° Semana'].isin(f_sem)
         if 'Tipo Día' in df.columns:
-            f_jor = st.multiselect("Jornada", df[mask]['Tipo Día'].unique() if not df[mask].empty else [], default=df[mask]['Tipo Día'].unique() if not df[mask].empty else [], key=f"{prefijo}_j")
+            # Ordenar las opciones del multiselect según ORDEN_TIPO_DIA
+            unique_vals = df[mask]['Tipo Día'].unique()
+            ordered_vals = [d for d in ORDEN_TIPO_DIA if d in unique_vals]
+            f_jor = st.multiselect("Jornada", ordered_vals, default=ordered_vals, key=f"{prefijo}_j")
             if f_jor: mask &= df['Tipo Día'].isin(f_jor)
         return df[mask]
 
@@ -239,6 +245,9 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 st.metric("Energía Total", f"{e_tot:,.0f} kWh")
                 st.write("#### Resumen por Jornada")
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
+                # Ordenar según ORDEN_TIPO_DIA
+                res_j['Tipo Día'] = pd.Categorical(res_j['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
+                res_j = res_j.sort_values('Tipo Día').reset_index(drop=True)
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
                 m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{e_tot:,.0f} kWh"}
                 st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
