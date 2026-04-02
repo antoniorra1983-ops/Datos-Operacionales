@@ -12,6 +12,8 @@ from pptx.dml.color import RGBColor
 # Librería para gráfico combinado
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import tempfile
+import os
 
 # --- 1. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
@@ -75,6 +77,109 @@ def to_pptx(title_text, df=None, metrics_dict=None):
     binary_output = BytesIO()
     prs.save(binary_output)
     return binary_output.getvalue()
+
+def exportar_resumen_pptx(titulo, metrics_dict, df_resumen_jornada, df_energia, figura_plotly, df_datos_semanales=None):
+    """Exporta la pestaña Resumen a PPTX incluyendo gráfico como imagen."""
+    prs = Presentation()
+    slide_layout = prs.slide_layouts[5]
+    slide = prs.slides.add_slide(slide_layout)
+    
+    title = slide.shapes.title
+    title.text = f"EFE Valparaíso: {titulo}"
+    
+    y_cursor = Inches(1.0)
+    
+    # Métricas
+    if metrics_dict:
+        txBox = slide.shapes.add_textbox(Inches(0.5), y_cursor, Inches(9), Inches(1))
+        tf = txBox.text_frame
+        for k, v in metrics_dict.items():
+            p = tf.add_paragraph()
+            p.text = f"• {k}: {v}"
+            p.font.size = Pt(14)
+            p.font.bold = True
+            p.font.color.rgb = RGBColor(0, 81, 149)
+        y_cursor += Inches(1.0)
+    
+    # Gráfico como imagen
+    if figura_plotly is not None:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+            figura_plotly.write_image(tmpfile.name, width=800, height=400)
+            slide.shapes.add_picture(tmpfile.name, Inches(0.5), y_cursor, width=Inches(9))
+            os.unlink(tmpfile.name)
+        y_cursor += Inches(3.5)
+    
+    # Tabla resumen jornada
+    if df_resumen_jornada is not None and not df_resumen_jornada.empty:
+        df_mostrar = df_resumen_jornada.copy()
+        rows, cols = df_mostrar.shape
+        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(1.5)).table
+        for c, col_name in enumerate(df_mostrar.columns):
+            cell = table.cell(0, c)
+            cell.text = str(col_name)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = RGBColor(0, 81, 149)
+            p = cell.text_frame.paragraphs[0]
+            p.font.color.rgb = RGBColor(255, 255, 255)
+            p.font.size = Pt(10)
+            p.font.bold = True
+        for r in range(rows):
+            for c in range(cols):
+                val = df_mostrar.iloc[r, c]
+                table.cell(r+1, c).text = f"{val:,.1f}" if isinstance(val, float) else str(val)
+                table.cell(r+1, c).text_frame.paragraphs[0].font.size = Pt(9)
+        y_cursor += Inches(2.0)
+    
+    # Tabla energía priorizada (opcional)
+    if df_energia is not None and not df_energia.empty:
+        txBox = slide.shapes.add_textbox(Inches(0.5), y_cursor, Inches(9), Inches(0.5))
+        tf = txBox.text_frame
+        tf.text = "Energía por fecha (prioridad Factura > PRMTE > SEAT)"
+        tf.paragraphs[0].font.bold = True
+        y_cursor += Inches(0.5)
+        df_energia_mostrar = df_energia.head(12)
+        rows, cols = df_energia_mostrar.shape
+        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(1.5)).table
+        for c, col_name in enumerate(df_energia_mostrar.columns):
+            cell = table.cell(0, c)
+            cell.text = str(col_name)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = RGBColor(0, 81, 149)
+            p = cell.text_frame.paragraphs[0]
+            p.font.color.rgb = RGBColor(255, 255, 255)
+            p.font.size = Pt(10)
+            p.font.bold = True
+        for r in range(rows):
+            for c in range(cols):
+                val = df_energia_mostrar.iloc[r, c]
+                if isinstance(val, float):
+                    table.cell(r+1, c).text = f"{val:,.0f}"
+                else:
+                    table.cell(r+1, c).text = str(val)
+                table.cell(r+1, c).text_frame.paragraphs[0].font.size = Pt(9)
+    
+    binary_output = BytesIO()
+    prs.save(binary_output)
+    return binary_output.getvalue()
+
+def exportar_resumen_excel(metrics_dict, df_resumen_jornada, df_energia, df_datos_semanales):
+    """Exporta los datos de la pestaña Resumen a un archivo Excel."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        # Métricas
+        df_metrics = pd.DataFrame([metrics_dict]).T.reset_index()
+        df_metrics.columns = ['Métrica', 'Valor']
+        df_metrics.to_excel(writer, sheet_name='Métricas', index=False)
+        # Resumen jornada
+        if df_resumen_jornada is not None and not df_resumen_jornada.empty:
+            df_resumen_jornada.to_excel(writer, sheet_name='Resumen_Jornada', index=False)
+        # Energía priorizada
+        if df_energia is not None and not df_energia.empty:
+            df_energia.to_excel(writer, sheet_name='Energía_Prioridad', index=False)
+        # Datos semanales (diarios de la semana seleccionada)
+        if df_datos_semanales is not None and not df_datos_semanales.empty:
+            df_datos_semanales.to_excel(writer, sheet_name='Datos_Semanales', index=False)
+    return output.getvalue()
 
 def parse_latam_number(val):
     if pd.isna(val): return 0.0
@@ -242,111 +347,57 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
                 umr_val = (tk_val/to_val*100) if to_val>0 else 0
                 
-                # --- NUEVO: Gráfico semanal (izquierda) y tarjetas (derecha) ---
+                # --- Gráfico semanal (izquierda) y tarjetas (derecha) ---
                 st.write("#### 📊 Evolución Diaria por Semana (Odómetro, Tren-Km y UMR)")
                 
-                # Preparar datos diarios
                 df_diario = df_res_f.copy()
                 df_diario['Año_Semana'] = df_diario['Fecha'].dt.strftime('%Y-Semana%W')
                 semanas_unicas = sorted(df_diario['Año_Semana'].unique())
                 
-                # Crear dos columnas: izquierda para gráfico, derecha para tarjetas
                 col_graf, col_tarjetas = st.columns([2, 1])
                 
                 with col_graf:
                     if semanas_unicas:
                         semana_seleccionada = st.selectbox("Selecciona una semana", semanas_unicas, key="semana_graf")
                         df_semana = df_diario[df_diario['Año_Semana'] == semana_seleccionada].sort_values('Fecha')
-                        
+                        fig = None
                         if not df_semana.empty:
                             fig = make_subplots(specs=[[{"secondary_y": True}]])
-                            
-                            fig.add_trace(go.Bar(
-                                x=df_semana['Fecha'].dt.strftime('%d/%m'),
-                                y=df_semana['Odómetro [km]'] / 1000,
-                                name='Odómetro (miles km)',
-                                marker_color='#005195',
-                            ), secondary_y=False)
-                            
-                            fig.add_trace(go.Bar(
-                                x=df_semana['Fecha'].dt.strftime('%d/%m'),
-                                y=df_semana['Tren-Km [km]'] / 1000,
-                                name='Tren-Km (miles km)',
-                                marker_color='#4CAF50',
-                            ), secondary_y=False)
-                            
-                            fig.add_trace(go.Scatter(
-                                x=df_semana['Fecha'].dt.strftime('%d/%m'),
-                                y=df_semana['UMR [%]'],
-                                name='UMR (%)',
-                                mode='lines+markers',
-                                line=dict(color='#FF5733', width=3),
-                                marker=dict(size=8),
-                            ), secondary_y=True)
-                            
-                            fig.update_layout(
-                                title=f"Semana {semana_seleccionada}",
-                                xaxis_title="Día del mes",
-                                barmode='group',
-                                legend_title="Métrica",
-                                height=400,
-                                hovermode='x unified'
-                            )
+                            fig.add_trace(go.Bar(x=df_semana['Fecha'].dt.strftime('%d/%m'), y=df_semana['Odómetro [km]'] / 1000, name='Odómetro (miles km)', marker_color='#005195'), secondary_y=False)
+                            fig.add_trace(go.Bar(x=df_semana['Fecha'].dt.strftime('%d/%m'), y=df_semana['Tren-Km [km]'] / 1000, name='Tren-Km (miles km)', marker_color='#4CAF50'), secondary_y=False)
+                            fig.add_trace(go.Scatter(x=df_semana['Fecha'].dt.strftime('%d/%m'), y=df_semana['UMR [%]'], name='UMR (%)', mode='lines+markers', line=dict(color='#FF5733', width=3), marker=dict(size=8)), secondary_y=True)
+                            fig.update_layout(title=f"Semana {semana_seleccionada}", xaxis_title="Día del mes", barmode='group', legend_title="Métrica", height=400, hovermode='x unified')
                             fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
                             fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
-                            
                             st.plotly_chart(fig, use_container_width=True)
                         else:
                             st.info("No hay datos para la semana seleccionada.")
+                            fig = None
                     else:
                         st.info("No hay suficientes datos para mostrar el gráfico semanal.")
+                        fig = None
+                        df_semana = pd.DataFrame()
                 
                 with col_tarjetas:
-                    # Tarjetas apiladas verticalmente
                     st.metric("Odómetro Total", f"{to_val:,.1f} km")
                     st.metric("Tren-Km Total", f"{tk_val:,.1f} km")
                     st.metric("UMR Global", f"{umr_val:.2f} %")
-                # ---------------------------------------------------------
                 
-                # --- ENERGÍA CON PRIORIDAD: FACTURA > PRMTE > SEAT ---
+                # --- Energía priorizada ---
                 energia_fechas = []
                 todas_fechas = df_res_f['Fecha'].unique()
                 for fecha in todas_fechas:
                     if not df_f_d.empty and fecha in df_f_d['Fecha'].values:
                         row = df_f_d[df_f_d['Fecha'] == fecha].iloc[0]
-                        energia_fechas.append({
-                            'Fecha': fecha,
-                            'E_Total': row['Consumo Horario [kWh]'] if 'Consumo Horario [kWh]' in row else 0,
-                            'E_Tr': row['E_Tr'] if 'E_Tr' in row else 0,
-                            'E_12': row['E_12'] if 'E_12' in row else 0,
-                            'Fuente': 'Factura'
-                        })
+                        energia_fechas.append({'Fecha': fecha, 'E_Total': row['Consumo Horario [kWh]'] if 'Consumo Horario [kWh]' in row else 0, 'E_Tr': row['E_Tr'] if 'E_Tr' in row else 0, 'E_12': row['E_12'] if 'E_12' in row else 0, 'Fuente': 'Factura'})
                     elif not df_p_d.empty and fecha in df_p_d['Fecha'].values:
                         row = df_p_d[df_p_d['Fecha'] == fecha].iloc[0]
-                        energia_fechas.append({
-                            'Fecha': fecha,
-                            'E_Total': row['Energía PRMTE [kWh]'] if 'Energía PRMTE [kWh]' in row else 0,
-                            'E_Tr': row['E_Tr'] if 'E_Tr' in row else 0,
-                            'E_12': row['E_12'] if 'E_12' in row else 0,
-                            'Fuente': 'PRMTE'
-                        })
+                        energia_fechas.append({'Fecha': fecha, 'E_Total': row['Energía PRMTE [kWh]'] if 'Energía PRMTE [kWh]' in row else 0, 'E_Tr': row['E_Tr'] if 'E_Tr' in row else 0, 'E_12': row['E_12'] if 'E_12' in row else 0, 'Fuente': 'PRMTE'})
                     elif not df_seat.empty and fecha in df_seat['Fecha'].values:
                         row = df_seat[df_seat['Fecha'] == fecha].iloc[0]
-                        energia_fechas.append({
-                            'Fecha': fecha,
-                            'E_Total': row['Total [kWh]'],
-                            'E_Tr': row['Tracción [kWh]'],
-                            'E_12': row['12 KV [kWh]'],
-                            'Fuente': 'SEAT'
-                        })
+                        energia_fechas.append({'Fecha': fecha, 'E_Total': row['Total [kWh]'], 'E_Tr': row['Tracción [kWh]'], 'E_12': row['12 KV [kWh]'], 'Fuente': 'SEAT'})
                     else:
-                        energia_fechas.append({
-                            'Fecha': fecha,
-                            'E_Total': 0,
-                            'E_Tr': 0,
-                            'E_12': 0,
-                            'Fuente': 'Sin datos'
-                        })
+                        energia_fechas.append({'Fecha': fecha, 'E_Total': 0, 'E_Tr': 0, 'E_12': 0, 'Fuente': 'Sin datos'})
                 df_energia_prioridad = pd.DataFrame(energia_fechas)
                 
                 st.markdown("#### ⚡ Energía (prioridad: Factura > PRMTE > SEAT)")
@@ -362,15 +413,56 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 if total_energia > 0:
                     st.caption(f"⚡ Composición: Tracción {total_traccion/total_energia*100:.1f}% | 12 kV {total_12kv/total_energia*100:.1f}%")
                 
-                # Tabla resumen por jornada
+                # Tabla resumen jornada
                 st.write("#### Resumen por Jornada")
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
                 res_j['Tipo Día'] = pd.Categorical(res_j['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
                 res_j = res_j.sort_values('Tipo Día').reset_index(drop=True)
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
+                
+                # --- Botones de exportación de la pestaña Resumen ---
+                st.write("---")
+                st.write("#### 📥 Exportar pestaña Resumen completa")
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("📊 Exportar a PPTX"):
+                        metrics = {
+                            "Odómetro Total": f"{to_val:,.1f} km",
+                            "Tren-Km Total": f"{tk_val:,.1f} km",
+                            "UMR Global": f"{umr_val:.2f} %",
+                            "Energía Total": f"{total_energia:,.0f} kWh"
+                        }
+                        pptx_data = exportar_resumen_pptx(
+                            titulo="Resumen Operacional y Energético",
+                            metrics_dict=metrics,
+                            df_resumen_jornada=res_j,
+                            df_energia=df_energia_prioridad,
+                            figura_plotly=fig,
+                            df_datos_semanales=df_semana if 'df_semana' in locals() else None
+                        )
+                        st.download_button("⬇️ Descargar PPTX", pptx_data, "Resumen_EFE.pptx", use_container_width=True)
+                with col_btn2:
+                    if st.button("📈 Exportar a XLSX"):
+                        metrics_dict = {
+                            "Odómetro Total (km)": to_val,
+                            "Tren-Km Total (km)": tk_val,
+                            "UMR Global (%)": umr_val,
+                            "Energía Total (kWh)": total_energia,
+                            "Energía Tracción (kWh)": total_traccion,
+                            "Energía 12 kV (kWh)": total_12kv,
+                            "Fuente principal": fuente_usada
+                        }
+                        excel_data = exportar_resumen_excel(
+                            metrics_dict=metrics_dict,
+                            df_resumen_jornada=res_j,
+                            df_energia=df_energia_prioridad,
+                            df_datos_semanales=df_semana if 'df_semana' in locals() else None
+                        )
+                        st.download_button("⬇️ Descargar XLSX", excel_data, "Resumen_EFE.xlsx", use_container_width=True)
+                # -------------------------------------------------------------
 
                 m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{total_energia:,.0f} kWh"}
-                st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
+                st.download_button("📥 Descargar Resumen (PPTX antigua)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
 
     with tabs[1]: # Operaciones
         if not df_ops.empty:
@@ -378,7 +470,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.dataframe(df_ops_f, use_container_width=True)
             st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f), "EFE_Operaciones.pptx")
 
-    with tabs[2]: # Trenes (RESTAURADO COMPLETO)
+    with tabs[2]: # Trenes
         if not df_tr.empty or not df_tr_acum.empty:
             st.write("#### Filtros Trenes")
             df_tr_comb = pd.concat([df_tr, df_tr_acum])
@@ -407,7 +499,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     st.dataframe(piv_acum.style.format("{:,.0f}"), use_container_width=True)
                     st.download_button("📥 Descargar Acumulados (PPTX)", to_pptx("Odómetro Acumulado", piv_acum.reset_index()), "EFE_Acumulados.pptx")
 
-    with tabs[3]: # Energía (Subpestañas)
+    with tabs[3]: # Energía
         st.write("#### ⚡ Módulo de Medición")
         sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
         with sub_e[0]:
