@@ -5,9 +5,10 @@ import re
 import holidays
 from io import BytesIO
 from datetime import datetime, date
-# Requisito: pip install python-pptx
+# Librerías para PPTX
 from pptx import Presentation
 from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor  # Importación corregida
 
 # --- 1. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
@@ -22,47 +23,58 @@ st.markdown("""
 # --- 2. FUNCIONES DE PROCESAMIENTO Y EXPORTACIÓN ---
 
 def to_pptx(title_text, df=None, metrics_dict=None):
-    """Genera un objeto PPTX con los datos de la pestaña actual."""
+    """Genera un objeto PPTX corregido con los datos de la pestaña."""
     prs = Presentation()
-    # Layout 5 es típicamente 'Título y contenido en blanco'
-    slide_layout = prs.slide_layouts[5]
+    slide_layout = prs.slide_layouts[5] 
     slide = prs.slides.add_slide(slide_layout)
     
-    # Título
+    # Título de la diapositiva
     title = slide.shapes.title
     title.text = f"EFE Valparaíso: {title_text}"
     
-    # Agregar Métricas como texto si existen
     y_cursor = Inches(1.5)
+    
+    # Agregar Métricas si existen
     if metrics_dict:
         txBox = slide.shapes.add_textbox(Inches(0.5), y_cursor, Inches(9), Inches(1))
         tf = txBox.text_frame
         for k, v in metrics_dict.items():
             p = tf.add_paragraph()
             p.text = f"• {k}: {v}"
-            p.font.size = Pt(18)
+            p.font.size = Pt(16)
             p.font.bold = True
-        y_cursor += Inches(1.5)
+            p.font.color.rgb = RGBColor(0, 81, 149) # Azul EFE para el texto
+        y_cursor += Inches(1.2)
 
-    # Agregar Tabla si existe (limitada a las primeras 15 filas para que quepa en la slide)
+    # Agregar Tabla si existe
     if df is not None and not df.empty:
-        df_display = df.head(15).reset_index(drop=True)
+        # Limitamos a 12 filas para asegurar que quepa bien en la diapositiva
+        df_display = df.head(12).reset_index(drop=True)
         rows, cols = df_display.shape
-        # Crear tabla (añadimos 1 fila para el header)
         table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(3)).table
         
-        # Estilo Header
+        # Estilo de Encabezados (Header)
         for c, col_name in enumerate(df_display.columns):
-            table.cell(0, c).text = str(col_name)
-            table.cell(0, c).fill.solid()
-            # Azul EFE aproximado
-            table.cell(0, c).fill.foreground_color.rgb = (0, 81, 149)
+            cell = table.cell(0, c)
+            cell.text = str(col_name)
+            
+            # Fondo Azul EFE
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = RGBColor(0, 81, 149) # ATRIBUTO CORREGIDO
+            
+            # Texto Blanco y Negrita
+            p = cell.text_frame.paragraphs[0]
+            p.font.color.rgb = RGBColor(255, 255, 255)
+            p.font.size = Pt(12)
+            p.font.bold = True
         
-        # Llenar datos
+        # Llenar datos de la tabla
         for r in range(rows):
             for c in range(cols):
                 val = df_display.iloc[r, c]
-                table.cell(r + 1, c).text = str(val) if not isinstance(val, float) else f"{val:,.2f}"
+                formatted_val = str(val) if not isinstance(val, float) else f"{val:,.2f}"
+                table.cell(r + 1, c).text = formatted_val
+                table.cell(r + 1, c).text_frame.paragraphs[0].font.size = Pt(10)
 
     binary_output = BytesIO()
     prs.save(binary_output)
@@ -95,7 +107,7 @@ def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, df_p_15, df
             if not df.empty: df.to_excel(writer, index=False, sheet_name=name)
     return output.getvalue()
 
-# --- 3. CARGA Y MOTOR DE DATOS (Mantenido igual) ---
+# --- 3. CARGA Y MOTOR DE DATOS ---
 with st.sidebar:
     st.header("📅 Filtro Global")
     today = date.today()
@@ -234,20 +246,19 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{umr_val:.2f} %")
                 e_tot = df_res_f["E_Total"].sum() if "E_Total" in df_res_f.columns else 0
-                st.metric("Energía Total", f"{e_tot:,.0f} kWh")
                 st.write("#### Resumen por Jornada")
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
                 
                 # BOTÓN PPTX
-                m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía": f"{e_tot:,.0f} kWh"}
+                m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{e_tot:,.0f} kWh"}
                 st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
 
     with tabs[1]: # Operaciones
         if not df_ops.empty:
             df_ops_f = get_filtros(df_ops, "ops")
             st.dataframe(df_ops_f, use_container_width=True)
-            st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f.head(20)), "EFE_Operaciones.pptx")
+            st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f), "EFE_Operaciones.pptx")
 
     with tabs[2]: # Trenes
         if not df_tr.empty or not df_tr_acum.empty:
@@ -288,12 +299,13 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.write("#### Mediana de Consumo 2025 vs 2026")
             df_st = df_cf[df_cf['Año'].isin([2025, 2026])]
             if not df_st.empty:
-                pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median').fillna(0)
+                pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=False).fillna(0)
                 st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
                 st.download_button("📥 Descargar Comparativa (PPTX)", to_pptx("Comparación Energía por hr", pivot_st.reset_index()), "EFE_Comparativa.pptx")
 
-    df_out_global, df_norm_global = pd.DataFrame(), pd.DataFrame() # Memoria temporal
-    
+    # Memoria temporal para outliers
+    if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
+
     with tabs[5]: # Regresión
         if all_comp_full:
             df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
@@ -314,8 +326,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 IQR = Q3 - Q1
                 lim_sup, lim_inf = Q3 + 1.5*IQR, Q1 - 1.5*IQR
                 df_norm = df_pl[(df_pl['Consumo Horario [kWh]']>=lim_inf) & (df_pl['Consumo Horario [kWh]']<=lim_sup)].copy()
-                df_out_global = df_pl[(df_pl['Consumo Horario [kWh]']<lim_inf) | (df_pl['Consumo Horario [kWh]']>lim_sup)].copy()
-                df_norm_global = df_norm
+                st.session_state.outliers = df_pl[(df_pl['Consumo Horario [kWh]']<lim_inf) | (df_pl['Consumo Horario [kWh]']>lim_sup)].copy()
                 
                 if len(df_norm) > 1:
                     x, y = np.arange(len(df_norm)), df_norm['Consumo Horario [kWh]'].values
@@ -324,22 +335,21 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                     st.line_chart(pd.DataFrame({'Real': y, 'Tendencia': m*x+n}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
                     
                     st.markdown(f"**Ecuación:** $Consumo = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
-                    txt_reg = f"Instalación basal: {n:.2f} kWh. Tendencia: {m:.4f} kWh/hr."
-                    st.info(txt_reg)
+                    st.info(f"Instalación basal inicial: {n:.2f} kWh. Variación cronológica: {m:.4f} kWh por hora.")
                     
-                    m_reg = {"Pendiente (m)": f"{m:.4f} kWh/hr", "Intercepto (n)": f"{n:.2f} kWh", "R2": f"{r2:.4f}", "Total": f"{y.sum():,.1f} kWh"}
-                    st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión Nocturna - Hora {f_rh}", df_norm[['Fecha','Consumo Horario [kWh]']].head(15), m_reg), "EFE_Regresion.pptx")
+                    m_reg = {"Ecuación": f"Consumo = {m:.4f}x + {n:.2f}", "R2": f"{r2:.4f}", "Total Limpio": f"{y.sum():,.1f} kWh"}
+                    st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión Nocturna - Hora {f_rh}", df_norm[['Fecha','Consumo Horario [kWh]']], m_reg), "EFE_Regresion.pptx")
 
     with tabs[6]: # Atípicos
-        if not df_out_global.empty:
-            st.error(f"Se detectaron {len(df_out_global)} anomalías.")
-            st.dataframe(df_out_global, use_container_width=True)
-            csv = df_out_global.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Descargar CSV para Mantenimiento", csv, "Anomalias_Instalaciones.csv", "text/csv")
-            st.download_button("📥 Descargar Atípicos (PPTX)", to_pptx("Datos Atípicos de Instalaciones", df_out_global), "EFE_Atipicos.pptx")
+        if not st.session_state.outliers.empty:
+            st.error(f"Se detectaron {len(st.session_state.outliers)} anomalías.")
+            st.dataframe(st.session_state.outliers, use_container_width=True)
+            csv = st.session_state.outliers.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Descargar CSV", csv, "Anomalias.csv", "text/csv")
+            st.download_button("📥 Descargar Atípicos (PPTX)", to_pptx("Datos Atípicos de Instalaciones", st.session_state.outliers), "EFE_Atipicos.pptx")
         else:
-            st.success("Sin anomalías detectadas.")
+            st.success("No hay anomalías detectadas en la selección actual.")
 
-    st.sidebar.download_button("📥 Descargar Excel SGE", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
+    st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
-    st.info("👋 Sube los archivos en el panel lateral para comenzar.")
+    st.info("👋 Sube los archivos en el panel lateral para comenzar el análisis.")
