@@ -5,7 +5,7 @@ import re
 import holidays
 from io import BytesIO
 from datetime import datetime, date, timedelta
-# Librerías para PPTX
+# Librerías para PPTX (solo se usan en otras pestañas, no en Resumen)
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -31,7 +31,7 @@ st.markdown("""
 # --- 2. FUNCIONES DE PROCESAMIENTO Y EXPORTACIÓN ---
 
 def to_pptx(title_text, df=None, metrics_dict=None):
-    """Genera un objeto PPTX corregido con los datos de la pestaña."""
+    """Genera un objeto PPTX corregido con los datos de la pestaña (se mantiene para otras pestañas)."""
     prs = Presentation()
     slide_layout = prs.slide_layouts[5] 
     slide = prs.slides.add_slide(slide_layout)
@@ -74,107 +74,6 @@ def to_pptx(title_text, df=None, metrics_dict=None):
                 table.cell(r + 1, c).text = formatted_val
                 table.cell(r + 1, c).text_frame.paragraphs[0].font.size = Pt(9)
 
-    binary_output = BytesIO()
-    prs.save(binary_output)
-    return binary_output.getvalue()
-
-def exportar_resumen_pptx(titulo, metrics_dict, df_resumen_jornada, df_energia, figura_plotly, df_datos_semanales=None):
-    """Exporta la pestaña Resumen a PPTX incluyendo gráfico como imagen (si es posible)."""
-    prs = Presentation()
-    slide_layout = prs.slide_layouts[5]
-    slide = prs.slides.add_slide(slide_layout)
-    
-    title = slide.shapes.title
-    title.text = f"EFE Valparaíso: {titulo}"
-    
-    y_cursor = Inches(1.0)
-    
-    # Métricas
-    if metrics_dict:
-        txBox = slide.shapes.add_textbox(Inches(0.5), y_cursor, Inches(9), Inches(1))
-        tf = txBox.text_frame
-        for k, v in metrics_dict.items():
-            p = tf.add_paragraph()
-            p.text = f"• {k}: {v}"
-            p.font.size = Pt(14)
-            p.font.bold = True
-            p.font.color.rgb = RGBColor(0, 81, 149)
-        y_cursor += Inches(1.0)
-    
-    # Gráfico como imagen (solo si existe y se puede exportar)
-    if figura_plotly is not None:
-        try:
-            # Verificar que el gráfico tenga datos (al menos una traza con datos)
-            tiene_datos = False
-            if hasattr(figura_plotly, 'data') and len(figura_plotly.data) > 0:
-                for trace in figura_plotly.data:
-                    if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
-                        tiene_datos = True
-                        break
-            if tiene_datos:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
-                    figura_plotly.write_image(tmpfile.name, width=800, height=400)
-                    slide.shapes.add_picture(tmpfile.name, Inches(0.5), y_cursor, width=Inches(9))
-                    os.unlink(tmpfile.name)
-                y_cursor += Inches(3.5)
-            else:
-                # Gráfico vacío, avanzamos menos
-                y_cursor += Inches(0.5)
-        except Exception:
-            # Si falla la exportación, simplemente omitimos el gráfico
-            y_cursor += Inches(0.5)
-    else:
-        y_cursor += Inches(0.5)
-    
-    # Tabla resumen jornada
-    if df_resumen_jornada is not None and not df_resumen_jornada.empty:
-        df_mostrar = df_resumen_jornada.copy()
-        rows, cols = df_mostrar.shape
-        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(1.5)).table
-        for c, col_name in enumerate(df_mostrar.columns):
-            cell = table.cell(0, c)
-            cell.text = str(col_name)
-            cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(0, 81, 149)
-            p = cell.text_frame.paragraphs[0]
-            p.font.color.rgb = RGBColor(255, 255, 255)
-            p.font.size = Pt(10)
-            p.font.bold = True
-        for r in range(rows):
-            for c in range(cols):
-                val = df_mostrar.iloc[r, c]
-                table.cell(r+1, c).text = f"{val:,.1f}" if isinstance(val, float) else str(val)
-                table.cell(r+1, c).text_frame.paragraphs[0].font.size = Pt(9)
-        y_cursor += Inches(2.0)
-    
-    # Tabla energía priorizada (opcional)
-    if df_energia is not None and not df_energia.empty:
-        txBox = slide.shapes.add_textbox(Inches(0.5), y_cursor, Inches(9), Inches(0.5))
-        tf = txBox.text_frame
-        tf.text = "Energía por fecha (prioridad Factura > PRMTE > SEAT)"
-        tf.paragraphs[0].font.bold = True
-        y_cursor += Inches(0.5)
-        df_energia_mostrar = df_energia.head(12)
-        rows, cols = df_energia_mostrar.shape
-        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(1.5)).table
-        for c, col_name in enumerate(df_energia_mostrar.columns):
-            cell = table.cell(0, c)
-            cell.text = str(col_name)
-            cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(0, 81, 149)
-            p = cell.text_frame.paragraphs[0]
-            p.font.color.rgb = RGBColor(255, 255, 255)
-            p.font.size = Pt(10)
-            p.font.bold = True
-        for r in range(rows):
-            for c in range(cols):
-                val = df_energia_mostrar.iloc[r, c]
-                if isinstance(val, float):
-                    table.cell(r+1, c).text = f"{val:,.0f}"
-                else:
-                    table.cell(r+1, c).text = str(val)
-                table.cell(r+1, c).text_frame.paragraphs[0].font.size = Pt(9)
-    
     binary_output = BytesIO()
     prs.save(binary_output)
     return binary_output.getvalue()
@@ -439,27 +338,19 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 
                 # --- Botones de exportación de la pestaña Resumen ---
                 st.write("---")
-                st.write("#### 📥 Exportar pestaña Resumen completa")
+                st.write("#### 📥 Exportar pestaña Resumen")
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
-                    if st.button("📊 Exportar a PPTX"):
-                        metrics = {
-                            "Odómetro Total": f"{to_val:,.1f} km",
-                            "Tren-Km Total": f"{tk_val:,.1f} km",
-                            "UMR Global": f"{umr_val:.2f} %",
-                            "Energía Total": f"{total_energia:,.0f} kWh"
-                        }
-                        pptx_data = exportar_resumen_pptx(
-                            titulo="Resumen Operacional y Energético",
-                            metrics_dict=metrics,
-                            df_resumen_jornada=res_j,
-                            df_energia=df_energia_prioridad,
-                            figura_plotly=fig,
-                            df_datos_semanales=df_semana if 'df_semana' in locals() else None
-                        )
-                        st.download_button("⬇️ Descargar PPTX", pptx_data, "Resumen_EFE.pptx", use_container_width=True)
+                    # Botón para imprimir como PDF (usando el diálogo del navegador)
+                    if st.button("🖨️ Imprimir / Guardar como PDF", use_container_width=True):
+                        st.markdown("""
+                            <script>
+                                window.print();
+                            </script>
+                        """, unsafe_allow_html=True)
+                        st.info("Haz clic derecho y selecciona 'Guardar como PDF' en el diálogo de impresión.")
                 with col_btn2:
-                    if st.button("📈 Exportar a XLSX"):
+                    if st.button("📈 Exportar a XLSX", use_container_width=True):
                         metrics_dict = {
                             "Odómetro Total (km)": to_val,
                             "Tren-Km Total (km)": tk_val,
@@ -477,9 +368,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         )
                         st.download_button("⬇️ Descargar XLSX", excel_data, "Resumen_EFE.xlsx", use_container_width=True)
                 # -------------------------------------------------------------
-
-                m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{total_energia:,.0f} kWh"}
-                st.download_button("📥 Descargar Resumen (PPTX antigua)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
 
     with tabs[1]: # Operaciones
         if not df_ops.empty:
