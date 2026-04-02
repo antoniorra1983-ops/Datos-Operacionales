@@ -247,7 +247,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         if 'Tipo Día' in df.columns:
             unique_jor = df['Tipo Día'].unique()
             ordered_jor = [d for d in ORDEN_TIPO_DIA if d in unique_jor]
-            # Mostrar selector de jornada en una nueva fila si es necesario (opcional)
             f_jor = st.multiselect("Jornada", ordered_jor, default=st.session_state.filtros_compartidos['jornadas'] or ordered_jor, key="filtro_jor")
             st.session_state.filtros_compartidos['jornadas'] = f_jor
 
@@ -321,8 +320,8 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 st.write("#### Resumen por Jornada")
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
 
-                # --- Sub-pestañas Semanal y Mensual ---
-                sub_tabs = st.tabs(["📅 Semanal", "📅 Mensual"])
+                # --- Sub-pestañas: Semanal, Mensual, Anual ---
+                sub_tabs = st.tabs(["📅 Semanal", "📅 Mensual", "📅 Anual"])
                 
                 with sub_tabs[0]:  # Semanal
                     st.write("##### Evolución Semanal")
@@ -347,7 +346,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         st.info("No hay suficientes datos para mostrar el gráfico semanal.")
                 
                 with sub_tabs[1]:  # Mensual
-                    st.write("##### Evolución Mensual (todos los días)")
+                    st.write("##### Evolución Mensual (todos los días del período)")
                     df_grafico = df_res_f.sort_values('Fecha').copy()
                     if not df_grafico.empty:
                         fechas_str = df_grafico['Fecha'].dt.strftime('%d/%m')
@@ -358,12 +357,38 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         fig.add_trace(go.Bar(x=fechas_str, y=odometro_miles, name='Odómetro (miles km)', marker_color='#005195'), secondary_y=False)
                         fig.add_trace(go.Bar(x=fechas_str, y=trenkm_miles, name='Tren-Km (miles km)', marker_color='#4CAF50'), secondary_y=False)
                         fig.add_trace(go.Scatter(x=fechas_str, y=umr, name='UMR (%)', mode='lines+markers', line=dict(color='#FF5733', width=3), marker=dict(size=8)), secondary_y=True)
-                        fig.update_layout(title="Evolución Diaria", xaxis_title="Día del mes", barmode='group', legend_title="Métrica", height=400, hovermode='x unified')
+                        fig.update_layout(title="Evolución Diaria (Mensual)", xaxis_title="Día del mes", barmode='group', legend_title="Métrica", height=400, hovermode='x unified')
                         fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
                         fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
                         st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.info("No hay datos para mostrar en el gráfico.")
+                        st.info("No hay datos para mostrar en el gráfico mensual.")
+                
+                with sub_tabs[2]:  # Anual
+                    st.write("##### Evolución Anual (promedios mensuales)")
+                    df_anual = df_res_f.copy()
+                    df_anual['Año'] = df_anual['Fecha'].dt.year
+                    df_anual['Mes'] = df_anual['Fecha'].dt.month
+                    df_mensual = df_anual.groupby(['Año', 'Mes']).agg({
+                        'Odómetro [km]': 'sum',
+                        'Tren-Km [km]': 'sum',
+                        'UMR [%]': 'mean'
+                    }).reset_index()
+                    df_mensual['Etiqueta'] = df_mensual['Año'].astype(str) + '-' + df_mensual['Mes'].astype(str).str.zfill(2)
+                    if not df_mensual.empty:
+                        odometro_miles = df_mensual['Odómetro [km]'] / 1000
+                        trenkm_miles = df_mensual['Tren-Km [km]'] / 1000
+                        umr = df_mensual['UMR [%]']
+                        fig = make_subplots(specs=[[{"secondary_y": True}]])
+                        fig.add_trace(go.Bar(x=df_mensual['Etiqueta'], y=odometro_miles, name='Odómetro (miles km)', marker_color='#005195'), secondary_y=False)
+                        fig.add_trace(go.Bar(x=df_mensual['Etiqueta'], y=trenkm_miles, name='Tren-Km (miles km)', marker_color='#4CAF50'), secondary_y=False)
+                        fig.add_trace(go.Scatter(x=df_mensual['Etiqueta'], y=umr, name='UMR (%)', mode='lines+markers', line=dict(color='#FF5733', width=3), marker=dict(size=8)), secondary_y=True)
+                        fig.update_layout(title="Evolución Mensual Agregada", xaxis_title="Mes", barmode='group', legend_title="Métrica", height=400, hovermode='x unified')
+                        fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
+                        fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No hay datos suficientes para el análisis anual.")
 
                 # --- Botones de exportación (solo XLSX e impresión PDF) ---
                 st.write("---")
@@ -444,7 +469,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
         with sub_e[0]:
             if not df_seat.empty:
-                # Filtros independientes para SEAT (podrían compartirse, pero se dejan igual)
                 c1, c2 = st.columns(2)
                 anios_s = sorted(df_seat['Fecha'].dt.year.unique())
                 meses_s = sorted(df_seat['Fecha'].dt.month.unique())
