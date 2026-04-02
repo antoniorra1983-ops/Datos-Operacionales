@@ -79,7 +79,7 @@ def to_pptx(title_text, df=None, metrics_dict=None):
     return binary_output.getvalue()
 
 def exportar_resumen_pptx(titulo, metrics_dict, df_resumen_jornada, df_energia, figura_plotly, df_datos_semanales=None):
-    """Exporta la pestaña Resumen a PPTX incluyendo gráfico como imagen (si existe)."""
+    """Exporta la pestaña Resumen a PPTX incluyendo gráfico como imagen (si es posible)."""
     prs = Presentation()
     slide_layout = prs.slide_layouts[5]
     slide = prs.slides.add_slide(slide_layout)
@@ -101,15 +101,29 @@ def exportar_resumen_pptx(titulo, metrics_dict, df_resumen_jornada, df_energia, 
             p.font.color.rgb = RGBColor(0, 81, 149)
         y_cursor += Inches(1.0)
     
-    # Gráfico como imagen (solo si existe)
+    # Gráfico como imagen (solo si existe y se puede exportar)
     if figura_plotly is not None:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
-            figura_plotly.write_image(tmpfile.name, width=800, height=400)
-            slide.shapes.add_picture(tmpfile.name, Inches(0.5), y_cursor, width=Inches(9))
-            os.unlink(tmpfile.name)
-        y_cursor += Inches(3.5)
+        try:
+            # Verificar que el gráfico tenga datos (al menos una traza con datos)
+            tiene_datos = False
+            if hasattr(figura_plotly, 'data') and len(figura_plotly.data) > 0:
+                for trace in figura_plotly.data:
+                    if hasattr(trace, 'y') and trace.y is not None and len(trace.y) > 0:
+                        tiene_datos = True
+                        break
+            if tiene_datos:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+                    figura_plotly.write_image(tmpfile.name, width=800, height=400)
+                    slide.shapes.add_picture(tmpfile.name, Inches(0.5), y_cursor, width=Inches(9))
+                    os.unlink(tmpfile.name)
+                y_cursor += Inches(3.5)
+            else:
+                # Gráfico vacío, avanzamos menos
+                y_cursor += Inches(0.5)
+        except Exception:
+            # Si falla la exportación, simplemente omitimos el gráfico
+            y_cursor += Inches(0.5)
     else:
-        # Si no hay gráfico, avanzamos menos para no dejar espacio vacío excesivo
         y_cursor += Inches(0.5)
     
     # Tabla resumen jornada
