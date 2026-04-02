@@ -79,7 +79,7 @@ def to_pptx(title_text, df=None, metrics_dict=None):
     return binary_output.getvalue()
 
 def exportar_resumen_pptx(titulo, metrics_dict, df_resumen_jornada, df_energia, figura_plotly, df_datos_semanales=None):
-    """Exporta la pestaña Resumen a PPTX incluyendo gráfico como imagen."""
+    """Exporta la pestaña Resumen a PPTX incluyendo gráfico como imagen (si existe)."""
     prs = Presentation()
     slide_layout = prs.slide_layouts[5]
     slide = prs.slides.add_slide(slide_layout)
@@ -101,13 +101,16 @@ def exportar_resumen_pptx(titulo, metrics_dict, df_resumen_jornada, df_energia, 
             p.font.color.rgb = RGBColor(0, 81, 149)
         y_cursor += Inches(1.0)
     
-    # Gráfico como imagen
+    # Gráfico como imagen (solo si existe)
     if figura_plotly is not None:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
             figura_plotly.write_image(tmpfile.name, width=800, height=400)
             slide.shapes.add_picture(tmpfile.name, Inches(0.5), y_cursor, width=Inches(9))
             os.unlink(tmpfile.name)
         y_cursor += Inches(3.5)
+    else:
+        # Si no hay gráfico, avanzamos menos para no dejar espacio vacío excesivo
+        y_cursor += Inches(0.5)
     
     # Tabla resumen jornada
     if df_resumen_jornada is not None and not df_resumen_jornada.empty:
