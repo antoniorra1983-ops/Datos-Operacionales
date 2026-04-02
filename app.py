@@ -175,17 +175,14 @@ for f in todos:
 df_ops, df_energy_master = pd.DataFrame(), pd.DataFrame()
 
 if any([all_ops, all_seat, all_prmte_15, all_fact_h]):
-    # Carga Operaciones base
     if all_ops: df_ops = pd.DataFrame(all_ops).drop_duplicates(subset=['Fecha']).sort_values("Fecha")
     
-    # Jerarquía de Energía: Factura > PRMTE > SEAT
     if all_seat:
         df_energy_master = pd.DataFrame(all_seat)[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].copy().rename(columns={"Total [kWh]":"E_Total", "Tracción [kWh]":"E_Tr", "12 KV [kWh]":"E_12"})
         df_energy_master["Fuente"] = "SEAT"
 
     if all_prmte_15:
         df_p_d = pd.DataFrame(all_prmte_15).groupby("Fecha")["Energía PRMTE [kWh]"].sum().reset_index()
-        # Traemos % de tracción de SEAT si existe para repartir PRMTE
         if all_seat:
             df_p_d = pd.merge(df_p_d, pd.DataFrame(all_seat)[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left").fillna(0)
             df_p_d["E_Tr"], df_p_d["E_12"] = df_p_d["Energía PRMTE [kWh]"]*(df_p_d["% Tracción"]/100), df_p_d["Energía PRMTE [kWh]"]*(df_p_d["% 12 KV"]/100)
@@ -200,7 +197,6 @@ if any([all_ops, all_seat, all_prmte_15, all_fact_h]):
             df_f_f = df_f_d.rename(columns={"Consumo Horario [kWh]":"E_Total"})[["Fecha","E_Total","E_Tr","E_12"]]; df_f_f["Fuente"] = "Factura"
             df_energy_master = pd.concat([df_energy_master, df_f_f]).drop_duplicates(subset=["Fecha"], keep="last")
 
-    # Consolidación Final
     if not df_ops.empty and not df_energy_master.empty:
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
         df_ops['Consumo Específico [kWh/km]'] = np.where(df_ops['Tren-Km [km]'] > 0, df_ops['E_Tr'] / df_ops['Tren-Km [km]'], 0)
@@ -223,7 +219,7 @@ if any([all_ops, all_seat, all_prmte_15, all_fact_h]):
     # --- 5. RENDERIZADO DE PESTAÑAS ---
     tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación Energía hr", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
     
-    with tabs[0]: # RESTAURADO: Resumen con todos los datos
+    with tabs[0]: # Resumen
         if not df_ops.empty:
             df_res_f = get_filtros(df_ops, "res")
             if not df_res_f.empty:
@@ -243,13 +239,12 @@ if any([all_ops, all_seat, all_prmte_15, all_fact_h]):
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean", "E_Total":"sum", "E_Tr":"sum", "E_12":"sum", "Consumo Específico [kWh/km]":"mean"}).reset_index()
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%", "E_Total":"{:,.0f}", "E_Tr":"{:,.0f}", "E_12":"{:,.0f}", "Consumo Específico [kWh/km]":"{:.2f}"}))
                 
-                m_res = {"Odómetro": f"{to:,.1f} km", "Tren-Km": f"{tk:,.1f} km", "UMR": f"{umr:.2f}%", "Energía Total": f"{et:,.0f} kWh", "C. Específico": f"{ce:.2f} kWh/km"}
+                m_res = {"Odómetro": f"{to:,.1f} km", "Tren-Km": f"{tk:,.1f} km", "Energía Total": f"{et:,.0f} kWh", "C. Específico": f"{ce:.2f} kWh/km"}
                 st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Ejecutivo SGE", res_j, m_res), "EFE_Resumen.pptx")
 
-    with tabs[1]: # RESTAURADO: Datos Operacionales completos
+    with tabs[1]: # Operaciones
         if not df_ops.empty:
             df_ops_f = get_filtros(df_ops, "ops")
-            # Mostramos todas las columnas clave
             st.dataframe(df_ops_f.style.format({
                 "Odómetro [km]": "{:,.1f}", "Tren-Km [km]": "{:,.1f}", "UMR [%]": "{:.2f}%",
                 "E_Total": "{:,.0f}", "E_Tr": "{:,.0f}", "E_12": "{:,.0f}",
@@ -272,13 +267,36 @@ if any([all_ops, all_seat, all_prmte_15, all_fact_h]):
             piv_acum = df_tr_f[df_tr_f['Tren'].isin(pd.DataFrame(all_tr_acum)['Tren'].unique() if all_tr_acum else [])].pivot_table(index="Tren", columns=df_tr_f["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0)
             st.write("### 📈 Lectura de Odómetro Acumulado [km]"); st.dataframe(piv_acum.style.format("{:,.0f}"), use_container_width=True)
 
-    with tabs[3]: # Energía
+    with tabs[3]: # Energía (CORRECCIÓN DE ERRORmagic)
+        st.write("#### ⚡ Módulo de Medición")
         sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
-        with sub_e[0]: st.dataframe(get_filtros(pd.DataFrame(all_seat), "seat"), use_container_width=True) if all_seat else st.info("Sin datos SEAT")
-        with sub_e[1]: st.dataframe(get_filtros(pd.DataFrame(all_prmte_15), "prm"), use_container_width=True) if all_prmte_15 else st.info("Sin datos PRMTE")
-        with sub_e[2]: st.dataframe(get_filtros(pd.DataFrame(all_fact_h), "fact"), use_container_width=True) if all_fact_h else st.info("Sin datos Facturación")
+        
+        with sub_e[0]:
+            if all_seat:
+                df_seat_p = pd.DataFrame(all_seat)
+                df_seat_f = get_filtros(df_seat_p, "seat")
+                st.dataframe(df_seat_f, use_container_width=True)
+                st.download_button("📥 Descargar SEAT (PPTX)", to_pptx("Energía SEAT", df_seat_f), "EFE_SEAT.pptx")
+            else:
+                st.info("Sin datos SEAT")
+                
+        with sub_e[1]:
+            if all_prmte_15:
+                df_prmte_p = pd.DataFrame(all_prmte_15)
+                df_prmte_f = get_filtros(df_prmte_p, "prm")
+                st.dataframe(df_prmte_f, use_container_width=True)
+                st.download_button("📥 Descargar PRMTE (PPTX)", to_pptx("Medidas PRMTE", df_prmte_f), "EFE_PRMTE.pptx")
+            else:
+                st.info("Sin datos PRMTE")
+                
+        with sub_e[2]:
+            if all_fact_h:
+                df_fact_p = pd.DataFrame(all_fact_h)
+                df_fact_f = get_filtros(df_fact_p, "fact")
+                st.dataframe(df_fact_f, use_container_width=True)
+                st.download_button("📥 Descargar Facturación (PPTX)", to_pptx("Facturación", df_fact_f), "EFE_Facturacion.pptx")
 
-    with tabs[5]: # Regresión (Mantenida)
+    with tabs[5]: # Regresión
         if all_comp_full:
             df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
             df_reg = df_reg[df_reg['Hora']<=5]
