@@ -312,47 +312,61 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
 
     if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
 
-    with tabs[5]: # Regresión
+    with tabs[5]: # Regresión (RESTAURADO COMPLETO)
         if all_comp_full:
+            st.header("📈 Análisis de Regresión Nocturna")
             df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
             fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
             df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
-            df_reg = df_reg[df_reg['Hora']<=5]
+            df_reg = df_reg[df_reg['Hora']<=5] # Filtro horario nocturno
             df_reg['Año'], df_reg['Tipo Día'] = df_reg['Fecha'].dt.year, df_reg['Fecha'].apply(get_tipo_dia)
             
             c1, c2, c3 = st.columns(3)
-            f_ra, f_rj, f_rh = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a"), c2.selectbox("Jornada", ['Total', 'L', 'S', 'D/F'], key="reg_j"), c3.selectbox("Hora", range(6), key="reg_h")
+            f_ra = c1.selectbox("Seleccionar Año", sorted(df_reg['Año'].unique()), key="reg_a")
+            f_rj = c2.selectbox("Seleccionar Jornada", ['Total', 'L', 'S', 'D/F'], key="reg_j")
+            f_rh = c3.selectbox("Seleccionar Hora", range(6), key="reg_h")
             
             df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
             if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
             df_pl = df_pl.sort_values('Fecha')
 
             if len(df_pl) > 1:
+                # 🚨 Detección de Outliers (IQR)
                 Q1, Q3 = df_pl['Consumo Horario [kWh]'].quantile(0.25), df_pl['Consumo Horario [kWh]'].quantile(0.75)
                 IQR = Q3 - Q1
                 lim_sup, lim_inf = Q3 + 1.5*IQR, Q1 - 1.5*IQR
+                
                 df_norm = df_pl[(df_pl['Consumo Horario [kWh]']>=lim_inf) & (df_pl['Consumo Horario [kWh]']<=lim_sup)].copy()
                 st.session_state.outliers = df_pl[(df_pl['Consumo Horario [kWh]']<lim_inf) | (df_pl['Consumo Horario [kWh]']>lim_sup)].copy()
                 
                 if len(df_norm) > 1:
+                    # Cálculo de Regresión Lineal
                     x, y = np.arange(len(df_norm)), df_norm['Consumo Horario [kWh]'].values
                     m, n = np.polyfit(x, y, 1)
                     r2 = 1 - (np.sum((y - (m*x+n))**2) / np.sum((y - np.mean(y))**2))
+                    
                     st.line_chart(pd.DataFrame({'Real': y, 'Tendencia': m*x+n}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
-                    st.markdown(f"**Ecuación:** $Consumo = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
-                    st.info(f"Instalación basal inicial: {n:.2f} kWh. Variación cronológica: {m:.4f} kWh por hora.")
+                    
+                    st.markdown(f"### Ecuación de Desempeño: $Consumo = {m:.4f}x + {n:.2f}$")
+                    st.markdown(f"**Coeficiente de Determinación ($R^2$):** {r2:.4f}")
+                    st.info(f"💡 Interpretación: La carga basal inicial es de {n:.2f} kWh con una variación de {m:.4f} kWh/periodo.")
+                    
                     m_reg = {"Ecuación": f"Consumo = {m:.4f}x + {n:.2f}", "R2": f"{r2:.4f}", "Total Limpio": f"{y.sum():,.1f} kWh"}
                     st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión Nocturna - Hora {f_rh}", df_norm[['Fecha','Consumo Horario [kWh]']], m_reg), "EFE_Regresion.pptx")
+                else:
+                    st.warning("No hay suficientes datos limpios para generar la regresión.")
+            else:
+                st.warning("Faltan datos para el año/hora seleccionada.")
 
     with tabs[6]: # Atípicos
         if not st.session_state.outliers.empty:
-            st.error(f"Se detectaron {len(st.session_state.outliers)} anomalías.")
+            st.error(f"⚠️ Se detectaron {len(st.session_state.outliers)} anomalías en el consumo.")
             st.dataframe(st.session_state.outliers, use_container_width=True)
             csv = st.session_state.outliers.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Descargar CSV", csv, "Anomalias.csv", "text/csv")
+            st.download_button("📥 Descargar CSV Anomalías", csv, "Anomalias.csv", "text/csv")
             st.download_button("📥 Descargar Atípicos (PPTX)", to_pptx("Datos Atípicos de Instalaciones", st.session_state.outliers), "EFE_Atipicos.pptx")
         else:
-            st.success("No hay anomalías detectadas en la selección actual.")
+            st.success("✅ No hay anomalías detectadas en la selección actual.")
 
     st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
 else:
