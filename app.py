@@ -12,8 +12,6 @@ from pptx.dml.color import RGBColor
 # --- 1. CONFIGURACIÓN Y UTILIDADES ---
 st.set_page_config(page_title="Dashboard SGE - EFE Valparaíso", layout="wide", page_icon="🚆")
 chile_holidays = holidays.Chile()
-
-# Definición del orden operativo ESTRICTO
 ORDEN_JORNADA = ['L', 'S', 'D/F']
 
 def aplicar_estilos():
@@ -41,6 +39,19 @@ def get_tipo_dia(fch):
     if fch in chile_holidays or fch.weekday() == 6: return "D/F"
     if fch.weekday() == 5: return "S"
     return "L"
+
+def get_filtros(df, prefijo):
+    if df.empty: return df
+    c1, c2, c3 = st.columns(3)
+    anios = sorted(df['Fecha'].dt.year.unique())
+    meses = sorted(df['Fecha'].dt.month.unique())
+    f_ano = c1.multiselect(f"Seleccionar Año", anios, default=anios, key=f"{prefijo}_a")
+    f_mes = c2.multiselect(f"Seleccionar Mes", meses, default=meses, key=f"{prefijo}_m")
+    mask = df['Fecha'].dt.year.isin(f_ano) & df['Fecha'].dt.month.isin(f_mes)
+    if 'Tipo Día' in df.columns:
+        f_jor = st.multiselect("Jornada", ORDEN_JORNADA, default=ORDEN_JORNADA, key=f"{prefijo}_j")
+        if f_jor: mask &= df['Tipo Día'].isin(f_jor)
+    return df[mask]
 
 # --- 2. FUNCIONES DE EXPORTACIÓN ---
 
@@ -146,18 +157,17 @@ def procesar_todo(todos, start_date, end_date):
 
 # --- 4. RENDERIZADO DE PESTAÑAS ---
 
-def get_filtros(df, prefijo):
-    if df.empty: return df
-    c1, c2, c3 = st.columns(3)
-    anios = sorted(df['Fecha'].dt.year.unique())
-    meses = sorted(df['Fecha'].dt.month.unique())
-    f_ano = c1.multiselect(f"Seleccionar Año", anios, default=anios, key=f"{prefijo}_a")
-    f_mes = c2.multiselect(f"Seleccionar Mes", meses, default=meses, key=f"{prefijo}_m")
-    mask = df['Fecha'].dt.year.isin(f_ano) & df['Fecha'].dt.month.isin(f_mes)
-    if 'Tipo Día' in df.columns:
-        f_jor = st.multiselect("Jornada", ORDEN_JORNADA, default=ORDEN_JORNADA, key=f"{prefijo}_j")
-        if f_jor: mask &= df['Tipo Día'].isin(f_jor)
-    return df[mask]
+def render_resumen(df_ops):
+    st.header("📊 Resumen Operacional")
+    if not df_ops.empty:
+        df_ops['Tipo Día'] = pd.Categorical(df_ops['Tipo Día'], categories=ORDEN_JORNADA, ordered=True)
+        df_res_f = get_filtros(df_ops, "res")
+        if not df_res_f.empty:
+            to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{(tk_val/to_val*100) if to_val>0 else 0:.2f} %")
+            res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum"}).reset_index()
+            st.table(res_j.sort_values("Tipo Día"))
 
 def render_comparacion_horaria(all_comp_full):
     st.header("⚖️ Comparación de Energía Horaria")
@@ -166,38 +176,84 @@ def render_comparacion_horaria(all_comp_full):
         fechas_f = df_c[df_c['Fuente']=='Factura']['Fecha'].unique()
         df_cf = df_c[~((df_c['Fuente']=='PRMTE') & (df_c['Fecha'].isin(fechas_f)))].copy()
         df_cf['Año'] = df_cf['Fecha'].dt.year.astype(str)
-        df_cf['Tipo Día'] = df_cf['Fecha'].apply(get_tipo_dia)
-        
-        st.write("#### Mediana de Consumo Horario y Total por Año")
-        # Filtrar solo años relevantes
+        df_cf['Tipo Día'] = pd.Categorical(df_cf['Fecha'].apply(get_tipo_dia), categories=ORDEN_JORNADA, ordered=True)
         df_st = df_cf[df_cf['Año'].isin(['2025', '2026'])]
-        
         if not df_st.empty:
-            # Crear Pivot Table básica
             pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median').fillna(0)
-            
-            # --- CÁLCULO TOTALES ANUALES ---
             anios_presentes = sorted(df_st['Año'].unique())
             for anio in anios_presentes:
                 pivot_st[(anio, "Total Anual")] = df_st[df_st['Año'] == anio].groupby("Hora")["Consumo Horario [kWh]"].median()
-            
-            # --- FORZAR ORDENAMIENTO (ELIMINA EL ERROR DE LA IMAGEN) ---
             new_columns = []
             for anio in anios_presentes:
-                # Primero L, luego S, luego D/F, luego Total Anual
                 for jornada in ORDEN_JORNADA + ["Total Anual"]:
-                    if (anio, jornada) in pivot_st.columns:
-                        new_columns.append((anio, jornada))
-            
+                    if (anio, jornada) in pivot_st.columns: new_columns.append((anio, jornada))
             pivot_st = pivot_st.reindex(columns=new_columns)
-            
             st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
-            st.download_button("📥 Descargar Comparativa Anual (PPTX)", to_pptx("Comparativa Horaria (L, S, D/F, Total)", pivot_st), "EFE_Comparativa.pptx")
+
+def render_regresion_nocturna(all_comp_full):
+    st.header("📈 Regresión Nocturna (00:00 - 05:00 AM)")
+    st.info("💡 En este horario no hay operación de trenes. El análisis se centra exclusivamente en el consumo basal de 12 kV / Baja Tensión.")
+    
+    if all_comp_full:
+        df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
+        fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
+        df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
+        
+        # Filtro estricto de madrugada
+        df_reg = df_reg[df_reg['Hora'] <= 5]
+        df_reg['Año'] = df_reg['Fecha'].dt.year
+        df_reg['Tipo Día'] = pd.Categorical(df_reg['Fecha'].apply(get_tipo_dia), categories=ORDEN_JORNADA, ordered=True)
+        
+        c1, c2, c3 = st.columns(3)
+        f_ra = c1.selectbox("Seleccionar Año", sorted(df_reg['Año'].unique()), key="reg_a")
+        f_rj = c2.selectbox("Seleccionar Jornada", ['Total'] + ORDEN_JORNADA, key="reg_j")
+        f_rh = c3.selectbox("Seleccionar Hora", range(6), key="reg_h")
+        
+        df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
+        if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
+        df_pl = df_pl.sort_values('Fecha')
+        
+        if len(df_pl) > 2:
+            # 🚨 LIMPIEZA DE ATÍPICOS (IQR) - Vital para ISO 50001
+            Q1 = df_pl['Consumo Horario [kWh]'].quantile(0.25)
+            Q3 = df_pl['Consumo Horario [kWh]'].quantile(0.75)
+            IQR = Q3 - Q1
+            lim_inf, lim_sup = Q1 - 1.5*IQR, Q3 + 1.5*IQR
+            
+            df_norm = df_pl[(df_pl['Consumo Horario [kWh]'] >= lim_inf) & (df_pl['Consumo Horario [kWh]'] <= lim_sup)].copy()
+            outliers = df_pl[(df_pl['Consumo Horario [kWh]'] < lim_inf) | (df_pl['Consumo Horario [kWh]'] > lim_sup)].copy()
+            st.session_state.outliers = pd.concat([st.session_state.outliers, outliers]).drop_duplicates()
+
+            if len(df_norm) > 2:
+                # CÁLCULO DE REGRESIÓN: y = mx + n
+                x = np.arange(len(df_norm))
+                y = df_norm['Consumo Horario [kWh]'].values
+                m, n = np.polyfit(x, y, 1)
+                
+                # Coeficiente R2
+                y_pred = m*x + n
+                r2 = 1 - (np.sum((y - y_pred)**2) / np.sum((y - np.mean(y))**2))
+                
+                # Visualización
+                st.line_chart(pd.DataFrame({'Real (12kV)': y, 'Tendencia': y_pred}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
+                
+                col_met1, col_met2 = st.columns(2)
+                col_met1.metric("Intercepto (Carga Basal n)", f"{n:.2f} kWh")
+                col_met2.metric("Coeficiente R² (Estabilidad)", f"{r2:.4f}")
+                
+                st.markdown(f"**Ecuación de Línea Base:** $y = {m:.4f}x + {n:.2f}$")
+                st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión 12kV Hora {f_rh}", df_norm, {"R2": f"{r2:.4f}", "n": f"{n:.2f}"}), f"Regresion_H{f_rh}.pptx")
+            else:
+                st.warning("No hay suficientes datos limpios tras filtrar atípicos.")
+        else:
+            st.warning("Seleccione un rango de fechas con más datos para generar la regresión.")
 
 # --- 5. MAIN ---
 
 def main():
     aplicar_estilos()
+    if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
+    
     with st.sidebar:
         st.header("📅 Filtro Global")
         today = date.today()
@@ -214,7 +270,7 @@ def main():
     df_p_d = pd.DataFrame(r["all_prmte_15"])
     df_f_d = pd.DataFrame(r["all_fact_h"])
     
-    # Lógica Master Energía para Resumen
+    # Lógica de Master Energía para Resumen
     df_energy_master = pd.DataFrame()
     if not df_seat.empty:
         df_energy_master = df_seat[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].copy().rename(columns={"Total [kWh]":"E_Total", "Tracción [kWh]":"E_Tr", "12 KV [kWh]":"E_12"})
@@ -233,19 +289,7 @@ def main():
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
 
     tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía cruda", "⚖️ Comparación Energía hr", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
-    with tabs[0]:
-        st.header("📊 Resumen Operacional")
-        if not df_ops.empty:
-            df_res_f = get_filtros(df_ops, "res")
-            if not df_res_f.empty:
-                to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{(tk_val/to_val*100) if to_val>0 else 0:.2f} %")
-                # Resumen Jornada con orden forzado
-                res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum"}).reset_index()
-                res_j['Tipo Día'] = pd.Categorical(res_j['Tipo Día'], categories=ORDEN_JORNADA, ordered=True)
-                st.table(res_j.sort_values("Tipo Día"))
-
+    with tabs[0]: render_resumen(df_ops)
     with tabs[1]: st.dataframe(get_filtros(df_ops, "ops"))
     with tabs[2]: 
         if not df_tr.empty:
@@ -254,36 +298,14 @@ def main():
         if not df_tr_acum.empty:
             st.subheader("📈 Odómetro Acumulado")
             st.dataframe(df_tr_acum.pivot_table(index="Tren", columns=df_tr_acum["Fecha"].dt.day, values="Valor", aggfunc='max'))
-    
-    with tabs[3]: # PESTAÑAS DE ENERGÍA CRUDA
+    with tabs[3]: 
         sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
         with sub_e[0]: st.dataframe(df_seat)
         with sub_e[1]: st.dataframe(df_p_d)
         with sub_e[2]: st.dataframe(df_f_d)
-        
     with tabs[4]: render_comparacion_horaria(r["all_comp_full"])
-    
-    with tabs[5]:
-        if r["all_comp_full"]:
-            df_reg = pd.DataFrame(r["all_comp_full"]).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
-            fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
-            df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
-            df_reg = df_reg[df_reg['Hora']<=5]
-            df_reg['Año'] = df_reg['Fecha'].dt.year
-            df_reg['Tipo Día'] = df_reg['Fecha'].apply(get_tipo_dia)
-            c1, c2, c3 = st.columns(3)
-            f_ra = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a")
-            f_rj = c2.selectbox("Jornada", ['Total'] + ORDEN_JORNADA, key="reg_j")
-            f_rh = c3.selectbox("Hora", range(6), key="reg_h")
-            df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
-            if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
-            df_pl = df_pl.sort_values('Fecha')
-            if len(df_pl) > 1:
-                Q1, Q3 = df_pl['Consumo Horario [kWh]'].quantile(0.25), df_pl['Consumo Horario [kWh]'].quantile(0.75)
-                IQR = Q3 - Q1
-                lim_sup, lim_inf = Q3 + 1.5*IQR, Q1 - 1.5*IQR
-                df_norm = df_pl[(df_pl['Consumo Horario [kWh]']>=lim_inf) & (df_pl['Consumo Horario [kWh]']<=lim_sup)].copy()
-                st.line_chart(pd.DataFrame({'Real': df_norm['Consumo Horario [kWh]'].values}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
+    with tabs[5]: render_regresion_nocturna(r["all_comp_full"])
+    with tabs[6]: st.dataframe(st.session_state.outliers)
 
 if __name__ == "__main__":
     main()
