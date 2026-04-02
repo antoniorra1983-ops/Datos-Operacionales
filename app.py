@@ -13,7 +13,7 @@ from pptx.dml.color import RGBColor
 st.set_page_config(page_title="Dashboard SGE - EFE Valparaíso", layout="wide", page_icon="🚆")
 chile_holidays = holidays.Chile()
 
-# Definición del orden operativo de EFE
+# Definición del orden operativo ESTRICTO
 ORDEN_JORNADA = ['L', 'S', 'D/F']
 
 def aplicar_estilos():
@@ -42,24 +42,7 @@ def get_tipo_dia(fch):
     if fch.weekday() == 5: return "S"
     return "L"
 
-# --- 2. FUNCIONES DE AYUDA (FILTROS Y EXPORTACIÓN) ---
-
-def get_filtros(df, prefijo):
-    if df.empty: return df
-    c1, c2, c3 = st.columns(3)
-    anios = sorted(df['Fecha'].dt.year.unique())
-    meses = sorted(df['Fecha'].dt.month.unique())
-    f_ano = c1.multiselect(f"Seleccionar Año", anios, default=anios, key=f"{prefijo}_a")
-    f_mes = c2.multiselect(f"Seleccionar Mes", meses, default=meses, key=f"{prefijo}_m")
-    mask = df['Fecha'].dt.year.isin(f_ano) & df['Fecha'].dt.month.isin(f_mes)
-    if 'N° Semana' in df.columns:
-        semanas = sorted(df[mask]['N° Semana'].unique()) if not df[mask].empty else []
-        f_sem = c3.multiselect("N° Semana", semanas, key=f"{prefijo}_s")
-        if f_sem: mask &= df['N° Semana'].isin(f_sem)
-    if 'Tipo Día' in df.columns:
-        f_jor = st.multiselect("Jornada", ORDEN_JORNADA, default=ORDEN_JORNADA, key=f"{prefijo}_j")
-        if f_jor: mask &= df['Tipo Día'].isin(f_jor)
-    return df[mask]
+# --- 2. FUNCIONES DE EXPORTACIÓN ---
 
 def to_pptx(title_text, df=None, metrics_dict=None):
     prs = Presentation()
@@ -76,15 +59,17 @@ def to_pptx(title_text, df=None, metrics_dict=None):
     if df is not None and not df.empty:
         df_export = df.reset_index() if hasattr(df, 'index') and (df.index.name or any(df.index.names)) else df
         rows, cols = df_export.shape
-        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(4.5)).table
+        table = slide.shapes.add_table(rows + 1, cols, Inches(0.1), y_cursor, Inches(9.8), Inches(4.5)).table
         for c, col_name in enumerate(df_export.columns):
             cell = table.cell(0, c); cell.text = str(col_name); cell.fill.solid()
             cell.fill.fore_color.rgb = RGBColor(0, 81, 149)
             cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+            cell.text_frame.paragraphs[0].font.size = Pt(9)
         for r in range(rows):
             for c in range(cols):
                 val = df_export.iloc[r, c]
                 table.cell(r + 1, c).text = str(val) if not isinstance(val, float) else f"{val:,.1f}"
+                table.cell(r + 1, c).text_frame.paragraphs[0].font.size = Pt(8)
     binary_output = BytesIO(); prs.save(binary_output); return binary_output.getvalue()
 
 # --- 3. MOTOR DE PROCESAMIENTO ---
@@ -161,23 +146,18 @@ def procesar_todo(todos, start_date, end_date):
 
 # --- 4. RENDERIZADO DE PESTAÑAS ---
 
-def render_resumen(df_ops):
-    st.header("📊 Resumen Operacional")
-    if not df_ops.empty:
-        # Fijar Orden Categorical
-        df_ops['Tipo Día'] = pd.Categorical(df_ops['Tipo Día'], categories=ORDEN_JORNADA, ordered=True)
-        df_res_f = get_filtros(df_ops, "res")
-        if not df_res_f.empty:
-            to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
-            umr_val = (tk_val/to_val*100) if to_val>0 else 0
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Odómetro Total", f"{to_val:,.1f} km")
-            c2.metric("Tren-Km Total", f"{tk_val:,.1f} km")
-            c3.metric("UMR Global", f"{umr_val:.2f} %")
-            e_tot = df_res_f["E_Total"].sum() if "E_Total" in df_res_f.columns else 0
-            st.metric("Energía Total", f"{e_tot:,.0f} kWh")
-            res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
-            st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
+def get_filtros(df, prefijo):
+    if df.empty: return df
+    c1, c2, c3 = st.columns(3)
+    anios = sorted(df['Fecha'].dt.year.unique())
+    meses = sorted(df['Fecha'].dt.month.unique())
+    f_ano = c1.multiselect(f"Seleccionar Año", anios, default=anios, key=f"{prefijo}_a")
+    f_mes = c2.multiselect(f"Seleccionar Mes", meses, default=meses, key=f"{prefijo}_m")
+    mask = df['Fecha'].dt.year.isin(f_ano) & df['Fecha'].dt.month.isin(f_mes)
+    if 'Tipo Día' in df.columns:
+        f_jor = st.multiselect("Jornada", ORDEN_JORNADA, default=ORDEN_JORNADA, key=f"{prefijo}_j")
+        if f_jor: mask &= df['Tipo Día'].isin(f_jor)
+    return df[mask]
 
 def render_comparacion_horaria(all_comp_full):
     st.header("⚖️ Comparación de Energía Horaria")
@@ -185,26 +165,34 @@ def render_comparacion_horaria(all_comp_full):
         df_c = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
         fechas_f = df_c[df_c['Fuente']=='Factura']['Fecha'].unique()
         df_cf = df_c[~((df_c['Fuente']=='PRMTE') & (df_c['Fecha'].isin(fechas_f)))].copy()
+        df_cf['Año'] = df_cf['Fecha'].dt.year.astype(str)
+        df_cf['Tipo Día'] = df_cf['Fecha'].apply(get_tipo_dia)
         
-        # Fijar Año y Tipo Día (Categorical)
-        df_cf['Año'] = df_cf['Fecha'].dt.year
-        df_cf['Tipo Día'] = pd.Categorical(df_cf['Fecha'].apply(get_tipo_dia), categories=ORDEN_JORNADA, ordered=True)
+        st.write("#### Mediana de Consumo Horario y Total por Año")
+        # Filtrar solo años relevantes
+        df_st = df_cf[df_cf['Año'].isin(['2025', '2026'])]
         
-        st.write("#### Mediana de Consumo Horario y Total Anual")
-        df_st = df_cf[df_cf['Año'].isin([2025, 2026])]
         if not df_st.empty:
-            # Pivot con Categorical sorting automático
-            pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=True).fillna(0)
+            # Crear Pivot Table básica
+            pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median').fillna(0)
             
-            # Agregar Hora Total POR AÑO al final de cada bloque de año
-            for anio in sorted(df_st['Año'].unique()):
+            # --- CÁLCULO TOTALES ANUALES ---
+            anios_presentes = sorted(df_st['Año'].unique())
+            for anio in anios_presentes:
                 pivot_st[(anio, "Total Anual")] = df_st[df_st['Año'] == anio].groupby("Hora")["Consumo Horario [kWh]"].median()
             
-            # Reordenar para que Total Anual quede después de D/F
-            pivot_st = pivot_st.sort_index(axis=1, level=[0, 1])
+            # --- FORZAR ORDENAMIENTO (ELIMINA EL ERROR DE LA IMAGEN) ---
+            new_columns = []
+            for anio in anios_presentes:
+                # Primero L, luego S, luego D/F, luego Total Anual
+                for jornada in ORDEN_JORNADA + ["Total Anual"]:
+                    if (anio, jornada) in pivot_st.columns:
+                        new_columns.append((anio, jornada))
+            
+            pivot_st = pivot_st.reindex(columns=new_columns)
             
             st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
-            st.download_button("📥 Descargar Comparativa Anual (PPTX)", to_pptx("Comparativa Horaria por Año", pivot_st), "EFE_Comparativa_Anual.pptx")
+            st.download_button("📥 Descargar Comparativa Anual (PPTX)", to_pptx("Comparativa Horaria (L, S, D/F, Total)", pivot_st), "EFE_Comparativa.pptx")
 
 # --- 5. MAIN ---
 
@@ -220,27 +208,23 @@ def main():
         f_seat_files = st.file_uploader("2. Energía SEAT", type=["xlsx"], accept_multiple_files=True)
         f_bill_files = st.file_uploader("3. Facturación y PRMTE", type=["xlsx"], accept_multiple_files=True)
 
-    if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
-    
     r = procesar_todo((f_umr or []) + (f_seat_files or []) + (f_bill_files or []), start_date, end_date)
     
     df_ops, df_tr, df_tr_acum, df_seat = pd.DataFrame(r["all_ops"]), pd.DataFrame(r["all_tr"]), pd.DataFrame(r["all_tr_acum"]), pd.DataFrame(r["all_seat"])
+    df_p_d = pd.DataFrame(r["all_prmte_15"])
+    df_f_d = pd.DataFrame(r["all_fact_h"])
     
-    # RESTAURACIÓN DATOS DE ENERGÍA
-    df_p_d = pd.DataFrame(r["all_prmte_15"]) if r["all_prmte_15"] else pd.DataFrame()
-    df_f_d = pd.DataFrame(r["all_fact_h"]) if r["all_fact_h"] else pd.DataFrame()
-    
-    # Lógica Master Energía
+    # Lógica Master Energía para Resumen
     df_energy_master = pd.DataFrame()
     if not df_seat.empty:
         df_energy_master = df_seat[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].copy().rename(columns={"Total [kWh]":"E_Total", "Tracción [kWh]":"E_Tr", "12 KV [kWh]":"E_12"})
-        if r["all_prmte_15"]:
-            p_res = pd.DataFrame(r["all_prmte_15"]).groupby("Fecha")["Energía PRMTE [kWh]"].sum().reset_index()
+        if not df_p_d.empty:
+            p_res = df_p_d.groupby("Fecha")["Energía PRMTE [kWh]"].sum().reset_index()
             p_res = pd.merge(p_res, df_seat[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left").fillna(0)
             p_res["E_Tr"], p_res["E_12"] = p_res["Energía PRMTE [kWh]"]*(p_res["% Tracción"]/100), p_res["Energía PRMTE [kWh]"]*(p_res["% 12 KV"]/100)
             df_energy_master = pd.concat([df_energy_master, p_res.rename(columns={"Energía PRMTE [kWh]":"E_Total"})[["Fecha","E_Total","E_Tr","E_12"]]]).drop_duplicates(subset=["Fecha"], keep="last")
-        if r["all_fact_h"]:
-            f_res = pd.DataFrame(r["all_fact_h"]).groupby("Fecha")["Consumo Horario [kWh]"].sum().reset_index()
+        if not df_f_d.empty:
+            f_res = df_f_d.groupby("Fecha")["Consumo Horario [kWh]"].sum().reset_index()
             f_res = pd.merge(f_res, df_seat[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left").fillna(0)
             f_res["E_Tr"], f_res["E_12"] = f_res["Consumo Horario [kWh]"]*(f_res["% Tracción"]/100), f_res["Consumo Horario [kWh]"]*(f_res["% 12 KV"]/100)
             df_energy_master = pd.concat([df_energy_master, f_res.rename(columns={"Consumo Horario [kWh]":"E_Total"})[["Fecha","E_Total","E_Tr","E_12"]]]).drop_duplicates(subset=["Fecha"], keep="last")
@@ -249,7 +233,19 @@ def main():
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
 
     tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía cruda", "⚖️ Comparación Energía hr", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
-    with tabs[0]: render_resumen(df_ops)
+    with tabs[0]:
+        st.header("📊 Resumen Operacional")
+        if not df_ops.empty:
+            df_res_f = get_filtros(df_ops, "res")
+            if not df_res_f.empty:
+                to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{(tk_val/to_val*100) if to_val>0 else 0:.2f} %")
+                # Resumen Jornada con orden forzado
+                res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum"}).reset_index()
+                res_j['Tipo Día'] = pd.Categorical(res_j['Tipo Día'], categories=ORDEN_JORNADA, ordered=True)
+                st.table(res_j.sort_values("Tipo Día"))
+
     with tabs[1]: st.dataframe(get_filtros(df_ops, "ops"))
     with tabs[2]: 
         if not df_tr.empty:
@@ -258,21 +254,27 @@ def main():
         if not df_tr_acum.empty:
             st.subheader("📈 Odómetro Acumulado")
             st.dataframe(df_tr_acum.pivot_table(index="Tren", columns=df_tr_acum["Fecha"].dt.day, values="Valor", aggfunc='max'))
-    with tabs[3]: # PESTAÑAS DE ENERGÍA RESTAURADAS
+    
+    with tabs[3]: # PESTAÑAS DE ENERGÍA CRUDA
         sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
         with sub_e[0]: st.dataframe(df_seat)
         with sub_e[1]: st.dataframe(df_p_d)
         with sub_e[2]: st.dataframe(df_f_d)
+        
     with tabs[4]: render_comparacion_horaria(r["all_comp_full"])
-    with tabs[5]: 
+    
+    with tabs[5]:
         if r["all_comp_full"]:
             df_reg = pd.DataFrame(r["all_comp_full"]).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
             fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
             df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
             df_reg = df_reg[df_reg['Hora']<=5]
-            df_reg['Año'], df_reg['Tipo Día'] = df_reg['Fecha'].dt.year, pd.Categorical(df_reg['Fecha'].apply(get_tipo_dia), categories=ORDEN_JORNADA, ordered=True)
+            df_reg['Año'] = df_reg['Fecha'].dt.year
+            df_reg['Tipo Día'] = df_reg['Fecha'].apply(get_tipo_dia)
             c1, c2, c3 = st.columns(3)
-            f_ra, f_rj, f_rh = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a"), c2.selectbox("Jornada", ['Total'] + ORDEN_JORNADA, key="reg_j"), c3.selectbox("Hora", range(6), key="reg_h")
+            f_ra = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a")
+            f_rj = c2.selectbox("Jornada", ['Total'] + ORDEN_JORNADA, key="reg_j")
+            f_rh = c3.selectbox("Hora", range(6), key="reg_h")
             df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
             if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
             df_pl = df_pl.sort_values('Fecha')
@@ -281,13 +283,7 @@ def main():
                 IQR = Q3 - Q1
                 lim_sup, lim_inf = Q3 + 1.5*IQR, Q1 - 1.5*IQR
                 df_norm = df_pl[(df_pl['Consumo Horario [kWh]']>=lim_inf) & (df_pl['Consumo Horario [kWh]']<=lim_sup)].copy()
-                st.session_state.outliers = df_pl[(df_pl['Consumo Horario [kWh]']<lim_inf) | (df_pl['Consumo Horario [kWh]']>lim_sup)].copy()
-                if len(df_norm) > 1:
-                    x, y = np.arange(len(df_norm)), df_norm['Consumo Horario [kWh]'].values
-                    m, n = np.polyfit(x, y, 1); r2 = 1 - (np.sum((y - (m*x+n))**2) / np.sum((y - np.mean(y))**2))
-                    st.line_chart(pd.DataFrame({'Real': y, 'Tendencia': m*x+n}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
-                    st.markdown(f"**Ecuación:** $Consumo = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
-    with tabs[6]: st.dataframe(st.session_state.outliers)
+                st.line_chart(pd.DataFrame({'Real': df_norm['Consumo Horario [kWh]'].values}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
 
 if __name__ == "__main__":
     main()
