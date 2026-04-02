@@ -39,7 +39,31 @@ def get_tipo_dia(fch):
     if fch.weekday() == 5: return "S"
     return "L"
 
-# --- 2. FUNCIONES DE EXPORTACIÓN ---
+# --- 2. FUNCIONES DE AYUDA (FILTROS Y EXPORTACIÓN) ---
+
+def get_filtros(df, prefijo):
+    """Función de filtrado dinámico para las pestañas."""
+    if df.empty: return df
+    c1, c2, c3 = st.columns(3)
+    anios = sorted(df['Fecha'].dt.year.unique())
+    meses = sorted(df['Fecha'].dt.month.unique())
+    
+    f_ano = c1.multiselect(f"Seleccionar Año", anios, default=anios, key=f"{prefijo}_a")
+    f_mes = c2.multiselect(f"Seleccionar Mes", meses, default=meses, key=f"{prefijo}_m")
+    
+    mask = df['Fecha'].dt.year.isin(f_ano) & df['Fecha'].dt.month.isin(f_mes)
+    
+    if 'N° Semana' in df.columns:
+        semanas = sorted(df[mask]['N° Semana'].unique()) if not df[mask].empty else []
+        f_sem = c3.multiselect("N° Semana", semanas, key=f"{prefijo}_s")
+        if f_sem: mask &= df['N° Semana'].isin(f_sem)
+        
+    if 'Tipo Día' in df.columns:
+        jornadas = ['L', 'S', 'D/F']
+        f_jor = st.multiselect("Jornada", jornadas, default=jornadas, key=f"{prefijo}_j")
+        if f_jor: mask &= df['Tipo Día'].isin(f_jor)
+        
+    return df[mask]
 
 def to_pptx(title_text, df=None, metrics_dict=None):
     prs = Presentation()
@@ -67,7 +91,7 @@ def to_pptx(title_text, df=None, metrics_dict=None):
                 table.cell(r + 1, c).text = str(val) if not isinstance(val, float) else f"{val:,.1f}"
     binary_output = BytesIO(); prs.save(binary_output); return binary_output.getvalue()
 
-# --- 3. MOTOR DE DATOS ---
+# --- 3. MOTOR DE PROCESAMIENTO ---
 
 def procesar_todo(todos, start_date, end_date):
     results = {"all_ops":[], "all_tr":[], "all_tr_acum":[], "all_seat":[], "all_prmte_15":[], "all_fact_h":[], "all_comp_full":[]}
@@ -174,7 +198,7 @@ def render_comparacion_horaria(all_comp_full):
             for anio in sorted(df_st['Año'].unique()):
                 pivot_st[(anio, "Total Anual")] = df_st[df_st['Año'] == anio].groupby("Hora")["Consumo Horario [kWh]"].median()
             
-            # Reordenar para que el Total Anual quede al final de cada año
+            # Reordenar columnas para que el Total Anual quede al final de cada año
             pivot_st = pivot_st.sort_index(axis=1, level=[0, 1])
             
             st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
@@ -196,12 +220,17 @@ def main():
 
     if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
     
+    # Procesar datos
     r = procesar_todo((f_umr or []) + (f_seat_files or []) + (f_bill_files or []), start_date, end_date)
     
+    # Construir DataFrames
     df_ops, df_tr, df_tr_acum, df_seat = pd.DataFrame(r["all_ops"]), pd.DataFrame(r["all_tr"]), pd.DataFrame(r["all_tr_acum"]), pd.DataFrame(r["all_seat"])
+    
+    # Restaurar Datos de Energía para las pestañas de auditoría
     df_p_d = pd.DataFrame(r["all_prmte_15"]) if r["all_prmte_15"] else pd.DataFrame()
     df_f_d = pd.DataFrame(r["all_fact_h"]) if r["all_fact_h"] else pd.DataFrame()
     
+    # Lógica Master Energía
     df_energy_master = pd.DataFrame()
     if not df_seat.empty:
         df_energy_master = df_seat[["Fecha", "Total [kWh]", "Tracción [kWh]", "12 KV [kWh]"]].copy().rename(columns={"Total [kWh]":"E_Total", "Tracción [kWh]":"E_Tr", "12 KV [kWh]":"E_12"})
@@ -219,6 +248,7 @@ def main():
     if not df_ops.empty and not df_energy_master.empty:
         df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
 
+    # Tabs
     tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación Energía hr", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
     with tabs[0]: render_resumen(df_ops)
     with tabs[1]: st.dataframe(get_filtros(df_ops, "ops"))
@@ -229,14 +259,13 @@ def main():
         if not df_tr_acum.empty:
             st.subheader("📈 Odómetro Acumulado")
             st.dataframe(df_tr_acum.pivot_table(index="Tren", columns=df_tr_acum["Fecha"].dt.day, values="Valor", aggfunc='max'))
-    with tabs[3]: 
+    with tabs[3]: # RESTAURADAS PESTAÑAS DE ENERGÍA
         sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
         with sub_e[0]: st.dataframe(df_seat)
         with sub_e[1]: st.dataframe(df_p_d)
         with sub_e[2]: st.dataframe(df_f_d)
     with tabs[4]: render_comparacion_horaria(r["all_comp_full"])
     with tabs[5]: 
-        # Lógica de regresión integrada (restaurada)
         if r["all_comp_full"]:
             df_reg = pd.DataFrame(r["all_comp_full"]).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
             fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
