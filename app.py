@@ -20,7 +20,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. FUNCIONES DE APOYO ---
+# --- 2. FUNCIONES BASE ---
 
 def parse_latam_number(val):
     if pd.isna(val): return 0.0
@@ -63,14 +63,14 @@ def to_pptx(title_text, df=None, metrics_dict=None):
 # --- 3. SIDEBAR ---
 with st.sidebar:
     st.header("📅 Filtro Global")
-    date_range = st.date_input("Periodo", value=(date.today().replace(day=1), date.today()))
+    date_range = st.date_input("Selecciona el período", value=(date.today().replace(day=1), date.today()))
     start_date, end_date = (date_range[0], date_range[1]) if len(date_range)==2 else (date_range[0], date_range[0])
-    st.header("📂 Archivos")
-    f_umr = st.file_uploader("1. UMR", type=["xlsx"], accept_multiple_files=True)
-    f_seat_f = st.file_uploader("2. SEAT", type=["xlsx"], accept_multiple_files=True)
-    f_bill_f = st.file_uploader("3. Factura/PRMTE", type=["xlsx"], accept_multiple_files=True)
+    st.header("📂 Carga de Archivos")
+    f_umr = st.file_uploader("1. UMR / Odómetros", type=["xlsx"], accept_multiple_files=True)
+    f_seat_f = st.file_uploader("2. Energía SEAT", type=["xlsx"], accept_multiple_files=True)
+    f_bill_f = st.file_uploader("3. Facturación y PRMTE", type=["xlsx"], accept_multiple_files=True)
 
-# --- 4. PROCESAMIENTO (REVISADO LÍNEA POR LÍNEA) ---
+# --- 4. MOTOR DE DATOS (RESTAURADO) ---
 all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h, all_comp_full = [], [], [], [], [], [], []
 archivos = (f_umr or []) + (f_seat_f or []) + (f_bill_f or [])
 
@@ -81,7 +81,7 @@ for f in archivos:
             su = sn.upper()
             if any(k in su for k in ['UMR', 'RESUMEN']):
                 df = pd.read_excel(f, sheet_name=sn, header=None)
-                h = next((i for i in range(min(50, len(df))) if any(k in str(df.iloc[i]).upper() for k in ['ODO', 'FECHA'])), None)
+                h = next((i for i in range(min(100, len(df))) if any(k in str(df.iloc[i]).upper() for k in ['ODO', 'FECHA'])), None)
                 if h is not None:
                     df_p = pd.read_excel(f, sheet_name=sn, header=h)
                     df_p.columns = [re.sub(r'[^A-Z]', '', str(c).upper().replace('Ó','O')) for c in df_p.columns]
@@ -112,22 +112,23 @@ for f in archivos:
                     if pd.notna(fs) and start_date <= fs.date() <= end_date:
                         all_seat.append({"Fecha": fs.normalize(), "Total [kWh]": parse_latam_number(df_s.iloc[i, 3]), "Tracción [kWh]": parse_latam_number(df_s.iloc[i, 5]), "12 KV [kWh]": parse_latam_number(df_s.iloc[i, 7])})
 
-            if any(k in su for k in ['PRMTE', 'FACTURA']):
+            if any(k in su for k in ['PRMTE', 'FACTURA', 'MEDIDA']):
                 df_f = pd.read_excel(f, sheet_name=sn, header=None)
-                hi = next((i for i in range(len(df_f)) if any(k in str(df_f.iloc[i]).upper() for k in ['AÑO', 'FECHAHORA'])), None)
+                hi = next((i for i in range(len(df_f)) if any(k in str(df_f.iloc[i]).upper() for k in ['AÑO', 'FECHAHORA', 'INTERVALO'])), None)
                 if hi is not None:
                     df_d = pd.read_excel(f, sheet_name=sn, header=hi)
-                    if 'AÑO' in df_d.columns:
+                    if 'AÑO' in df_d.columns: # Caso PRMTE
                         df_d['TS'] = pd.to_datetime(df_d[['AÑO','MES','DIA','HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'})) + pd.to_timedelta(df_d['INICIO INTERVALO'].astype(int), unit='m')
                         col_e = [c for c in df_d.columns if 'Energia_Activa' in str(c)][0]
                         for _, r in df_d.iterrows():
                             all_comp_full.append({"Fecha": r['TS'].normalize(), "Hora": r['TS'].hour, "Consumo": parse_latam_number(r[col_e]), "Fuente": "PRMTE"})
-                            if start_date <= r['TS'].date() <= end_date: all_prmte_15.append({"Fecha": r['TS'].normalize(), "Energía PRMTE [kWh]": parse_latam_number(r[col_e])})
-                    else:
-                        df_d.columns = ['TS', 'Val']; df_d['TS'] = pd.to_datetime(df_d['TS'], errors='coerce')
+                            if start_date <= r['TS'].date() <= end_date: all_prmte_15.append({"Fecha": r['TS'].normalize(), "Hora": r['TS'].hour, "Energía PRMTE [kWh]": parse_latam_number(r[col_e])})
+                    else: # Caso Factura
+                        df_d.columns = ['TS', 'Val']
+                        df_d['TS'] = pd.to_datetime(df_d['TS'], errors='coerce')
                         for _, r in df_d.dropna(subset=['TS']).iterrows():
                             all_comp_full.append({"Fecha": r['TS'].normalize(), "Hora": r['TS'].hour, "Consumo": abs(parse_latam_number(r['Val'])), "Fuente": "Factura"})
-                            if start_date <= r['TS'].date() <= end_date: all_fact_h.append({"Fecha": r['TS'].normalize(), "Consumo Horario [kWh]": abs(parse_latam_number(r['Val']))})
+                            if start_date <= r['TS'].date() <= end_date: all_fact_h.append({"Fecha": r['TS'].normalize(), "Hora": r['TS'].hour, "Consumo Horario [kWh]": abs(parse_latam_number(r['Val']))})
     except: continue
 
 # --- 5. PREPARACIÓN DE DATAFRAMES ---
@@ -150,6 +151,8 @@ if not df_fact.empty:
 if not df_ops.empty and not df_m.empty: df_ops = pd.merge(df_ops, df_m, on="Fecha", how="left")
 
 # --- 6. RENDERIZADO (TABS) ---
+if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
+
 if not df_ops.empty or not df_seat.empty or all_comp_full:
     tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía cruda", "⚖️ Comparación hr", "📈 Regresión", "🚨 Atípicos"])
     
@@ -164,12 +167,19 @@ if not df_ops.empty or not df_seat.empty or all_comp_full:
             df_f = df_ops[mask].copy()
             if not df_f.empty:
                 to, tk = df_f["Odómetro [km]"].sum(), df_f["Tren-Km [km]"].sum()
-                st.columns(3)[0].metric("Odómetro", f"{to:,.1f}"); st.columns(3)[1].metric("Tren-Km", f"{tk:,.1f}"); st.columns(3)[2].metric("UMR", f"{(tk/to*100) if to>0 else 0:.2f}%")
+                st.columns(3)[0].metric("Odómetro", f"{to:,.1f} km")
+                st.columns(3)[1].metric("Tren-Km", f"{tk:,.1f} km")
+                st.columns(3)[2].metric("UMR", f"{(tk/to*100) if to>0 else 0:.2f}%")
                 st.write("#### Jornada (Orden: L, S, D/F)")
-                res_j = df_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum"}).reindex(ORDEN_JORNADA).dropna(how='all')
-                st.table(res_j.style.format("{:,.1f}"))
+                res_j = df_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum"}).reindex(ORDEN_JORNADA).dropna(how='all').reset_index()
+                st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}"}))
+
+    with tabs[1]: # --- OPERACIONES ---
+        st.header("📑 Datos Operacionales")
+        if not df_ops.empty: st.dataframe(df_ops, use_container_width=True)
 
     with tabs[2]: # --- TRENES ---
+        st.header("🚆 Control de Kilometraje")
         if not df_tr.empty:
             st.subheader("🚗 Kilometraje Diario")
             st.dataframe(df_tr.pivot_table(index="Tren", columns=df_tr["Fecha"].dt.day, values="Valor", aggfunc='sum'))
@@ -178,9 +188,11 @@ if not df_ops.empty or not df_seat.empty or all_comp_full:
             st.dataframe(df_tr_a.pivot_table(index="Tren", columns=df_tr_a["Fecha"].dt.day, values="Valor", aggfunc='max'))
 
     with tabs[3]: # --- ENERGÍA CRUDA ---
-        st.header("⚡ Energía (SEAT / PRMTE / Factura)")
-        s1, s2, s3 = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Factura"])
-        s1.dataframe(df_seat); s2.dataframe(df_prmte); s3.dataframe(df_fact)
+        st.header("⚡ Datos Base de Energía")
+        s1, s2, s3 = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
+        with s1: st.dataframe(df_seat)
+        with s2: st.dataframe(df_prmte)
+        with s3: st.dataframe(df_fact)
 
     with tabs[4]: # --- COMPARACIÓN HORARIA ---
         if all_comp_full:
@@ -190,29 +202,51 @@ if not df_ops.empty or not df_seat.empty or all_comp_full:
             df_cf = df_c[~((df_c['Fuente']=='PRMTE') & (df_c['Fecha'].isin(fechas_f)))].copy()
             df_cf['Año'] = df_cf['Fecha'].dt.year.astype(str)
             df_cf['Tipo Día'] = df_cf['Fecha'].apply(get_tipo_dia)
-            pivot = df_cf.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo", aggfunc='median').fillna(0)
-            for a in sorted(df_cf['Año'].unique()):
-                pivot[(a, "Total Anual")] = df_cf[df_cf['Año'] == a].groupby("Hora")["Consumo"].median()
-            new_c = []
-            for a in sorted(df_cf['Año'].unique()):
-                for j in ORDEN_JORNADA + ["Total Anual"]:
-                    if (a, j) in pivot.columns: new_c.append((a, j))
-            st.dataframe(pivot.reindex(columns=new_c).style.format("{:,.1f}"), use_container_width=True)
+            
+            pivot_st = df_cf.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo", aggfunc='median').fillna(0)
+            
+            # Hora Total por Año
+            for anio in sorted(df_cf['Año'].unique()):
+                pivot_st[(anio, "Total Anual")] = df_cf[df_cf['Año'] == anio].groupby("Hora")["Consumo"].median()
+            
+            # Forzar Orden L, S, D/F, Total
+            new_cols = []
+            for anio in sorted(df_cf['Año'].unique()):
+                for jor in ORDEN_JORNADA + ["Total Anual"]:
+                    if (anio, jor) in pivot_st.columns: new_cols.append((anio, jor))
+            
+            pivot_st = pivot_st.reindex(columns=new_cols)
+            st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
 
-    with tabs[5]: # --- REGRESIÓN (00-05 AM) ---
-        st.header("📈 Regresión 12kV (Baja Tensión)")
+    with tabs[5]: # --- REGRESIÓN NOCTURNA ---
+        st.header("📈 Regresión 12kV (00:00 - 05:00)")
+        st.info("💡 Análisis de carga basal (Baja Tensión) sin trenes en operación.")
         if all_comp_full:
             df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora'])['Consumo'].sum().reset_index()
             df_reg = df_reg[df_reg['Hora'] <= 5]
-            df_reg['Año'] = df_reg['Fecha'].dt.year
-            c1, c2 = st.columns(2)
-            fa, fh = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="ra"), c2.selectbox("Hora", range(6), key="rh")
-            df_p = df_reg[(df_reg['Año']==fa) & (df_reg['Hora']==fh)].sort_values("Fecha")
-            if len(df_p) > 2:
-                y = df_p['Consumo'].values; x = np.arange(len(y))
-                m, n = np.polyfit(x, y, 1); r2 = np.corrcoef(x, y)[0,1]**2
-                st.line_chart(pd.DataFrame({"Real":y, "Tendencia":m*x+n}, index=df_p['Fecha'].dt.strftime('%d/%m')))
-                st.metric("Carga Basal (n)", f"{n:.2f} kWh")
-                st.write(f"Ecuación: y = {m:.4f}x + {n:.2f} | R² = {r2:.4f}")
+            if not df_reg.empty:
+                df_reg['Año'] = df_reg['Fecha'].dt.year
+                c1, c2 = st.columns(2)
+                f_ra = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_sel_a")
+                f_rh = c2.selectbox("Hora", range(6), key="reg_sel_h")
+                
+                df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)].sort_values("Fecha")
+                if len(df_pl) > 2:
+                    Q1, Q3 = df_pl['Consumo'].quantile(0.25), df_pl['Consumo'].quantile(0.75)
+                    IQR = Q3 - Q1
+                    df_norm = df_pl[(df_pl['Consumo'] >= Q1 - 1.5*IQR) & (df_pl['Consumo'] <= Q3 + 1.5*IQR)].copy()
+                    st.session_state.outliers = df_pl[(df_pl['Consumo'] < Q1 - 1.5*IQR) | (df_pl['Consumo'] > Q3 + 1.5*IQR)]
+                    
+                    x, y = np.arange(len(df_norm)), df_norm['Consumo'].values
+                    m, n = np.polyfit(x, y, 1)
+                    r2 = np.corrcoef(x, y)[0,1]**2
+                    
+                    st.line_chart(pd.DataFrame({"Real":y, "Tendencia":m*x+n}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
+                    st.metric("Carga Basal (Intercepto n)", f"{n:.2f} kWh")
+                    st.markdown(f"**Ecuación de Desempeño:** $y = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
+
+    with tabs[6]: # --- ATÍPICOS ---
+        st.header("🚨 Datos Atípicos")
+        st.dataframe(st.session_state.outliers, use_container_width=True)
 else:
-    st.info("👋 Sube los archivos para activar el dashboard.")
+    st.info("👋 Sube los archivos en el panel lateral para activar el análisis.")
