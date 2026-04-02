@@ -54,16 +54,17 @@ def to_pptx(title_text, df=None, metrics_dict=None):
             p.text = f"• {k}: {v}"; p.font.size = Pt(16); p.font.bold = True; p.font.color.rgb = RGBColor(0, 81, 149)
         y_cursor += Inches(1.2)
     if df is not None and not df.empty:
-        df_display = df.head(15).reset_index() if "Hora" in df.index.names else df.head(15)
-        rows, cols = df_display.shape
-        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(4)).table
-        for c, col_name in enumerate(df_display.columns):
+        # Reset index si es un pivot para exportar bien
+        df_export = df.reset_index() if df.index.name or any(df.index.names) else df
+        rows, cols = df_export.shape
+        table = slide.shapes.add_table(rows + 1, cols, Inches(0.5), y_cursor, Inches(9), Inches(4.5)).table
+        for c, col_name in enumerate(df_export.columns):
             cell = table.cell(0, c); cell.text = str(col_name); cell.fill.solid()
             cell.fill.fore_color.rgb = RGBColor(0, 81, 149)
             cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
         for r in range(rows):
             for c in range(cols):
-                val = df_display.iloc[r, c]
+                val = df_export.iloc[r, c]
                 table.cell(r + 1, c).text = str(val) if not isinstance(val, float) else f"{val:,.1f}"
     binary_output = BytesIO(); prs.save(binary_output); return binary_output.getvalue()
 
@@ -144,6 +145,8 @@ def procesar_todo(todos, start_date, end_date):
 def render_resumen(df_ops):
     st.header("📊 Resumen Operacional")
     if not df_ops.empty:
+        # Ordenar Jornada: L -> S -> D/F
+        df_ops['Tipo Día'] = pd.Categorical(df_ops['Tipo Día'], categories=['L', 'S', 'D/F'], ordered=True)
         df_res_f = get_filtros(df_ops, "res")
         if not df_res_f.empty:
             to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
@@ -152,27 +155,37 @@ def render_resumen(df_ops):
             c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{umr_val:.2f} %")
             e_tot = df_res_f["E_Total"].sum() if "E_Total" in df_res_f.columns else 0
             st.metric("Energía Total", f"{e_tot:,.0f} kWh")
+            
+            st.write("#### Resumen por Jornada")
             res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
             st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
-            st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, {"Energía": f"{e_tot:,.0f}"}), "EFE_Resumen.pptx")
 
 def render_comparacion_horaria(all_comp_full):
     st.header("⚖️ Comparación de Energía Horaria")
     if all_comp_full:
         df_c = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
         fechas_f = df_c[df_c['Fuente']=='Factura']['Fecha'].unique()
-        # Jerarquía: Si hay Factura, ignorar PRMTE para ese día
         df_cf = df_c[~((df_c['Fuente']=='PRMTE') & (df_c['Fecha'].isin(fechas_f)))].copy()
-        df_cf['Año'], df_cf['Tipo Día'] = df_cf['Fecha'].dt.year, df_cf['Fecha'].apply(get_tipo_dia)
         
-        st.write("#### Mediana de Consumo Horario (2025 vs 2026)")
+        # Aplicar Orden Categorical
+        df_cf['Tipo Día'] = pd.Categorical(df_cf['Fecha'].apply(get_tipo_dia), categories=['L', 'S', 'D/F'], ordered=True)
+        df_cf['Año'] = df_cf['Fecha'].dt.year
+        
+        st.write("#### Mediana de Consumo Horario y Hora Total")
         df_st = df_cf[df_cf['Año'].isin([2025, 2026])]
         if not df_st.empty:
-            pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=False).fillna(0)
+            # Pivot principal
+            pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=True).fillna(0)
+            
+            # --- CÁLCULO HORA TOTAL ---
+            # Promedio o Suma de todas las jornadas por hora
+            hora_total = df_st.groupby("Hora")["Consumo Horario [kWh]"].median()
+            pivot_st[("Total", "Hora Total")] = hora_total
+            
             st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
-            st.download_button("📥 Descargar Comparativa (PPTX)", to_pptx("Comparación Horaria Mediana", pivot_st), "EFE_Comparativa.pptx")
+            st.download_button("📥 Descargar Comparativa con Hora Total (PPTX)", to_pptx("Comparativa Horaria Completa", pivot_st), "EFE_Comparativa_Horaria.pptx")
     else:
-        st.info("Cargue archivos de Facturación o PRMTE para ver la comparación.")
+        st.info("Cargue archivos de Facturación o PRMTE.")
 
 def render_regresion(all_comp_full):
     st.header("📈 Regresión Nocturna")
@@ -181,12 +194,14 @@ def render_regresion(all_comp_full):
         fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
         df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
         df_reg = df_reg[df_reg['Hora']<=5]
-        df_reg['Año'], df_reg['Tipo Día'] = df_reg['Fecha'].dt.year, df_reg['Fecha'].apply(get_tipo_dia)
+        df_reg['Año'], df_reg['Tipo Día'] = df_reg['Fecha'].dt.year, pd.Categorical(df_reg['Fecha'].apply(get_tipo_dia), categories=['L', 'S', 'D/F'], ordered=True)
+        
         c1, c2, c3 = st.columns(3)
         f_ra, f_rj, f_rh = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a"), c2.selectbox("Jornada", ['Total', 'L', 'S', 'D/F'], key="reg_j"), c3.selectbox("Hora", range(6), key="reg_h")
         df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
         if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
         df_pl = df_pl.sort_values('Fecha')
+        
         if len(df_pl) > 1:
             Q1, Q3 = df_pl['Consumo Horario [kWh]'].quantile(0.25), df_pl['Consumo Horario [kWh]'].quantile(0.75)
             IQR = Q3 - Q1
@@ -255,7 +270,6 @@ def main():
     with tabs[0]: render_resumen(df_ops)
     with tabs[1]: st.dataframe(get_filtros(df_ops, "ops"))
     with tabs[2]: 
-        # Lógica de renderizado de trenes (diario y acumulado)
         if not df_tr.empty:
             st.subheader("🚗 Kilometraje Diario")
             st.dataframe(df_tr.pivot_table(index="Tren", columns=df_tr["Fecha"].dt.day, values="Valor", aggfunc='sum'))
