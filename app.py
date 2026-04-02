@@ -9,6 +9,9 @@ from datetime import datetime, date
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
+# Librería para gráfico combinado
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # --- 1. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
@@ -223,7 +226,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             f_sem = c3.multiselect("N° Semana", sorted(df[mask]['N° Semana'].unique()) if not df[mask].empty else [], key=f"{prefijo}_s")
             if f_sem: mask &= df['N° Semana'].isin(f_sem)
         if 'Tipo Día' in df.columns:
-            # Ordenar las opciones del multiselect según ORDEN_TIPO_DIA
             unique_vals = df[mask]['Tipo Día'].unique()
             ordered_vals = [d for d in ORDEN_TIPO_DIA if d in unique_vals]
             f_jor = st.multiselect("Jornada", ordered_vals, default=ordered_vals, key=f"{prefijo}_j")
@@ -240,15 +242,90 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
                 umr_val = (tk_val/to_val*100) if to_val>0 else 0
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Odómetro Total", f"{to_val:,.1f} km"); c2.metric("Tren-Km Total", f"{tk_val:,.1f} km"); c3.metric("UMR Global", f"{umr_val:.2f} %")
+                c1.metric("Odómetro Total", f"{to_val:,.1f} km")
+                c2.metric("Tren-Km Total", f"{tk_val:,.1f} km")
+                c3.metric("UMR Global", f"{umr_val:.2f} %")
                 e_tot = df_res_f["E_Total"].sum() if "E_Total" in df_res_f.columns else 0
                 st.metric("Energía Total", f"{e_tot:,.0f} kWh")
                 st.write("#### Resumen por Jornada")
                 res_j = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
-                # Ordenar según ORDEN_TIPO_DIA
                 res_j['Tipo Día'] = pd.Categorical(res_j['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
                 res_j = res_j.sort_values('Tipo Día').reset_index(drop=True)
                 st.table(res_j.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
+
+                # --- NUEVO: GRÁFICO COMBINADO CON FILTRO POR SEMANA ---
+                st.write("#### 📊 Evolución por Semana (Odómetro, Tren-Km y UMR)")
+                # Preparar datos agregados por semana (sin aplicar filtros de año/mes/jornada, solo respetando rango global)
+                df_semanal = df_res_f.copy()
+                # Agrupar por semana (usando N° Semana y año para diferenciar)
+                df_semanal['Año_Semana'] = df_semanal['Fecha'].dt.strftime('%Y-Semana%W')
+                df_semanal = df_semanal.groupby('Año_Semana').agg({
+                    'Odómetro [km]': 'sum',
+                    'Tren-Km [km]': 'sum',
+                    'UMR [%]': 'mean'
+                }).reset_index()
+                # Ordenar por semana
+                df_semanal = df_semanal.sort_values('Año_Semana')
+                
+                # Filtro independiente de semanas (multiselect)
+                semanas_disponibles = df_semanal['Año_Semana'].tolist()
+                semanas_seleccionadas = st.multiselect(
+                    "Selecciona Semanas (formato Año-SemanaXX)",
+                    options=semanas_disponibles,
+                    default=semanas_disponibles,
+                    key="graf_sem"
+                )
+                
+                if semanas_seleccionadas:
+                    df_filtrado = df_semanal[df_semanal['Año_Semana'].isin(semanas_seleccionadas)]
+                    # Crear gráfico combinado
+                    fig = make_subplots(specs=[[{"secondary_y": True}]])
+                    
+                    # Barras para Odómetro y Tren-Km (en miles de km para mejor escala)
+                    fig.add_trace(go.Bar(
+                        x=df_filtrado['Año_Semana'],
+                        y=df_filtrado['Odómetro [km]'] / 1000,
+                        name='Odómetro (miles km)',
+                        marker_color='#005195',
+                        yaxis='y'
+                    ), secondary_y=False)
+                    
+                    fig.add_trace(go.Bar(
+                        x=df_filtrado['Año_Semana'],
+                        y=df_filtrado['Tren-Km [km]'] / 1000,
+                        name='Tren-Km (miles km)',
+                        marker_color='#4CAF50',
+                        yaxis='y'
+                    ), secondary_y=False)
+                    
+                    # Línea para UMR (%)
+                    fig.add_trace(go.Scatter(
+                        x=df_filtrado['Año_Semana'],
+                        y=df_filtrado['UMR [%]'],
+                        name='UMR (%)',
+                        mode='lines+markers',
+                        line=dict(color='#FF5733', width=3),
+                        marker=dict(size=8),
+                        yaxis='y2'
+                    ), secondary_y=True)
+                    
+                    # Configurar ejes
+                    fig.update_layout(
+                        title_text="Evolución Semanal de Operaciones",
+                        xaxis_title="Semana",
+                        barmode='group',
+                        legend_title="Métrica",
+                        height=500,
+                        hovermode='x unified'
+                    )
+                    fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
+                    fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Selecciona al menos una semana para mostrar el gráfico.")
+                # -------------------------------------------------------------
+
                 m_res = {"Odómetro": f"{to_val:,.1f} km", "Tren-Km": f"{tk_val:,.1f} km", "UMR": f"{umr_val:.2f}%", "Energía Total": f"{e_tot:,.0f} kWh"}
                 st.download_button("📥 Descargar Resumen (PPTX)", to_pptx("Resumen Operacional", res_j, m_res), "EFE_Resumen.pptx")
 
