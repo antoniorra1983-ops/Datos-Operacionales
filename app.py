@@ -227,21 +227,17 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
-            # Filtros específicos para Resumen
+            # Filtros generales del Resumen (afectan a todas las sub-pestañas)
             st.write("#### Filtros de visualización")
             col1, col2, col3 = st.columns(3)
-            # Años disponibles
             anios_res = sorted(df_ops['Fecha'].dt.year.unique())
             f_ano_res = col1.multiselect("Año", anios_res, default=anios_res, key="res_ano")
-            # Meses disponibles
             meses_res = sorted(df_ops['Fecha'].dt.month.unique())
             f_mes_res = col2.multiselect("Mes", meses_res, default=meses_res, key="res_mes")
-            # Tipo día
             tipos_res = df_ops['Tipo Día'].unique()
             orden_tipos = [d for d in ORDEN_TIPO_DIA if d in tipos_res]
             f_tipo_res = col3.multiselect("Tipo Día", orden_tipos, default=orden_tipos, key="res_tipo")
             
-            # Aplicar filtros
             mask_res = (df_ops['Fecha'].dt.year.isin(f_ano_res)) & (df_ops['Fecha'].dt.month.isin(f_mes_res))
             if f_tipo_res:
                 mask_res &= df_ops['Tipo Día'].isin(f_tipo_res)
@@ -258,7 +254,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 
                 with sub_tabs[0]:  # Semanal
                     st.write("##### Evolución Semanal")
-                    # Filtros específicos para semana
                     col_s1, col_s2, col_s3 = st.columns(3)
                     anios_sem = sorted(df_res_f['Fecha'].dt.year.unique())
                     f_ano_sem = col_s1.selectbox("Año (semana)", anios_sem, key="sem_ano")
@@ -497,7 +492,6 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                         st.info("Haz clic derecho y selecciona 'Guardar como PDF' en el diálogo de impresión.")
                 with col_btn2:
                     if st.button("📈 Exportar a XLSX", use_container_width=True):
-                        # Datos del período filtrado principal (sin desglose semanal/mensual)
                         metrics_dict = {
                             "Odómetro Total (km)": to_val,
                             "Tren-Km Total (km)": tk_val,
@@ -549,30 +543,34 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             tipos_op = df_ops['Tipo Día'].unique()
             orden_tipos_op = [d for d in ORDEN_TIPO_DIA if d in tipos_op]
             f_tipo_op = col_o3.multiselect("Tipo Día", orden_tipos_op, default=orden_tipos_op, key="op_tipo")
+            
             mask_op = (df_ops['Fecha'].dt.year.isin(f_ano_op)) & (df_ops['Fecha'].dt.month.isin(f_mes_op))
             if f_tipo_op:
                 mask_op &= df_ops['Tipo Día'].isin(f_tipo_op)
             df_ops_f = df_ops[mask_op].copy()
             
-            # Mostrar columnas relevantes: Fecha, Tipo Día, Odómetro [km], Tren-Km [km], UMR [%], E_Tr (Tracción), IDE (kWh/km)
-            cols_mostrar = ['Fecha', 'Tipo Día', 'Odómetro [km]', 'Tren-Km [km]', 'UMR [%]', 'E_Tr', 'IDE (kWh/km)']
-            # Asegurar que existan las columnas
-            for col in cols_mostrar:
-                if col not in df_ops_f.columns:
-                    if col == 'IDE (kWh/km)':
-                        df_ops_f['IDE (kWh/km)'] = 0
-                    elif col == 'E_Tr':
-                        df_ops_f['E_Tr'] = 0
-                    else:
-                        df_ops_f[col] = 0
-            st.dataframe(df_ops_f[cols_mostrar].style.format({
+            # Mostrar todas las columnas disponibles, incluyendo IDE
+            if 'IDE (kWh/km)' not in df_ops_f.columns:
+                df_ops_f['IDE (kWh/km)'] = 0
+            
+            # Seleccionar columnas para mostrar
+            columnas_mostrar = ['Fecha', 'Tipo Día', 'N° Semana', 'Odómetro [km]', 'Tren-Km [km]', 'UMR [%]', 'E_Tr', 'IDE (kWh/km)']
+            # Agregar otras columnas si existen (E_Total, E_12, Fuente)
+            for col in ['E_Total', 'E_12', 'Fuente']:
+                if col in df_ops_f.columns:
+                    columnas_mostrar.append(col)
+            
+            st.dataframe(df_ops_f[columnas_mostrar].style.format({
                 'Odómetro [km]': "{:,.1f}",
                 'Tren-Km [km]': "{:,.1f}",
                 'UMR [%]': "{:.2f}%",
                 'E_Tr': "{:,.0f}",
-                'IDE (kWh/km)': "{:.4f}"
+                'IDE (kWh/km)': "{:.4f}",
+                'E_Total': "{:,.0f}",
+                'E_12': "{:,.0f}"
             }), use_container_width=True)
-            st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f[cols_mostrar]), "EFE_Operaciones.pptx")
+            
+            st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f[columnas_mostrar]), "EFE_Operaciones.pptx")
         else:
             st.info("No hay datos de operaciones para mostrar.")
 
