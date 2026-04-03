@@ -549,25 +549,28 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
                 mask_op &= df_ops['Tipo Día'].isin(f_tipo_op)
             df_ops_f = df_ops[mask_op].copy()
             
-            # Mostrar todas las columnas disponibles, incluyendo IDE
+            # Asegurar que las columnas de energía existan (por si no se cargaron datos)
+            for col in ['E_Total', 'E_Tr', 'E_12', 'Fuente']:
+                if col not in df_ops_f.columns:
+                    df_ops_f[col] = 0
             if 'IDE (kWh/km)' not in df_ops_f.columns:
                 df_ops_f['IDE (kWh/km)'] = 0
             
-            # Seleccionar columnas para mostrar
-            columnas_mostrar = ['Fecha', 'Tipo Día', 'N° Semana', 'Odómetro [km]', 'Tren-Km [km]', 'UMR [%]', 'E_Tr', 'IDE (kWh/km)']
-            # Agregar otras columnas si existen (E_Total, E_12, Fuente)
-            for col in ['E_Total', 'E_12', 'Fuente']:
-                if col in df_ops_f.columns:
-                    columnas_mostrar.append(col)
+            # Seleccionar columnas para mostrar (incluyendo Energía Total y 12 kV)
+            columnas_mostrar = [
+                'Fecha', 'Tipo Día', 'N° Semana', 
+                'Odómetro [km]', 'Tren-Km [km]', 'UMR [%]', 
+                'E_Total', 'E_Tr', 'E_12', 'IDE (kWh/km)', 'Fuente'
+            ]
             
             st.dataframe(df_ops_f[columnas_mostrar].style.format({
                 'Odómetro [km]': "{:,.1f}",
                 'Tren-Km [km]': "{:,.1f}",
                 'UMR [%]': "{:.2f}%",
-                'E_Tr': "{:,.0f}",
-                'IDE (kWh/km)': "{:.4f}",
                 'E_Total': "{:,.0f}",
-                'E_12': "{:,.0f}"
+                'E_Tr': "{:,.0f}",
+                'E_12': "{:,.0f}",
+                'IDE (kWh/km)': "{:.4f}"
             }), use_container_width=True)
             
             st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f[columnas_mostrar]), "EFE_Operaciones.pptx")
