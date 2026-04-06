@@ -165,7 +165,6 @@ def leer_fecha_archivo(file):
 
 def procesar_thdr_avanzado(file):
     try:
-        # Intentar leer con engine=None para que pandas elija automáticamente
         try:
             df_raw = pd.read_excel(file, header=None, engine=None)
         except Exception:
@@ -174,7 +173,6 @@ def procesar_thdr_avanzado(file):
         df = df_raw.iloc[2:].copy()
         df = df[pd.to_numeric(df.iloc[:, 1], errors='coerce').notna()]
 
-        # Mapeo de estaciones
         columnas_base = ["Recorrido", "Servicio", "Hora_Prog", "Motriz 1", "Motriz 2", "Unidad"]
         estaciones_raw = [str(est_h[i]) if pd.notna(est_h[i]) else f"Col_{i}" for i in range(6, len(df_raw.columns))]
         nombres_finales, conteos = list(columnas_base), {}
@@ -223,7 +221,6 @@ def procesar_thdr_avanzado(file):
         fecha_info = leer_fecha_archivo(file)
         if fecha_info:
             df['Fecha_Op'] = f"{fecha_info[0]:02d}/{fecha_info[1]:02d}/{fecha_info[2]}"
-        # Asegurar columnas necesarias
         for col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual', 'Hora_Prog', 'Hora_Salida', 'Fecha_Op', 'Min_Prog', 'Min_S_Real', 'TDV_Min']:
             if col not in df.columns:
                 df[col] = 0
@@ -844,17 +841,14 @@ with tabs[6]:
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
-    # Depurador para ver las columnas reales
     with st.expander("🔍 Ver estructura de los DataFrames THDR (depuración)"):
         if not df_thdr_v1.empty:
             st.write("**Columnas en THDR Vía 1:**", list(df_thdr_v1.columns))
-            st.write("**Primeras filas (Vía 1):**")
             st.dataframe(df_thdr_v1.head())
         else:
             st.info("No hay datos para Vía 1.")
         if not df_thdr_v2.empty:
             st.write("**Columnas en THDR Vía 2:**", list(df_thdr_v2.columns))
-            st.write("**Primeras filas (Vía 2):**")
             st.dataframe(df_thdr_v2.head())
         else:
             st.info("No hay datos para Vía 2.")
@@ -865,65 +859,57 @@ with tabs[7]:
             st.info(f"No hay datos de THDR para {titulo}. Sube archivos en la sección correspondiente.")
             return
         
-        # Calcular columnas adicionales si están disponibles
         df_calc = df.copy()
-        # Hora de llegada a la terminal = Min_S_Real + TDV_Min
-        if 'Min_S_Real' in df_calc.columns and 'TDV_Min' in df_calc.columns:
-            df_calc['Hora_Llegada_Terminal'] = df_calc['Min_S_Real'] + df_calc['TDV_Min']
+        # Crear columnas formateadas
+        if 'Min_S_Real' in df_calc.columns:
+            df_calc['Hora_Real_Salida'] = df_calc['Min_S_Real'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         else:
-            df_calc['Hora_Llegada_Terminal'] = 0
+            df_calc['Hora_Real_Salida'] = ""
+        if 'Min_Prog' in df_calc.columns:
+            df_calc['Hora_Programada'] = df_calc['Min_Prog'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+        else:
+            df_calc['Hora_Programada'] = ""
+        if 'Retraso' in df_calc.columns:
+            df_calc['Puntualidad_Salida'] = df_calc['Retraso'].apply(lambda x: format_hms(x, con_signo=True) if pd.notna(x) else "")
+        else:
+            df_calc['Puntualidad_Salida'] = ""
+        if 'TDV_Min' in df_calc.columns:
+            df_calc['TDV'] = df_calc['TDV_Min'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+        else:
+            df_calc['TDV'] = ""
+        if 'Min_S_Real' in df_calc.columns and 'TDV_Min' in df_calc.columns:
+            df_calc['Hora_Llegada_Terminal'] = (df_calc['Min_S_Real'] + df_calc['TDV_Min']).apply(lambda x: format_hms(x) if pd.notna(x) else "")
+        else:
+            df_calc['Hora_Llegada_Terminal'] = ""
         
-        # Mapeo de columnas deseadas a nombres reales
-        columnas_deseadas = {
-            'Fecha': ['Fecha_Op', 'Fecha', 'FECHA', 'Date'],
-            'Servicio': ['Servicio', 'SERVICIO', 'service'],
-            'Hora Prog': ['Hora_Prog', 'Hora Programada', 'HoraProg'],
-            'Hora Real Salida': ['Min_S_Real', 'Hora_Salida', 'HoraSalida'],
-            'Puntualidad Salida': ['Retraso', 'RETRASO'],
-            'Hora Llegada Terminal': ['Hora_Llegada_Terminal'],
-            'TDV': ['TDV_Min', 'TDV'],
-            'Motriz 1': ['Motriz 1', 'MOTRIZ1', 'Motriz1'],
-            'Motriz 2': ['Motriz 2', 'MOTRIZ2', 'Motriz2'],
-            'Unidad': ['Unidad', 'UNIDAD'],
-            'Recorrido': ['Tipo_Rec', 'Recorrido', 'TipoRec'],
-            'Tren-Km': ['Tren-Km', 'TrenKm', 'KM']
+        columnas_base = {
+            'Fecha': 'Fecha_Op',
+            'Servicio': 'Servicio',
+            'Hora Programada': 'Hora_Programada',
+            'Hora Real Salida': 'Hora_Real_Salida',
+            'Puntualidad Salida': 'Puntualidad_Salida',
+            'Hora Llegada Terminal': 'Hora_Llegada_Terminal',
+            'TDV': 'TDV',
+            'Motriz 1': 'Motriz 1',
+            'Motriz 2': 'Motriz 2',
+            'Unidad': 'Unidad',
+            'Recorrido': 'Tipo_Rec',
+            'Tren-Km': 'Tren-Km'
         }
-        rename_dict = {}
-        for nombre_mostrar, posibles in columnas_deseadas.items():
-            for col in df_calc.columns:
-                if any(p in col for p in posibles):
-                    rename_dict[col] = nombre_mostrar
-                    break
-        df_mostrar = df_calc.rename(columns=rename_dict)
-        # Seleccionar columnas finales
-        columnas_finales = [nombre for nombre in columnas_deseadas.keys() if nombre in df_mostrar.columns]
-        if not columnas_finales:
-            st.warning("No se pudieron identificar las columnas esperadas. Mostrando datos crudos:")
+        columnas_disponibles = {}
+        for nombre_mostrar, col_orig in columnas_base.items():
+            if col_orig in df_calc.columns:
+                columnas_disponibles[nombre_mostrar] = col_orig
+            elif col_orig == 'Fecha_Op' and 'Fecha_Op' not in df_calc.columns and 'Fecha' in df_calc.columns:
+                columnas_disponibles[nombre_mostrar] = 'Fecha'
+        if not columnas_disponibles:
+            st.warning("No se encontraron las columnas esperadas. Mostrando datos crudos:")
             st.dataframe(df)
             return
         
-        df_display = df_mostrar[columnas_finales].copy()
-        
-        # Formatear horas (de minutos a HH:MM:SS)
-        if 'Hora Real Salida' in df_display.columns:
-            df_display['Hora Real Salida'] = df_display['Hora Real Salida'].apply(
-                lambda x: format_hms(x) if isinstance(x, (int, float)) and pd.notna(x) else x
-            )
-        if 'Hora Llegada Terminal' in df_display.columns:
-            df_display['Hora Llegada Terminal'] = df_display['Hora Llegada Terminal'].apply(
-                lambda x: format_hms(x) if isinstance(x, (int, float)) and pd.notna(x) else x
-            )
-        if 'Puntualidad Salida' in df_display.columns:
-            df_display['Puntualidad Salida'] = df_display['Puntualidad Salida'].apply(
-                lambda x: format_hms(x, con_signo=True) if isinstance(x, (int, float)) and pd.notna(x) else x
-            )
-        if 'TDV' in df_display.columns:
-            df_display['TDV'] = df_display['TDV'].apply(
-                lambda x: format_hms(x) if isinstance(x, (int, float)) and pd.notna(x) else x
-            )
+        df_display = pd.DataFrame({nombre: df_calc[col_orig] for nombre, col_orig in columnas_disponibles.items()})
         if 'Tren-Km' in df_display.columns:
             df_display['Tren-Km'] = df_display['Tren-Km'].apply(lambda x: f"{x:,.1f}" if isinstance(x, (int, float)) else x)
-        
         st.dataframe(df_display, use_container_width=True)
     
     mostrar_tabla_thdr(df_thdr_v1, "Vía 1", "🟢")
