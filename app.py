@@ -1,4 +1,4 @@
-vimport streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import re
@@ -836,11 +836,11 @@ with tabs[6]:
     else:
         st.success("No hay anomalías detectadas en la selección actual.")
 
-# ================== PESTAÑA THDR (VERSIÓN FINAL CORREGIDA) ==================
+# ================== PESTAÑA THDR ==================
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
-    # Depurador para ver las columnas reales (útil para diagnosticar)
+    # Depurador para ver las columnas reales
     with st.expander("🔍 Ver estructura de los DataFrames THDR (depuración)"):
         if not df_thdr_v1.empty:
             st.write("**Columnas en THDR Vía 1:**", list(df_thdr_v1.columns))
@@ -855,14 +855,12 @@ with tabs[7]:
         else:
             st.info("No hay datos para Vía 2.")
     
-    # Función para mostrar una tabla de THDR con adaptación dinámica
     def mostrar_tabla_thdr(df, titulo, color_emoji):
         st.subheader(f"{color_emoji} {titulo}")
         if df.empty:
             st.info(f"No hay datos de THDR para {titulo}. Sube archivos en la sección correspondiente.")
             return
         
-        # Mapeo de columnas deseadas a nombres reales (buscando coincidencias parciales)
         columnas_deseadas = {
             'Fecha': ['Fecha_Op', 'Fecha', 'FECHA', 'Date'],
             'Servicio': ['Servicio', 'SERVICIO', 'service'],
@@ -876,16 +874,13 @@ with tabs[7]:
             'Retraso (PS)': ['Retraso', 'RETRASO'],
             'Puntual': ['Puntual', 'PUNTUAL']
         }
-        # Construir diccionario de mapeo real
         rename_dict = {}
         for nombre_mostrar, posibles in columnas_deseadas.items():
             for col in df.columns:
                 if any(p in col for p in posibles):
                     rename_dict[col] = nombre_mostrar
                     break
-        # Renombrar columnas que coincidan
         df_mostrar = df.rename(columns=rename_dict)
-        # Seleccionar columnas que ahora tienen nombres legibles
         columnas_finales = [nombre for nombre in columnas_deseadas.keys() if nombre in df_mostrar.columns]
         if not columnas_finales:
             st.warning("No se pudieron identificar las columnas esperadas. Mostrando datos crudos:")
@@ -893,7 +888,6 @@ with tabs[7]:
             return
         
         df_display = df_mostrar[columnas_finales].copy()
-        # Formatear hora real y retraso si existen
         if 'Hora Real' in df_display.columns:
             df_display['Hora Real'] = df_display['Hora Real'].apply(
                 lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if isinstance(x, (int, float)) and pd.notna(x) else x
@@ -907,14 +901,11 @@ with tabs[7]:
                 lambda x: "Sí" if x == 1 else "No" if x == 0 else x
             )
         if 'Tren-Km' in df_display.columns:
-            # Formato con decimales
             df_display['Tren-Km'] = df_display['Tren-Km'].apply(lambda x: f"{x:,.1f}" if isinstance(x, (int, float)) else x)
         
         st.dataframe(df_display, use_container_width=True)
     
-    # Mostrar Vía 1
     mostrar_tabla_thdr(df_thdr_v1, "Vía 1", "🟢")
-    # Mostrar Vía 2
     mostrar_tabla_thdr(df_thdr_v2, "Vía 2", "🔵")
 
 # --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
