@@ -172,7 +172,6 @@ def procesar_thdr_avanzado(file):
             df_raw = pd.read_excel(file, header=None, engine='xlrd')
         
         # Las primeras dos filas son encabezados: fila0 = nombres de estaciones, fila1 = "Hora Llegada"/"Hora Salida"
-        # Construir nombres de columnas combinados
         header0 = df_raw.iloc[0].fillna('').astype(str)
         header1 = df_raw.iloc[1].fillna('').astype(str)
         column_names = []
@@ -183,16 +182,20 @@ def procesar_thdr_avanzado(file):
                 column_names.append(f"{base}_{sub}")
             else:
                 column_names.append(base)
-        # Asignar nombres a todas las columnas
         df = df_raw.iloc[2:].copy()
         df.columns = column_names
         
         # Identificar columnas base (Recorrido, Servicio, Hora_Prog, Motriz 1, Motriz 2, Unidad)
-        # Según el ejemplo, estas son las primeras 6 columnas
         base_cols = ['Recorrido', 'Servicio', 'Hora_Prog', 'Motriz 1', 'Motriz 2', 'Unidad']
         for i, col in enumerate(column_names[:6]):
             if i < len(base_cols):
                 df.rename(columns={col: base_cols[i]}, inplace=True)
+        
+        # Convertir Motriz 1 y Motriz 2 a numérico
+        df['Motriz 1'] = pd.to_numeric(df['Motriz 1'], errors='coerce').fillna(0).astype(int)
+        df['Motriz 2'] = pd.to_numeric(df['Motriz 2'], errors='coerce').fillna(0).astype(int)
+        # Calcular Unidad según Motriz 2: 0 -> S, >0 -> M
+        df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
         
         # Identificar primera estación (Puerto) y última (Limache) por sus nombres
         puerto_col = None
@@ -218,11 +221,11 @@ def procesar_thdr_avanzado(file):
         # Hora programada
         df['Min_Prog'] = df['Hora_Prog'].apply(convertir_a_minutos)
         
-        # Retraso (PS) = Hora_Salida_Real - Min_Prog
+        # Retraso (PS)
         df['Retraso'] = df['Hora_Salida_Real'] - df['Min_Prog']
         df['Puntual'] = (abs(df['Retraso']) <= 5).astype(int)
         
-        # TDV = Hora_Llegada_Real - Hora_Salida_Real (si la llegada es menor, sumar 1440)
+        # TDV
         tdv = df['Hora_Llegada_Real'] - df['Hora_Salida_Real']
         tdv = tdv.apply(lambda x: x if x > 0 else x + 1440)
         df['TDV_Min'] = tdv
@@ -248,7 +251,7 @@ def procesar_thdr_avanzado(file):
         
         # Distancia base y Tren-Km
         df['Dist_Base'] = df['Tipo_Rec'].map(DISTANCIAS).fillna(0)
-        df['Peso'] = df['Unidad'].apply(lambda x: 2 if str(x).strip().upper() == 'M' else 1)
+        df['Peso'] = df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         df['Tren-Km'] = df['Dist_Base'] * df['Peso']
         
         # Fecha
