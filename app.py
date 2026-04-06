@@ -389,7 +389,7 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         return df[mask]
 
     # --- 7. RENDERIZADO DE PESTAÑAS ---
-    tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación Energía hr", "📈 Regresión Nocturna", "🚨 Datos Atípicos"])
+    tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación Energía hr", "📈 Regresión Nocturna", "🚨 Datos Atípicos", "📋 THDR"])
     
     with tabs[0]: # Resumen
         if not df_ops.empty:
@@ -863,6 +863,52 @@ if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
             st.download_button("📥 Descargar Atípicos (PPTX)", to_pptx("Datos Atípicos de Instalaciones", st.session_state.outliers), "EFE_Atipicos.pptx")
         else:
             st.success("No hay anomalías detectadas en la selección actual.")
+
+    with tabs[7]: # THDR
+        st.header("📋 Datos THDR - Vía 1 y Vía 2")
+        if not df_total.empty:
+            # Filtros adicionales dentro de la pestaña
+            st.write("#### Filtros rápidos")
+            col1, col2 = st.columns(2)
+            servicios = sorted(df_total['Servicio'].unique())
+            servicio_sel = col1.multiselect("Filtrar por Servicio", servicios, default=[])
+            motrices = sorted(df_total['Motriz 1'].unique())
+            motriz_sel = col2.multiselect("Filtrar por Motriz 1", motrices, default=[])
+            
+            # Aplicar filtros
+            df_filtrado = df_total.copy()
+            if servicio_sel:
+                df_filtrado = df_filtrado[df_filtrado['Servicio'].isin(servicio_sel)]
+            if motriz_sel:
+                df_filtrado = df_filtrado[df_filtrado['Motriz 1'].isin(motriz_sel)]
+            
+            # Mostrar Vía 1
+            st.subheader("🟢 Vía 1")
+            df_v1 = df_filtrado[df_filtrado['Vía'] == 'Vía 1'].copy()
+            if not df_v1.empty:
+                df_v1['Hora_Salida_Str'] = df_v1['Hora_Salida'].apply(lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if pd.notna(x) else "")
+                df_v1['Retraso_Str'] = df_v1['Retraso'].apply(lambda x: format_hms(x, con_signo=True))
+                df_v1['Puntual_Str'] = df_v1['Puntual'].apply(lambda x: "Sí" if x == 1 else "No")
+                df_v1_display = df_v1[['Fecha_Op', 'Servicio', 'Hora_Prog', 'Hora_Salida_Str', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso_Str', 'Puntual_Str']]
+                df_v1_display.columns = ['Fecha', 'Servicio', 'Hora Prog', 'Hora Real', 'Motriz 1', 'Motriz 2', 'Unidad', 'Recorrido', 'Tren-Km', 'Retraso (PS)', 'Puntual']
+                st.dataframe(df_v1_display.style.format({'Tren-Km': "{:.1f}"}), use_container_width=True)
+            else:
+                st.info("No hay datos para Vía 1 con los filtros seleccionados.")
+            
+            # Mostrar Vía 2
+            st.subheader("🔵 Vía 2")
+            df_v2 = df_filtrado[df_filtrado['Vía'] == 'Vía 2'].copy()
+            if not df_v2.empty:
+                df_v2['Hora_Salida_Str'] = df_v2['Hora_Salida'].apply(lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if pd.notna(x) else "")
+                df_v2['Retraso_Str'] = df_v2['Retraso'].apply(lambda x: format_hms(x, con_signo=True))
+                df_v2['Puntual_Str'] = df_v2['Puntual'].apply(lambda x: "Sí" if x == 1 else "No")
+                df_v2_display = df_v2[['Fecha_Op', 'Servicio', 'Hora_Prog', 'Hora_Salida_Str', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso_Str', 'Puntual_Str']]
+                df_v2_display.columns = ['Fecha', 'Servicio', 'Hora Prog', 'Hora Real', 'Motriz 1', 'Motriz 2', 'Unidad', 'Recorrido', 'Tren-Km', 'Retraso (PS)', 'Puntual']
+                st.dataframe(df_v2_display.style.format({'Tren-Km': "{:.1f}"}), use_container_width=True)
+            else:
+                st.info("No hay datos para Vía 2 con los filtros seleccionados.")
+        else:
+            st.info("No hay datos de THDR cargados. Sube archivos de THDR Vía 1 y/o Vía 2.")
 
     # --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
     st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
