@@ -6,3 +6,4 @@ python-pptx
 holidays
 openpyxl
 xlsxwriter
+xlrd
