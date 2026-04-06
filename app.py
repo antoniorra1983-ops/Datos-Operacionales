@@ -185,15 +185,30 @@ def procesar_thdr_avanzado(file):
         df = df_raw.iloc[2:].copy()
         df.columns = column_names
         
-        # Identificar columnas base (Recorrido, Servicio, Hora_Prog, Motriz 1, Motriz 2, Unidad)
-        base_cols = ['Recorrido', 'Servicio', 'Hora_Prog', 'Motriz 1', 'Motriz 2', 'Unidad']
-        for i, col in enumerate(column_names[:6]):
-            if i < len(base_cols):
-                df.rename(columns={col: base_cols[i]}, inplace=True)
+        # --- Búsqueda flexible de columnas base ---
+        def buscar_columna(nombres_posibles):
+            for col in df.columns:
+                for posible in nombres_posibles:
+                    if posible.lower() in col.lower():
+                        return col
+            return None
         
-        # Convertir Motriz 1 y Motriz 2 a numérico
-        df['Motriz 1'] = pd.to_numeric(df['Motriz 1'], errors='coerce').fillna(0).astype(int)
-        df['Motriz 2'] = pd.to_numeric(df['Motriz 2'], errors='coerce').fillna(0).astype(int)
+        # Mapeo de columnas necesarias
+        col_recorrido = buscar_columna(['Recorrido', 'Trayecto', 'Ruta'])
+        col_servicio = buscar_columna(['Servicio', 'Serv', 'N° Servicio'])
+        col_hora_prog = buscar_columna(['Hora_Prog', 'Hora Programada', 'Hora Prog', 'Prog'])
+        col_motriz1 = buscar_columna(['Motriz 1', 'Motriz1', 'M1', 'Motor 1'])
+        col_motriz2 = buscar_columna(['Motriz 2', 'Motriz2', 'M2', 'Motor 2'])
+        col_unidad = buscar_columna(['Unidad', 'Tren', 'Formación'])
+        
+        # Asignar o crear columnas con valores por defecto
+        df['Recorrido'] = df[col_recorrido] if col_recorrido else ''
+        df['Servicio'] = df[col_servicio] if col_servicio else 0
+        df['Hora_Prog'] = df[col_hora_prog] if col_hora_prog else '00:00:00'
+        df['Motriz 1'] = pd.to_numeric(df[col_motriz1] if col_motriz1 else 0, errors='coerce').fillna(0).astype(int)
+        df['Motriz 2'] = pd.to_numeric(df[col_motriz2] if col_motriz2 else 0, errors='coerce').fillna(0).astype(int)
+        df['Unidad_Original'] = df[col_unidad] if col_unidad else ''
+        
         # Calcular Unidad según Motriz 2: 0 -> S, >0 -> M
         df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
         
@@ -201,9 +216,9 @@ def procesar_thdr_avanzado(file):
         puerto_col = None
         limache_col = None
         for col in df.columns:
-            if 'Puerto' in col and 'Hora Salida' in col:
+            if 'puerto' in col.lower() and 'hora salida' in col.lower():
                 puerto_col = col
-            if 'Limache' in col and 'Hora Llegada' in col:
+            if 'limache' in col.lower() and 'hora llegada' in col.lower():
                 limache_col = col
         
         # Calcular hora real de salida (primera estación)
@@ -230,15 +245,15 @@ def procesar_thdr_avanzado(file):
         tdv = tdv.apply(lambda x: x if x > 0 else x + 1440)
         df['TDV_Min'] = tdv
         
-        # Determinar tipo de recorrido (origen-destino) usando la primera y última estación
+        # Determinar tipo de recorrido (origen-destino)
         def cod_estacion(nombre):
-            if 'Puerto' in nombre:
+            if 'puerto' in nombre.lower():
                 return 'PU'
-            elif 'Limache' in nombre:
+            elif 'limache' in nombre.lower():
                 return 'LI'
-            elif 'Vina' in nombre or 'Viña' in nombre:
+            elif 'vina' in nombre.lower() or 'viña' in nombre.lower():
                 return 'VM'
-            elif 'Belloto' in nombre:
+            elif 'belloto' in nombre.lower():
                 return 'EB'
             else:
                 return nombre[:2]
@@ -258,11 +273,13 @@ def procesar_thdr_avanzado(file):
         fecha_info = leer_fecha_archivo(file)
         if fecha_info:
             df['Fecha_Op'] = f"{fecha_info[0]:02d}/{fecha_info[1]:02d}/{fecha_info[2]}"
+        else:
+            df['Fecha_Op'] = ''
         
         # Asegurar columnas necesarias
         for col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual', 'Hora_Prog', 'Fecha_Op']:
             if col not in df.columns:
-                df[col] = 0
+                df[col] = 0 if col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Tren-Km'] else ''
         
         return df, df['Tren-Km'].sum(), df[df['TDV_Min'] > 0]['TDV_Min'].mean(), (df['Puntual'].sum() / len(df) * 100) if len(df) > 0 else 0
     except Exception as e:
