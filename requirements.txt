@@ -1,6 +1,8 @@
+streamlit
 pandas
 numpy
-holidays
-xlsxwriter
-openpyxl
+plotly
 python-pptx
+holidays
+openpyxl
+xlsxwriter
