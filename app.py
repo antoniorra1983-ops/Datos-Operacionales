@@ -1,4 +1,4 @@
-import streamlit as st
+vimport streamlit as st
 import pandas as pd
 import numpy as np
 import re
@@ -169,7 +169,7 @@ def procesar_thdr_avanzado(file):
         est_h = df_raw.iloc[0].ffill().values
         df = df_raw.iloc[2:].copy()
         df = df[pd.to_numeric(df.iloc[:, 1], errors='coerce').notna()]
-        
+
         # Mapeo de estaciones
         columnas_base = ["Recorrido", "Servicio", "Hora_Prog", "Motriz 1", "Motriz 2", "Unidad"]
         estaciones_raw = [str(est_h[i]) if pd.notna(est_h[i]) else f"Col_{i}" for i in range(6, len(df_raw.columns))]
@@ -219,8 +219,13 @@ def procesar_thdr_avanzado(file):
         fecha_info = leer_fecha_archivo(file)
         if fecha_info:
             df['Fecha_Op'] = f"{fecha_info[0]:02d}/{fecha_info[1]:02d}/{fecha_info[2]}"
+        # Asegurar columnas necesarias
+        for col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual', 'Hora_Prog', 'Hora_Salida', 'Fecha_Op']:
+            if col not in df.columns:
+                df[col] = 0
         return df, df['Tren-Km'].sum(), df[df['TDV_Min'] > 0]['TDV_Min'].mean(), (df['Puntual'].sum() / len(df) * 100) if len(df) > 0 else 0
     except Exception as e:
+        st.error(f"Error procesando THDR: {e}")
         return pd.DataFrame(), 0, 0, 0
 
 # --- 4. INICIALIZACIÓN DE DATAFRAMES VACÍOS ---
@@ -231,8 +236,8 @@ df_seat = pd.DataFrame()
 df_energy_master = pd.DataFrame()
 df_p_d = pd.DataFrame()
 df_f_d = pd.DataFrame()
-df_thdr_v1 = pd.DataFrame()  # Datos THDR Vía 1
-df_thdr_v2 = pd.DataFrame()  # Datos THDR Vía 2
+df_thdr_v1 = pd.DataFrame()
+df_thdr_v2 = pd.DataFrame()
 all_comp_full = []
 all_prmte_15 = []
 all_fact_h = []
@@ -831,71 +836,86 @@ with tabs[6]:
     else:
         st.success("No hay anomalías detectadas en la selección actual.")
 
-# ================== PESTAÑA THDR (NUEVA VERSIÓN) ==================
+# ================== PESTAÑA THDR (VERSIÓN FINAL CORREGIDA) ==================
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
-    # Mostrar datos de Vía 1
-    st.subheader("🟢 Vía 1")
-    if not df_thdr_v1.empty:
-        # Filtros rápidos para Vía 1
-        col_f1, col_f2 = st.columns(2)
-        servicios_v1 = sorted(df_thdr_v1['Servicio'].unique()) if 'Servicio' in df_thdr_v1.columns else []
-        motrices_v1 = sorted(df_thdr_v1['Motriz 1'].unique()) if 'Motriz 1' in df_thdr_v1.columns else []
-        servicio_sel_v1 = col_f1.multiselect("Filtrar por Servicio (Vía 1)", servicios_v1, default=[]) if servicios_v1 else []
-        motriz_sel_v1 = col_f2.multiselect("Filtrar por Motriz 1 (Vía 1)", motrices_v1, default=[]) if motrices_v1 else []
-        
-        df_v1_filt = df_thdr_v1.copy()
-        if servicio_sel_v1:
-            df_v1_filt = df_v1_filt[df_v1_filt['Servicio'].isin(servicio_sel_v1)]
-        if motriz_sel_v1:
-            df_v1_filt = df_v1_filt[df_v1_filt['Motriz 1'].isin(motriz_sel_v1)]
-        
-        # Preparar columnas para mostrar
-        cols_mostrar = ['Fecha_Op', 'Servicio', 'Hora_Prog', 'Hora_Salida', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual']
-        cols_existentes = [c for c in cols_mostrar if c in df_v1_filt.columns]
-        df_v1_display = df_v1_filt[cols_existentes].copy()
-        if 'Hora_Salida' in df_v1_display.columns:
-            df_v1_display['Hora_Salida'] = df_v1_display['Hora_Salida'].apply(lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if pd.notna(x) else "")
-        if 'Retraso' in df_v1_display.columns:
-            df_v1_display['Retraso'] = df_v1_display['Retraso'].apply(lambda x: format_hms(x, con_signo=True))
-        if 'Puntual' in df_v1_display.columns:
-            df_v1_display['Puntual'] = df_v1_display['Puntual'].apply(lambda x: "Sí" if x == 1 else "No")
-        rename_map = {'Fecha_Op': 'Fecha', 'Hora_Prog': 'Hora Prog', 'Hora_Salida': 'Hora Real', 'Tipo_Rec': 'Recorrido', 'Retraso': 'Retraso (PS)'}
-        df_v1_display = df_v1_display.rename(columns={k: v for k, v in rename_map.items() if k in df_v1_display.columns})
-        st.dataframe(df_v1_display.style.format({'Tren-Km': "{:.1f}"}), use_container_width=True)
-    else:
-        st.info("No hay datos de THDR para Vía 1. Sube archivos en 'THDR Vía 1'.")
+    # Depurador para ver las columnas reales (útil para diagnosticar)
+    with st.expander("🔍 Ver estructura de los DataFrames THDR (depuración)"):
+        if not df_thdr_v1.empty:
+            st.write("**Columnas en THDR Vía 1:**", list(df_thdr_v1.columns))
+            st.write("**Primeras filas (Vía 1):**")
+            st.dataframe(df_thdr_v1.head())
+        else:
+            st.info("No hay datos para Vía 1.")
+        if not df_thdr_v2.empty:
+            st.write("**Columnas en THDR Vía 2:**", list(df_thdr_v2.columns))
+            st.write("**Primeras filas (Vía 2):**")
+            st.dataframe(df_thdr_v2.head())
+        else:
+            st.info("No hay datos para Vía 2.")
     
-    # Mostrar datos de Vía 2
-    st.subheader("🔵 Vía 2")
-    if not df_thdr_v2.empty:
-        col_f1b, col_f2b = st.columns(2)
-        servicios_v2 = sorted(df_thdr_v2['Servicio'].unique()) if 'Servicio' in df_thdr_v2.columns else []
-        motrices_v2 = sorted(df_thdr_v2['Motriz 1'].unique()) if 'Motriz 1' in df_thdr_v2.columns else []
-        servicio_sel_v2 = col_f1b.multiselect("Filtrar por Servicio (Vía 2)", servicios_v2, default=[]) if servicios_v2 else []
-        motriz_sel_v2 = col_f2b.multiselect("Filtrar por Motriz 1 (Vía 2)", motrices_v2, default=[]) if motrices_v2 else []
+    # Función para mostrar una tabla de THDR con adaptación dinámica
+    def mostrar_tabla_thdr(df, titulo, color_emoji):
+        st.subheader(f"{color_emoji} {titulo}")
+        if df.empty:
+            st.info(f"No hay datos de THDR para {titulo}. Sube archivos en la sección correspondiente.")
+            return
         
-        df_v2_filt = df_thdr_v2.copy()
-        if servicio_sel_v2:
-            df_v2_filt = df_v2_filt[df_v2_filt['Servicio'].isin(servicio_sel_v2)]
-        if motriz_sel_v2:
-            df_v2_filt = df_v2_filt[df_v2_filt['Motriz 1'].isin(motriz_sel_v2)]
+        # Mapeo de columnas deseadas a nombres reales (buscando coincidencias parciales)
+        columnas_deseadas = {
+            'Fecha': ['Fecha_Op', 'Fecha', 'FECHA', 'Date'],
+            'Servicio': ['Servicio', 'SERVICIO', 'service'],
+            'Hora Prog': ['Hora_Prog', 'Hora Programada', 'HoraProg'],
+            'Hora Real': ['Hora_Salida', 'Hora Salida', 'HoraReal'],
+            'Motriz 1': ['Motriz 1', 'MOTRIZ1', 'Motriz1'],
+            'Motriz 2': ['Motriz 2', 'MOTRIZ2', 'Motriz2'],
+            'Unidad': ['Unidad', 'UNIDAD'],
+            'Recorrido': ['Tipo_Rec', 'Recorrido', 'TipoRec'],
+            'Tren-Km': ['Tren-Km', 'TrenKm', 'KM'],
+            'Retraso (PS)': ['Retraso', 'RETRASO'],
+            'Puntual': ['Puntual', 'PUNTUAL']
+        }
+        # Construir diccionario de mapeo real
+        rename_dict = {}
+        for nombre_mostrar, posibles in columnas_deseadas.items():
+            for col in df.columns:
+                if any(p in col for p in posibles):
+                    rename_dict[col] = nombre_mostrar
+                    break
+        # Renombrar columnas que coincidan
+        df_mostrar = df.rename(columns=rename_dict)
+        # Seleccionar columnas que ahora tienen nombres legibles
+        columnas_finales = [nombre for nombre in columnas_deseadas.keys() if nombre in df_mostrar.columns]
+        if not columnas_finales:
+            st.warning("No se pudieron identificar las columnas esperadas. Mostrando datos crudos:")
+            st.dataframe(df)
+            return
         
-        cols_mostrar = ['Fecha_Op', 'Servicio', 'Hora_Prog', 'Hora_Salida', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual']
-        cols_existentes = [c for c in cols_mostrar if c in df_v2_filt.columns]
-        df_v2_display = df_v2_filt[cols_existentes].copy()
-        if 'Hora_Salida' in df_v2_display.columns:
-            df_v2_display['Hora_Salida'] = df_v2_display['Hora_Salida'].apply(lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if pd.notna(x) else "")
-        if 'Retraso' in df_v2_display.columns:
-            df_v2_display['Retraso'] = df_v2_display['Retraso'].apply(lambda x: format_hms(x, con_signo=True))
-        if 'Puntual' in df_v2_display.columns:
-            df_v2_display['Puntual'] = df_v2_display['Puntual'].apply(lambda x: "Sí" if x == 1 else "No")
-        rename_map = {'Fecha_Op': 'Fecha', 'Hora_Prog': 'Hora Prog', 'Hora_Salida': 'Hora Real', 'Tipo_Rec': 'Recorrido', 'Retraso': 'Retraso (PS)'}
-        df_v2_display = df_v2_display.rename(columns={k: v for k, v in rename_map.items() if k in df_v2_display.columns})
-        st.dataframe(df_v2_display.style.format({'Tren-Km': "{:.1f}"}), use_container_width=True)
-    else:
-        st.info("No hay datos de THDR para Vía 2. Sube archivos en 'THDR Vía 2'.")
+        df_display = df_mostrar[columnas_finales].copy()
+        # Formatear hora real y retraso si existen
+        if 'Hora Real' in df_display.columns:
+            df_display['Hora Real'] = df_display['Hora Real'].apply(
+                lambda x: f"{int(x//60):02d}:{int(x%60):02d}" if isinstance(x, (int, float)) and pd.notna(x) else x
+            )
+        if 'Retraso (PS)' in df_display.columns:
+            df_display['Retraso (PS)'] = df_display['Retraso (PS)'].apply(
+                lambda x: format_hms(x, con_signo=True) if isinstance(x, (int, float)) and pd.notna(x) else x
+            )
+        if 'Puntual' in df_display.columns:
+            df_display['Puntual'] = df_display['Puntual'].apply(
+                lambda x: "Sí" if x == 1 else "No" if x == 0 else x
+            )
+        if 'Tren-Km' in df_display.columns:
+            # Formato con decimales
+            df_display['Tren-Km'] = df_display['Tren-Km'].apply(lambda x: f"{x:,.1f}" if isinstance(x, (int, float)) else x)
+        
+        st.dataframe(df_display, use_container_width=True)
+    
+    # Mostrar Vía 1
+    mostrar_tabla_thdr(df_thdr_v1, "Vía 1", "🟢")
+    # Mostrar Vía 2
+    mostrar_tabla_thdr(df_thdr_v2, "Vía 2", "🔵")
 
 # --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
 st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
