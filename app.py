@@ -205,8 +205,19 @@ def procesar_thdr_avanzado(file):
         df['Recorrido'] = df[col_recorrido] if col_recorrido else ''
         df['Servicio'] = df[col_servicio] if col_servicio else 0
         df['Hora_Prog'] = df[col_hora_prog] if col_hora_prog else '00:00:00'
-        df['Motriz 1'] = pd.to_numeric(df[col_motriz1] if col_motriz1 else 0, errors='coerce').fillna(0).astype(int)
-        df['Motriz 2'] = pd.to_numeric(df[col_motriz2] if col_motriz2 else 0, errors='coerce').fillna(0).astype(int)
+        
+        # Motriz 1: si no se encuentra, crear Serie de ceros del mismo tamaño
+        if col_motriz1:
+            df['Motriz 1'] = pd.to_numeric(df[col_motriz1], errors='coerce').fillna(0).astype(int)
+        else:
+            df['Motriz 1'] = pd.Series(0, index=df.index)
+        
+        # Motriz 2: similar
+        if col_motriz2:
+            df['Motriz 2'] = pd.to_numeric(df[col_motriz2], errors='coerce').fillna(0).astype(int)
+        else:
+            df['Motriz 2'] = pd.Series(0, index=df.index)
+        
         df['Unidad_Original'] = df[col_unidad] if col_unidad else ''
         
         # Calcular Unidad según Motriz 2: 0 -> S, >0 -> M
