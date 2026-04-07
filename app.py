@@ -65,41 +65,100 @@ def convertir_a_minutos(val):
         return None
     except: return None
 
+def parsear_fecha_a1(val_raw):
+    """
+    Parsea la celda A1 soportando múltiples formatos.
+    Retorna (date, descripcion) o (None, mensaje_error).
+    """
+    try:
+        dt = pd.to_datetime(val_raw)
+        if pd.notna(dt):
+            return dt.date(), f"datetime directo → {dt.date()}"
+    except: pass
+
+    s = str(val_raw).strip().split('.')[0].strip()
+
+    # Numérico DDMMYY (5-6 dígitos): 10126 o 010126
+    if re.fullmatch(r'\d{5,6}', s):
+        padded = s.zfill(6)
+        try:
+            d2, m2, a2 = int(padded[:2]), int(padded[2:4]), 2000 + int(padded[4:])
+            return date(a2, m2, d2), f"DDMMYY ({s} → {d2:02d}/{m2:02d}/{a2})"
+        except: pass
+
+    for fmt in ('%d-%m-%Y','%d/%m/%Y','%d.%m.%Y','%Y-%m-%d','%d-%m-%y','%d/%m/%y'):
+        try:
+            dt2 = datetime.strptime(s, fmt)
+            return dt2.date(), f"texto '{fmt}' → {dt2.date()}"
+        except: pass
+
+    return None, f"no reconocido: valor='{val_raw}', limpio='{s}'"
+
+
 def procesar_thdr_eficiente(file, start_date, end_date):
+    diag = {"archivo": getattr(file, 'name', '?'), "A1_raw": None,
+            "fecha_parseada": None, "en_rango": None, "filas": 0, "error": None}
     try:
         df_raw = pd.read_excel(file, header=None)
-        # 1. Fecha en A1 (index 0,0) - Formato 10126 o 010126
-        val_a1 = str(df_raw.iloc[0, 0]).strip().split('.')[0].zfill(6)
-        d, m, a = int(val_a1[:2]), int(val_a1[2:4]), 2000 + int(val_a1[4:])
-        fch_dt = pd.to_datetime(date(a, m, d)).normalize()
-        
-        if not (start_date <= fch_dt.date() <= end_date): return pd.DataFrame()
+        val_a1 = df_raw.iloc[0, 0]
+        diag["A1_raw"] = str(val_a1)
 
-        # 2. Cabeceras: Fila 1 Estaciones, Fila 2 Llegada/Salida
+        fch_date, desc = parsear_fecha_a1(val_a1)
+        diag["fecha_parseada"] = desc
+
+        if fch_date is None:
+            diag["error"] = "No se pudo parsear la fecha de A1"
+            return pd.DataFrame(), diag
+
+        diag["en_rango"] = f"{start_date} ≤ {fch_date} ≤ {end_date} → {start_date <= fch_date <= end_date}"
+        if not (start_date <= fch_date <= end_date):
+            diag["error"] = "Fecha fuera del rango del Sidebar"
+            return pd.DataFrame(), diag
+
+        fch_dt = pd.to_datetime(fch_date).normalize()
+
+        # Cabeceras fila 0 (estaciones) y fila 1 (llegada/salida)
         r0 = df_raw.iloc[0].copy(); r0[0] = np.nan
         h1 = r0.ffill().astype(str)
         h2 = df_raw.iloc[1].fillna('').astype(str)
-        cols = [f"{st_name.strip()}_{tipo.strip()}" if (tipo and st_name != 'nan') else st_name.strip() for st_name, tipo in zip(h1, h2)]
-        
-        # 3. Datos en Fila 6 (Index 5) saltando las 3 vacías (filas 3, 4, 5)
-        df = df_raw.iloc[5:].copy()
-        df.columns = cols
-        df = make_columns_unique(df).dropna(how='all', axis=0)
-        
+        cols = [f"{stn.strip()}_{tip.strip()}" if (tip and stn != 'nan') else stn.strip()
+                for stn, tip in zip(h1, h2)]
+
+        # Detectar fila inicio de datos (primera fila con >2 celdas no vacías después de fila 2)
+        data_start = 5
+        for i in range(2, min(10, len(df_raw))):
+            if df_raw.iloc[i].dropna().shape[0] > 2:
+                data_start = i
+                break
+
+        df = df_raw.iloc[data_start:].copy().reset_index(drop=True)
+        n_cols = len(df.columns)
+        cols_adj = (cols[:n_cols] if len(cols) >= n_cols
+                    else cols + [f"_C{j}" for j in range(n_cols - len(cols))])
+        df.columns = cols_adj
+        df = make_columns_unique(df).dropna(how='all', axis=0).reset_index(drop=True)
+
         for col in df.columns:
-            if any(k in col for k in ['Hora', 'Salida', 'Llegada']):
+            if any(k in str(col) for k in ['Hora', 'Salida', 'Llegada']):
                 df[f"{col}_min"] = df[col].apply(convertir_a_minutos)
-        
+
         c_m2 = next((c for c in df.columns if 'Motriz 2' in str(c)), None)
         df['Unidad'] = df[c_m2].apply(lambda x: 'M' if parse_latam_number(x) > 0 else 'S') if c_m2 else 'S'
         df['Tren-Km'] = 43.13 * df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         df['Fecha_Op'] = fch_dt
-        
-        col_ref = next((c for c in df.columns if ('PUERTO' in c.upper() or 'LIMACHE' in c.upper()) and 'Salida' in c and '_min' in c), None)
-        if col_ref: df['Hora_Ref_Min'] = df[col_ref]
-        
-        return df
-    except: return pd.DataFrame()
+
+        col_ref = next((c for c in df.columns
+                        if ('PUERTO' in str(c).upper() or 'LIMACHE' in str(c).upper())
+                        and 'Salida' in str(c) and '_min' in str(c)), None)
+        if col_ref:
+            df['Hora_Ref_Min'] = df[col_ref]
+
+        diag["filas"] = len(df)
+        return df, diag
+
+    except Exception as e:
+        diag["error"] = str(e)
+        return pd.DataFrame(), diag
 
 # --- 4. INICIALIZACIÓN ---
 df_ops = pd.DataFrame()
@@ -268,16 +327,19 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
             lambda r: r['E_Tr'] / r['Odómetro [km]'] if r['Odómetro [km]'] > 0 else 0, axis=1
         )
 
+    diagnosticos_thdr = []
     if f_v1:
-        df_thdr_v1 = pd.concat(
-            [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v1],
-            ignore_index=True
-        )
+        resultados_v1 = [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v1]
+        diagnosticos_thdr += [r[1] for r in resultados_v1]
+        partes_v1 = [r[0] for r in resultados_v1 if not r[0].empty]
+        df_thdr_v1 = pd.concat(partes_v1, ignore_index=True) if partes_v1 else pd.DataFrame()
     if f_v2:
-        df_thdr_v2 = pd.concat(
-            [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v2],
-            ignore_index=True
-        )
+        resultados_v2 = [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v2]
+        diagnosticos_thdr += [r[1] for r in resultados_v2]
+        partes_v2 = [r[0] for r in resultados_v2 if not r[0].empty]
+        df_thdr_v2 = pd.concat(partes_v2, ignore_index=True) if partes_v2 else pd.DataFrame()
+    if diagnosticos_thdr:
+        st.session_state['diag_thdr'] = diagnosticos_thdr
 
 # --- 7. TABS ---
 tabs = st.tabs([
@@ -503,6 +565,27 @@ with tabs[6]:
 # TAB 7: THDR
 with tabs[7]:
     st.header("📋 Análisis THDR")
+
+    # --- Panel de Diagnóstico ---
+    diags = st.session_state.get('diag_thdr', [])
+    if diags:
+        with st.expander("🔍 Diagnóstico de archivos THDR", expanded=(df_thdr_v1.empty and df_thdr_v2.empty)):
+            for d in diags:
+                ok = d['error'] is None
+                icono = "✅" if ok else "❌"
+                st.markdown(f"**{icono} {d['archivo']}**")
+                cols_d = st.columns(4)
+                cols_d[0].caption("A1 leído"); cols_d[0].code(d['A1_raw'] or '—')
+                cols_d[1].caption("Fecha parseada"); cols_d[1].code(d['fecha_parseada'] or '—')
+                cols_d[2].caption("¿En rango?"); cols_d[2].code(d['en_rango'] or '—')
+                cols_d[3].caption("Estado")
+                if ok:
+                    cols_d[3].success(f"{d['filas']} filas cargadas")
+                else:
+                    cols_d[3].error(d['error'])
+                st.divider()
+
+    # --- Datos ---
     if not df_thdr_v1.empty or not df_thdr_v2.empty:
         partes = [df for df in [df_thdr_v1, df_thdr_v2] if not df.empty]
         df_t_v = pd.concat(partes, ignore_index=True)
@@ -519,5 +602,5 @@ with tabs[7]:
         ).reset_index()
         st.write("#### Resumen por Fecha")
         st.dataframe(resumen_fecha.style.format({'TrenKm': "{:,.1f}"}), use_container_width=True)
-    else:
-        st.error("Sube archivos THDR y verifica que la fecha en A1 coincida con el rango del Sidebar.")
+    elif not diags:
+        st.info("📂 Sube archivos THDR desde el panel lateral (Vía 1 o Vía 2).")
