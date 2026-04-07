@@ -910,7 +910,7 @@ with tabs[6]:
     else:
         st.success("No hay anomalías detectadas en la selección actual.")
 
-# ================== PESTAÑA THDR (CORREGIDA) ==================
+# ================== PESTAÑA THDR (CORREGIDA Y CON TODAS LAS ESTACIONES) ==================
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
@@ -958,7 +958,7 @@ with tabs[7]:
         else:
             st.info("No hay datos para Vía 2 en el rango seleccionado.")
     
-    def mostrar_tabla_thdr(df, titulo, color_emoji):
+    def mostrar_tabla_thdr_completa(df, titulo, color_emoji):
         st.subheader(f"{color_emoji} {titulo}")
         if df.empty:
             st.info(f"No hay datos de THDR para {titulo} en el período seleccionado.")
@@ -966,48 +966,43 @@ with tabs[7]:
         
         df_display = df.copy()
         
-        # Convertir minutos a HH:MM:SS
-        if 'Hora_Salida_Real' in df_display.columns:
-            df_display['Hora Real Salida'] = df_display['Hora_Salida_Real'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
-        else:
-            df_display['Hora Real Salida'] = ""
+        # --- Formatear horas de las columnas de estaciones ---
+        # Identificar columnas que contienen "Hora Llegada" o "Hora Salida" (originales)
+        columnas_horas = [col for col in df_display.columns if 'hora llegada' in col.lower() or 'hora salida' in col.lower()]
+        for col in columnas_horas:
+            # Convertir a minutos si es necesario y luego a HH:MM:SS
+            df_display[col] = df_display[col].apply(convertir_a_minutos)
+            df_display[col] = df_display[col].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         
-        if 'Min_Prog' in df_display.columns:
-            df_display['Hora Programada'] = df_display['Min_Prog'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
-        elif 'Hora_Prog' in df_display.columns:
-            df_display['Hora Programada'] = df_display['Hora_Prog'].apply(lambda x: x if isinstance(x, str) else format_hms(convertir_a_minutos(x)) if pd.notna(x) else "")
-        else:
-            df_display['Hora Programada'] = ""
-        
+        # También formatear las columnas calculadas (Hora_Prog, etc.) si existen
+        if 'Hora_Prog' in df_display.columns:
+            df_display['Hora Programada'] = df_display['Hora_Prog'].apply(convertir_a_minutos)
+            df_display['Hora Programada'] = df_display['Hora Programada'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         if 'Retraso' in df_display.columns:
-            df_display['Puntualidad Salida'] = df_display['Retraso'].apply(lambda x: format_hms(x, con_signo=True) if pd.notna(x) else "")
-        else:
-            df_display['Puntualidad Salida'] = ""
-        
+            df_display['Retraso (min)'] = df_display['Retraso'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
         if 'TDV_Min' in df_display.columns:
             df_display['TDV'] = df_display['TDV_Min'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
-        else:
-            df_display['TDV'] = ""
-        
-        if 'Hora_Llegada_Real' in df_display.columns:
-            df_display['Hora Llegada Terminal'] = df_display['Hora_Llegada_Real'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
-        else:
-            df_display['Hora Llegada Terminal'] = ""
         
         # Fecha
         if 'Fecha_Op' in df_display.columns:
             df_display['Fecha'] = df_display['Fecha_Op'].dt.strftime('%d/%m/%Y')
-        else:
-            df_display['Fecha'] = ""
         
-        columnas_orden = [
-            'Fecha', 'Servicio', 'Hora Programada', 'Hora Real Salida',
-            'Puntualidad Salida', 'Hora Llegada Terminal', 'TDV',
-            'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km'
-        ]
-        columnas_existentes = [col for col in columnas_orden if col in df_display.columns]
-        df_final = df_display[columnas_existentes].copy()
+        # Seleccionar columnas de interés: las que tienen horas de estaciones, más las básicas
+        columnas_base = ['Fecha', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
+        columnas_base_existentes = [col for col in columnas_base if col in df_display.columns]
+        columnas_estaciones = [col for col in columnas_horas if col in df_display.columns]
+        # Ordenar las columnas de estaciones de forma lógica (por orden de recorrido)
+        # Se puede ordenar alfabéticamente o mantener el orden original
+        columnas_estaciones_ordenadas = sorted(columnas_estaciones)
+        columnas_finales = columnas_base_existentes + columnas_estaciones_ordenadas
+        # Añadir algunas calculadas si existen
+        for extra in ['Hora Programada', 'Retraso (min)', 'TDV']:
+            if extra in df_display.columns:
+                columnas_finales.append(extra)
         
+        df_final = df_display[columnas_finales].copy()
+        
+        # Formatear Tren-Km
         if 'Tren-Km' in df_final.columns:
             df_final['Tren-Km'] = df_final['Tren-Km'].apply(lambda x: f"{x:,.1f}" if isinstance(x, (int, float)) else x)
         
@@ -1015,8 +1010,8 @@ with tabs[7]:
         csv = df_final.to_csv(index=False).encode('utf-8')
         st.download_button(f"📥 Descargar {titulo} (CSV)", csv, f"THDR_{titulo.replace(' ', '_')}.csv", "text/csv")
     
-    mostrar_tabla_thdr(df_thdr_v1_filt, "Vía 1", "🟢")
-    mostrar_tabla_thdr(df_thdr_v2_filt, "Vía 2", "🔵")
+    mostrar_tabla_thdr_completa(df_thdr_v1_filt, "Vía 1", "🟢")
+    mostrar_tabla_thdr_completa(df_thdr_v2_filt, "Vía 2", "🔵")
 
 # --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
 st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
