@@ -18,7 +18,15 @@ st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wi
 
 # API Key real integrada
 API_KEY = "de25da707bfeb645ec2b488c4676af19" 
-CIUDAD = "Valparaiso,CL"
+
+# Ciudades del tramo EFE Valparaíso (Corredor Térmico)
+CIUDADES_TRAMO = {
+    "Puerto / Valparaíso": "Valparaiso,CL",
+    "Viña del Mar": "Vina del Mar,CL",
+    "Quilpué": "Quilpue,CL",
+    "Villa Alemana": "Villa Alemana,CL",
+    "Limache": "Limache,CL"
+}
 
 chile_holidays = holidays.Chile()
 ORDEN_TIPO_DIA = ["L", "S", "D/F"]
@@ -32,20 +40,23 @@ st.markdown("""
 # --- 2. FUNCIONES DE PROCESAMIENTO Y API ---
 
 @st.cache_data(ttl=3600)
-def obtener_clima_actual():
-    try:
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={CIUDAD}&appid={API_KEY}&units=metric&lang=es"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "temp": data['main']['temp'],
-                "hum": data['main']['humidity'],
-                "desc": data['weather'][0]['description']
-            }
-    except:
-        return None
-    return None
+def obtener_clima_corredor():
+    """Consulta el clima para todas las ciudades del tramo Puerto-Limache."""
+    datos_clima = {}
+    for nombre, query in CIUDADES_TRAMO.items():
+        try:
+            url = f"http://api.openweathermap.org/data/2.5/weather?q={query}&appid={API_KEY}&units=metric&lang=es"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                datos_clima[nombre] = {
+                    "temp": data['main']['temp'],
+                    "hum": data['main']['humidity'],
+                    "desc": data['weather'][0]['description']
+                }
+        except:
+            datos_clima[nombre] = None
+    return datos_clima
 
 def to_pptx(title_text, df=None, metrics_dict=None):
     prs = Presentation()
@@ -173,8 +184,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         try: df_raw = pd.read_excel(file, header=None, engine=None)
         except: df_raw = pd.read_excel(file, header=None, engine='xlrd')
         
-        header0 = df_raw.iloc[0].fillna('').astype(str)
-        header1 = df_raw.iloc[1].fillna('').astype(str)
+        header0, header1 = df_raw.iloc[0].fillna('').astype(str), df_raw.iloc[1].fillna('').astype(str)
         column_names = []
         for i in range(len(header0)):
             base, sub = header0[i].strip(), header1[i].strip()
@@ -190,7 +200,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
             return None
         
         col_servicio = buscar_columna(['Servicio', 'Serv', 'N° Servicio'])
-        col_hora_prog = buscar_columna(['Hora_Prog', 'Hora Programada', 'Hora Prog', 'Prog'])
+        col_hora_prog = buscar_columna(['Hora_Prog', 'Hora Programada', 'Prog'])
         col_motriz1, col_motriz2 = buscar_columna(['Motriz 1']), buscar_columna(['Motriz 2'])
         
         df['Servicio'] = df[col_servicio] if col_servicio else 0
@@ -234,13 +244,16 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Dist_Base'] = df['Tipo_Rec'].map(DISTANCIAS).fillna(0)
         df['Tren-Km'] = df['Dist_Base'] * df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         
-        # FIX: Evitar Truth Value Error comparando fechas de forma segura
-        fch_n = extraer_fecha_desde_nombre_archivo(file.name)
-        fch_val = fch_n if fch_n is not None else date.today()
-        df['Fecha_Op'] = pd.to_datetime(fch_val)
+        # --- FIX: Truth Value Error ---
+        fecha_extraida = extraer_fecha_desde_nombre_archivo(file.name)
+        if fecha_extraida is not None:
+            df['Fecha_Op'] = pd.to_datetime(fecha_extraida)
+        else:
+            df['Fecha_Op'] = pd.to_datetime(date.today())
         
         if start_date is not None and end_date is not None:
             if not df.empty:
+                # Usar bitwise operator & para la máscara, evitando el error de Series Truth Value
                 mask = (df['Fecha_Op'].dt.date >= start_date) & (df['Fecha_Op'].dt.date <= end_date)
                 df = df[mask].copy()
             
@@ -255,11 +268,10 @@ df_ops, df_tr, df_tr_acum, df_seat, df_energy_master, df_p_d, df_f_d = [pd.DataF
 df_thdr_v1, df_thdr_v2 = pd.DataFrame(), pd.DataFrame()
 all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h, all_comp_full = [], [], [], [], [], [], []
 
-# --- 5. SIDEBAR ---
+# --- 5. SIDEBAR Y CLIMA ---
 with st.sidebar:
     st.header("📅 Filtro Global")
     date_range = st.date_input("Período", value=(date.today().replace(day=1), date.today()))
-    # Asegurar que start_date y end_date sean objetos date
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = date_range[0], date_range[1]
     else:
@@ -274,15 +286,17 @@ with st.sidebar:
     f_bill_files = st.file_uploader("5. Facturación y PRMTE", type=["xlsx"], accept_multiple_files=True)
     
     st.divider()
-    st.header("🌤️ Estado Climático")
-    clima = obtener_clima_actual()
-    if clima:
-        c1, c2 = st.columns(2)
-        c1.metric("Temperatura", f"{clima['temp']}°C")
-        c2.metric("Humedad", f"{clima['hum']}%")
-        st.caption(f"Condición: {clima['desc'].capitalize()}")
+    st.header("🌤️ Corredor Térmico (Pto-Li)")
+    climas = obtener_clima_corredor()
+    if climas:
+        for ciudad, info in climas.items():
+            if info:
+                st.write(f"**{ciudad}:** {info['temp']}°C | {info['desc'].capitalize()}")
+            else:
+                st.write(f"**{ciudad}:** Sin datos")
+    else: st.warning("API de Clima no disponible.")
 
-# --- 6. PROCESAMIENTO ---
+# --- 6. PROCESAMIENTO GENERAL ---
 if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
     todos = (f_v1 or []) + (f_v2 or []) + (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
     for f in todos:
@@ -292,7 +306,7 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                 sn_up = sn.upper()
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
-                    # FIX: any() sobre Series corregido
+                    # Arreglado: str(iloc) evita el error de Series
                     h_r = next((i for i in range(min(100, len(df_raw))) if any(k in str(df_raw.iloc[i]).upper() for k in ['ODO', 'FECHA'])), None)
                     if h_r is not None:
                         df_p = pd.read_excel(f, sheet_name=sn, header=h_r)
@@ -403,7 +417,15 @@ with tabs[0]:
         col_m1.metric("Odómetro Total", f"{df_ops['Odómetro [km]'].sum():,.1f} km")
         col_m2.metric("Tren-Km Total", f"{df_ops['Tren-Km [km]'].sum():,.1f} km")
         col_m3.metric("UMR Global", f"{(df_ops['Tren-Km [km]'].sum()/df_ops['Odómetro [km]'].sum()*100 if df_ops['Odómetro [km]'].sum()>0 else 0):.2f}%")
-        if clima: st.info(f"Análisis térmico activo: Temperatura en Valparaíso es {clima['temp']}°C.")
+        
+        # Análisis del Corredor Térmico
+        if climas:
+            st.write("#### 🚉 Perfil Térmico del Corredor")
+            c_cl1, c_cl2, c_cl3, c_cl4, c_cl5 = st.columns(5)
+            cols_clima = [c_cl1, c_cl2, c_cl3, c_cl4, c_cl5]
+            for i, (ciudad, info) in enumerate(climas.items()):
+                if info:
+                    cols_clima[i].metric(ciudad, f"{info['temp']}°C", info['desc'].capitalize())
     else: st.info("Carga datos para visualizar.")
 
 with tabs[1]:
@@ -435,7 +457,7 @@ with tabs[5]:
         if len(df_reg) > 2:
             x, y = np.arange(len(df_reg)), df_reg['Consumo Horario [kWh]'].values
             m, n = np.polyfit(x, y, 1)
-            st.markdown(f"**Ecuación Basal:** $kWh = {m:.4f}x + {n:.2f}$")
+            st.markdown(f"**Línea de Base:** $kWh = {m:.4f}x + {n:.2f}$")
             fig_reg = go.Figure()
             fig_reg.add_trace(go.Scatter(x=x, y=y, mode='markers', name='Real'))
             fig_reg.add_trace(go.Scatter(x=x, y=m*x+n, mode='lines', name='Tendencia'))
@@ -443,9 +465,8 @@ with tabs[5]:
 
 with tabs[6]:
     if not st.session_state.outliers.empty: st.dataframe(st.session_state.outliers)
-    else: st.success("Sin anomalías.")
+    else: st.success("Sin anomalías detectadas.")
 
-# PESTAÑA THDR (CORREGIDA: LLEGADAS Y SALIDAS SECUENCIALES)
 with tabs[7]:
     st.header("📋 Datos THDR - Orden Secuencial de Estaciones")
 
@@ -456,19 +477,18 @@ with tabs[7]:
         
         st.subheader(f"📍 {titulo}")
         
+        # Detección dinámica de estaciones
         cols_fmt = [c for c in df.columns if c.endswith('_fmt')]
-        estaciones_detectadas = []
+        estaciones_orden = []
         for c in cols_fmt:
-            # Extraer nombre base de la estación
-            e = c.replace('_salida_fmt', '').replace('_llegada_fmt', '')
-            if e not in estaciones_detectadas: estaciones_detectadas.append(e)
+            est = c.replace('_salida_fmt', '').replace('_llegada_fmt', '')
+            if est not in estaciones_orden: estaciones_orden.append(est)
         
         f_cols = ['Fecha_Op', 'Servicio', 'Unidad', 'Tren-Km']
-        
         # Inyectar pares Llegada-Salida por estación detectada
-        for e in estaciones_detectadas:
-            lleg = f"{e}_llegada_fmt"
-            sali = f"{e}_salida_fmt"
+        for est in estaciones_orden:
+            lleg = f"{est}_llegada_fmt"
+            sali = f"{est}_salida_fmt"
             if lleg in df.columns: f_cols.append(lleg)
             if sali in df.columns: f_cols.append(sali)
             
