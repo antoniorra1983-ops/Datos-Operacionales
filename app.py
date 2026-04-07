@@ -47,8 +47,7 @@ def to_pptx(title_text, df=None, metrics_dict=None):
         tf = txBox.text_frame
         for k, v in metrics_dict.items():
             p = tf.add_paragraph()
-            p.text = f"• {k}: {v}"
-            p.font.size = Pt(16); p.font.bold = True; p.font.color.rgb = RGBColor(0, 81, 149)
+            p.text = f"• {k}: {v}"; p.font.size = Pt(16); p.font.bold = True; p.font.color.rgb = RGBColor(0, 81, 149)
         y_cursor += Inches(1.2)
     if df is not None and not df.empty:
         df_display = df.head(12).reset_index(drop=True)
@@ -121,7 +120,7 @@ def format_hms(minutos_float):
     h, r = divmod(total_segundos, 3600); m, s = divmod(r, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
 
-DISTANCIAS = {"PU-LI": 43.13, "LI-PU": 43.13, "PU-SA": 29.11, "SA-PU": 29.11, "EB-PU": 25.40, "PU-EB": 25.40, "VM-LI": 34.03, "LI-VM": 34.03, "VM-PU": 9.10,  "PU-VM": 9.10}
+DISTANCIAS = {"PU-LI": 43.13, "LI-PU": 43.13, "PU-SA": 29.11, "SA-PU": 29.11, "EB-PU": 25.40, "PU-EB": 25.40, "VM-LI": 34.03, "LI-VM": 34.03}
 
 def procesar_thdr_avanzado(file, start_date=None, end_date=None):
     try:
@@ -134,8 +133,12 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         columnas_horas = {}
         for col in df.columns:
             cl = str(col).lower()
-            if 'hora salida' in cl: columnas_horas[f"{cl.replace('hora salida','').strip()}_salida"] = col
-            elif 'hora llegada' in cl: columnas_horas[f"{cl.replace('hora llegada','').strip()}_llegada"] = col
+            if 'hora salida' in cl:
+                est = cl.replace('_hora salida', '').replace('hora salida', '').strip()
+                if est: columnas_horas[f"{est}_salida"] = col
+            elif 'hora llegada' in cl:
+                est = cl.replace('_hora llegada', '').replace('hora llegada', '').strip()
+                if est: columnas_horas[f"{est}_llegada"] = col
         
         for k, c in columnas_horas.items():
             df[f"{k}_min"] = df[c].apply(convertir_a_minutos)
@@ -173,6 +176,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
     except: return pd.DataFrame()
 
 # --- 4. INICIALIZACIÓN ---
+if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
 df_ops, df_tr, df_tr_acum, df_seat, df_energy_master, df_p_d, df_f_d = [pd.DataFrame() for _ in range(7)]
 all_ops, all_tr, all_tr_acum, all_seat, all_comp_full, all_prmte_15, all_fact_h = [], [], [], [], [], [], []
 
@@ -188,7 +192,7 @@ with st.sidebar:
     f_seat_files = st.file_uploader("4. Energía SEAT", accept_multiple_files=True)
     f_bill_files = st.file_uploader("5. Facturación y PRMTE", accept_multiple_files=True)
 
-# --- 6. PROCESAMIENTO GENERAL ---
+# --- 6. PROCESAMIENTO TOTAL ---
 if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
     todos = (f_v1 or []) + (f_v2 or []) + (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
     for f in todos:
@@ -198,10 +202,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                 sn_up = sn.upper()
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
-                    h_r = None
-                    for i in range(min(100, len(df_raw))):
-                        linea = " ".join([str(val).upper() for val in df_raw.iloc[i].tolist()])
-                        if 'ODO' in linea or 'FECHA' in linea: h_r = i; break
+                    h_r = next((i for i in range(min(100, len(df_raw))) if any(k in str(df_raw.iloc[i].tolist()).upper() for k in ['ODO', 'FECHA'])), None)
                     if h_r is not None:
                         df_p = pd.read_excel(f, sheet_name=sn, header=h_r)
                         df_p.columns = [re.sub(r'[^A-Z]', '', str(c).upper()) for c in df_p.columns]
@@ -250,7 +251,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                         if start_date <= ts.date() <= end_date: all_fact_h.append({"Fecha": ts, "Consumo": val_f})
         except: continue
 
-    # Consolidación Jerárquica de Energía
+    # Jerarquía de Energía
     if all_seat:
         df_seat = pd.DataFrame(all_seat).drop_duplicates(subset=['Fecha'])
         df_energy_master = df_seat.rename(columns={"Total [kWh]":"E_Total", "Tracción [kWh]":"E_Tr", "12 KV [kWh]":"E_12"})[["Fecha", "E_Total", "E_Tr", "E_12", "% Tracción", "% 12 KV"]]
@@ -312,8 +313,8 @@ with tabs[4]: # PESTAÑA COMPARACIÓN HR
     if all_comp_full:
         df_c_plot = pd.DataFrame(all_comp_full).groupby(['Año', 'Tipo Día', 'Hora'])['Consumo'].median().reset_index()
         fig_c = go.Figure()
-        for label, group in df_c_plot.groupby(['Año', 'Tipo Día']):
-            fig_c.add_trace(go.Scatter(x=group['Hora'], y=group['Consumo'], mode='lines', name=f"{label}"))
+        for (a, t), group in df_c_plot.groupby(['Año', 'Tipo Día']):
+            fig_c.add_trace(go.Scatter(x=group['Hora'], y=group['Consumo'], mode='lines', name=f"{a} - {t}"))
         st.plotly_chart(fig_c, use_container_width=True)
         st.dataframe(make_columns_unique(df_c_plot.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo")).style.format("{:,.1f}"))
 
@@ -322,22 +323,22 @@ with tabs[5]: # PESTAÑA REGRESIÓN
         df_reg = pd.DataFrame(all_comp_full)[pd.DataFrame(all_comp_full)['Hora'] <= 5]
         if len(df_reg) > 1:
             Q1, Q3 = df_reg['Consumo'].quantile(0.25), df_reg['Consumo'].quantile(0.75); IQR = Q3 - Q1
-            df_norm = df_reg[(df_reg['Consumo'] >= Q1-1.5*IQR) & (df_reg['Consumo'] <= Q3+1.5*IQR)]
+            df_norm = df_reg[(df_reg['Consumo'] >= Q1-1.5*IQR) & (df_reg['Consumo'] <= Q3+1.5*IQR)].copy()
             st.session_state.outliers = df_reg[~df_reg.index.isin(df_norm.index)]
             x_reg, y_reg = np.arange(len(df_norm)), df_norm['Consumo'].values
-            m_r, n_r = np.polyfit(x_reg, y_reg, 1)
+            m_r, n_r = np.polyfit(x_reg, y_reg, 1); y_pred = m_r * x_reg + n_r
             st.write(f"**Ecuación:** $Consumo = {m_r:.4f}x + {n_r:.2f}$")
             st.line_chart(df_norm['Consumo'])
 
 with tabs[6]: # PESTAÑA ATÍPICOS
-    if 'outliers' in st.session_state and not st.session_state.outliers.empty:
+    if not st.session_state.outliers.empty:
         st.error(f"Se detectaron {len(st.session_state.outliers)} anomalías."); st.dataframe(make_columns_unique(st.session_state.outliers))
     else: st.success("No hay anomalías detectadas.")
 
-with tabs[7]: # PESTAÑA THDR
+with tabs[7]: # PESTAÑA THDR (INALTERADA)
     st.header("📋 Datos THDR")
     if not df_thdr_v1.empty: st.subheader("Vía 1"); st.dataframe(make_columns_unique(df_thdr_v1))
     if not df_thdr_v2.empty: st.subheader("Vía 2"); st.dataframe(make_columns_unique(df_thdr_v2))
 
 # REPORTE FINAL
-st.sidebar.download_button("📥 Excel Completo", to_excel_consolidado(df_ops, pd.DataFrame(all_tr), pd.DataFrame(), df_seat, pd.DataFrame(), pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), pd.DataFrame()), "EFE_SGE_Reporte.xlsx")
+st.sidebar.download_button("📥 Excel Completo", to_excel_consolidado(df_ops, pd.DataFrame(all_tr), pd.DataFrame(), df_seat, pd.DataFrame(), pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), pd.DataFrame()), "EFE_SGE_Total.xlsx")
