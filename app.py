@@ -204,9 +204,11 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
             clow = col.lower()
             if 'hora salida' in clow:
                 est = col.split('_')[0].split('Hora Salida')[0].strip()
+                if not est: est = "Estacion"
                 columnas_horas[f"{est}_salida"] = col
             elif 'hora llegada' in clow:
                 est = col.split('_')[0].split('Hora Llegada')[0].strip()
+                if not est: est = "Estacion"
                 columnas_horas[f"{est}_llegada"] = col
         
         for key, col in columnas_horas.items():
@@ -232,12 +234,15 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Dist_Base'] = df['Tipo_Rec'].map(DISTANCIAS).fillna(0)
         df['Tren-Km'] = df['Dist_Base'] * df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         
+        # FIX: Evitar Truth Value Error comparando fechas de forma segura
         fch_n = extraer_fecha_desde_nombre_archivo(file.name)
-        df['Fecha_Op'] = pd.to_datetime(fch_n if fch_n else date.today())
+        fch_val = fch_n if fch_n is not None else date.today()
+        df['Fecha_Op'] = pd.to_datetime(fch_val)
         
-        if start_date and end_date and not df.empty:
-            mask = (df['Fecha_Op'].dt.date >= start_date) & (df['Fecha_Op'].dt.date <= end_date)
-            df = df[mask].copy()
+        if start_date is not None and end_date is not None:
+            if not df.empty:
+                mask = (df['Fecha_Op'].dt.date >= start_date) & (df['Fecha_Op'].dt.date <= end_date)
+                df = df[mask].copy()
             
         df.attrs['estaciones_keys'] = list(columnas_horas.keys())
         return df
@@ -245,7 +250,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         st.error(f"Error procesando THDR {file.name}: {str(e)}")
         return pd.DataFrame()
 
-# --- 4. INICIALIZACIÓN DE DATAFRAMES ---
+# --- 4. INICIALIZACIÓN ---
 df_ops, df_tr, df_tr_acum, df_seat, df_energy_master, df_p_d, df_f_d = [pd.DataFrame() for _ in range(7)]
 df_thdr_v1, df_thdr_v2 = pd.DataFrame(), pd.DataFrame()
 all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h, all_comp_full = [], [], [], [], [], [], []
@@ -254,7 +259,12 @@ all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h, all_comp_full 
 with st.sidebar:
     st.header("📅 Filtro Global")
     date_range = st.date_input("Período", value=(date.today().replace(day=1), date.today()))
-    start_date, end_date = (date_range[0], date_range[1]) if isinstance(date_range, tuple) and len(date_range)==2 else (date_range, date_range)
+    # Asegurar que start_date y end_date sean objetos date
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range[0], date_range[1]
+    else:
+        start_date, end_date = date_range, date_range
+
     st.divider()
     st.header("📂 Carga de Archivos")
     f_v1 = st.file_uploader("1. THDR Vía 1", type=["xls", "xlsx"], accept_multiple_files=True)
@@ -262,6 +272,7 @@ with st.sidebar:
     f_umr = st.file_uploader("3. UMR / Odómetros", type=["xlsx"], accept_multiple_files=True)
     f_seat_files = st.file_uploader("4. Energía SEAT", type=["xlsx"], accept_multiple_files=True)
     f_bill_files = st.file_uploader("5. Facturación y PRMTE", type=["xlsx"], accept_multiple_files=True)
+    
     st.divider()
     st.header("🌤️ Estado Climático")
     clima = obtener_clima_actual()
@@ -271,7 +282,7 @@ with st.sidebar:
         c2.metric("Humedad", f"{clima['hum']}%")
         st.caption(f"Condición: {clima['desc'].capitalize()}")
 
-# --- 6. PROCESAMIENTO ÍNTEGRO DE DATOS ---
+# --- 6. PROCESAMIENTO ---
 if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
     todos = (f_v1 or []) + (f_v2 or []) + (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
     for f in todos:
@@ -281,6 +292,7 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                 sn_up = sn.upper()
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
+                    # FIX: any() sobre Series corregido
                     h_r = next((i for i in range(min(100, len(df_raw))) if any(k in str(df_raw.iloc[i]).upper() for k in ['ODO', 'FECHA'])), None)
                     if h_r is not None:
                         df_p = pd.read_excel(f, sheet_name=sn, header=h_r)
@@ -382,29 +394,22 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
             df_ops = pd.merge(df_ops, df_energy_master, on="Fecha", how="left")
             df_ops['IDE (kWh/km)'] = df_ops.apply(lambda r: r['E_Tr'] / r['Odómetro [km]'] if r['Odómetro [km]'] > 0 else 0, axis=1)
 
-# --- 7. TABS DEL DASHBOARD ---
+# --- 7. TABS ---
 tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparativa hr", "📈 Regresión", "🚨 Atípicos", "📋 THDR"])
 
-# PESTAÑA RESUMEN
 with tabs[0]:
     if not df_ops.empty:
-        st.write("#### Análisis Resumen")
-        sub_res = st.tabs(["📅 Semanal", "📅 Mensual", "📅 Anual"])
-        with sub_res[0]:
-            st.metric("Odómetro Total", f"{df_ops['Odómetro [km]'].sum():,.1f} km")
-            st.metric("Tren-Km Total", f"{df_ops['Tren-Km [km]'].sum():,.1f} km")
-            st.metric("UMR Global", f"{(df_ops['Tren-Km [km]'].sum()/df_ops['Odómetro [km]'].sum()*100 if df_ops['Odómetro [km]'].sum()>0 else 0):.2f}%")
-        with sub_res[1]:
-            st.write("Evolución Mensual")
-            st.line_chart(df_ops.set_index('Fecha')['Odómetro [km]'])
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Odómetro Total", f"{df_ops['Odómetro [km]'].sum():,.1f} km")
+        col_m2.metric("Tren-Km Total", f"{df_ops['Tren-Km [km]'].sum():,.1f} km")
+        col_m3.metric("UMR Global", f"{(df_ops['Tren-Km [km]'].sum()/df_ops['Odómetro [km]'].sum()*100 if df_ops['Odómetro [km]'].sum()>0 else 0):.2f}%")
+        if clima: st.info(f"Análisis térmico activo: Temperatura en Valparaíso es {clima['temp']}°C.")
     else: st.info("Carga datos para visualizar.")
 
-# PESTAÑA OPERACIONES
 with tabs[1]:
     if not df_ops.empty:
         st.dataframe(df_ops.style.format({'Odómetro [km]': "{:,.1f}", 'Tren-Km [km]': "{:,.1f}", 'UMR [%]': "{:.2f}%", 'IDE (kWh/km)': "{:.4f}"}))
 
-# PESTAÑA TRENES
 with tabs[2]:
     if not df_tr.empty:
         piv = df_tr.pivot_table(index="Tren", columns=df_tr["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
@@ -414,20 +419,16 @@ with tabs[2]:
         piv_a = df_tr_acum.pivot_table(index="Tren", columns=df_tr_acum["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0)
         st.dataframe(piv_a.style.format("{:,.0f}"))
 
-# PESTAÑA ENERGÍA
 with tabs[3]:
     if not df_energy_master.empty:
         st.dataframe(df_energy_master.style.format({'E_Total': "{:,.0f}", 'E_Tr': "{:,.0f}", 'E_12': "{:,.0f}"}))
 
-# PESTAÑA COMPARATIVA HR
 with tabs[4]:
     if all_comp_full:
         df_c = pd.DataFrame(all_comp_full)
         piv_c = df_c.pivot_table(index="Hora", columns="Fuente", values="Consumo Horario [kWh]", aggfunc='median').fillna(0)
         st.line_chart(piv_c)
 
-# PESTAÑA REGRESIÓN
-if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
 with tabs[5]:
     if all_comp_full:
         df_reg = pd.DataFrame(all_comp_full).query("Hora <= 5")
@@ -440,12 +441,11 @@ with tabs[5]:
             fig_reg.add_trace(go.Scatter(x=x, y=m*x+n, mode='lines', name='Tendencia'))
             st.plotly_chart(fig_reg)
 
-# PESTAÑA ATÍPICOS
 with tabs[6]:
     if not st.session_state.outliers.empty: st.dataframe(st.session_state.outliers)
     else: st.success("Sin anomalías.")
 
-# PESTAÑA THDR (CORREGIDA: SALIDAS VISIBLES Y ORDENADAS)
+# PESTAÑA THDR (CORREGIDA: LLEGADAS Y SALIDAS SECUENCIALES)
 with tabs[7]:
     st.header("📋 Datos THDR - Orden Secuencial de Estaciones")
 
@@ -456,17 +456,16 @@ with tabs[7]:
         
         st.subheader(f"📍 {titulo}")
         
-        # Identificar estaciones (Salida y Llegada)
         cols_fmt = [c for c in df.columns if c.endswith('_fmt')]
         estaciones_detectadas = []
         for c in cols_fmt:
+            # Extraer nombre base de la estación
             e = c.replace('_salida_fmt', '').replace('_llegada_fmt', '')
             if e not in estaciones_detectadas: estaciones_detectadas.append(e)
         
-        # Columnas fijas iniciales
         f_cols = ['Fecha_Op', 'Servicio', 'Unidad', 'Tren-Km']
         
-        # Agregar pares Llegada-Salida por estación
+        # Inyectar pares Llegada-Salida por estación detectada
         for e in estaciones_detectadas:
             lleg = f"{e}_llegada_fmt"
             sali = f"{e}_salida_fmt"
@@ -474,12 +473,9 @@ with tabs[7]:
             if sali in df.columns: f_cols.append(sali)
             
         f_cols += ['Retraso', 'TDV_Min']
-        
-        # Mostrar DataFrame final filtrado por columnas reales
         existentes = [c for c in f_cols if c in df.columns]
-        df_final = df[existentes].copy()
         
-        # Renombrar columnas para visualización limpia
+        df_final = df[existentes].copy()
         names = {c: c.replace('_fmt','').replace('_',' ').title() for c in existentes}
         st.dataframe(df_final.rename(columns=names), use_container_width=True)
 
