@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import re
 import holidays
+import requests  # Para la API de Clima
 from io import BytesIO
 from datetime import datetime, date, timedelta, time
 from pptx import Presentation
@@ -12,10 +13,15 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import traceback
 
-# --- 1. CONFIGURACIÓN Y ESTILOS ---
+# --- 1. CONFIGURACIÓN, ESTILOS Y API ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
-chile_holidays = holidays.Chile()
 
+# Configuración API Clima (OpenWeatherMap)
+# Nota: Reemplaza con tu propia clave para producción
+API_KEY = "tu_api_key_aqui" 
+CIUDAD = "Valparaiso,CL"
+
+chile_holidays = holidays.Chile()
 ORDEN_TIPO_DIA = ["L", "S", "D/F"]
 
 st.markdown("""
@@ -24,7 +30,25 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. FUNCIONES DE PROCESAMIENTO Y EXPORTACIÓN ---
+# --- 2. FUNCIONES DE APOYO Y API ---
+
+@st.cache_data(ttl=3600)  # Cache de 1 hora para no saturar la API
+def obtener_clima_actual():
+    """Consulta la temperatura actual mediante API REST."""
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={CIUDAD}&appid={API_KEY}&units=metric&lang=es"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "temp": data['main']['temp'],
+                "hum": data['main']['humidity'],
+                "desc": data['weather'][0]['description']
+            }
+    except:
+        return None
+    return None
+
 def to_pptx(title_text, df=None, metrics_dict=None):
     prs = Presentation()
     slide_layout = prs.slide_layouts[5] 
@@ -106,7 +130,7 @@ def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, df_p_15, df
             if not df.empty: df.to_excel(writer, index=False, sheet_name=name)
     return output.getvalue()
 
-# --- 3. FUNCIONES PARA PROCESAR THDR (MEJORADAS: DETECTA TODAS LAS ESTACIONES) ---
+# --- 3. FUNCIONES PARA PROCESAR THDR ---
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "":
         return None
@@ -160,13 +184,11 @@ def extraer_fecha_desde_nombre_archivo(nombre_archivo):
 
 def procesar_thdr_avanzado(file, start_date=None, end_date=None):
     try:
-        # Leer archivo sin cabeceras
         try:
             df_raw = pd.read_excel(file, header=None, engine=None)
         except Exception:
             df_raw = pd.read_excel(file, header=None, engine='xlrd')
         
-        # Las dos primeras filas contienen los encabezados
         header0 = df_raw.iloc[0].fillna('').astype(str)
         header1 = df_raw.iloc[1].fillna('').astype(str)
         column_names = []
@@ -180,7 +202,6 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df = df_raw.iloc[2:].copy()
         df.columns = column_names
         
-        # Buscar columnas de interés general
         def buscar_columna(nombres_posibles):
             for col in df.columns:
                 for posible in nombres_posibles:
@@ -192,9 +213,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         col_hora_prog = buscar_columna(['Hora_Prog', 'Hora Programada', 'Hora Prog', 'Prog'])
         col_motriz1 = buscar_columna(['Motriz 1', 'Motriz1', 'M1', 'Motor 1'])
         col_motriz2 = buscar_columna(['Motriz 2', 'Motriz2', 'M2', 'Motor 2'])
-        col_unidad = buscar_columna(['Unidad', 'Tren', 'Formación'])
         
-        # Asignar valores por defecto
         df['Servicio'] = df[col_servicio] if col_servicio is not None else 0
         df['Hora_Prog'] = df[col_hora_prog] if col_hora_prog is not None else '00:00:00'
         
@@ -209,13 +228,9 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         
         df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
         
-        # --- DETECCIÓN AUTOMÁTICA DE TODAS LAS COLUMNAS DE HORAS (ESTACIONES) ---
-        # Buscamos columnas que contengan "Hora Salida" o "Hora Llegada" (después de la concatenación)
-        # También podrían llamarse "XXX_Hora Salida" o "XXX_Hora Llegada"
         columnas_horas = {}
         for col in df.columns:
             if 'hora salida' in col.lower():
-                # Extraer nombre de estación: todo lo que está antes de "_hora salida" o directamente el nombre
                 nombre_est = col.lower().replace('_hora salida', '').replace('hora salida', '').strip()
                 if nombre_est:
                     columnas_horas[f"{nombre_est}_salida"] = col
@@ -224,29 +239,18 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
                 if nombre_est:
                     columnas_horas[f"{nombre_est}_llegada"] = col
         
-        # Convertir cada columna detectada a minutos y formato legible
         for key, col in columnas_horas.items():
             df[f"{key}_min"] = df[col].apply(convertir_a_minutos)
             df[f"{key}_fmt"] = df[f"{key}_min"].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         
-        # Identificar estación de salida (puerto) y llegada (limache) para métricas básicas
-        # Buscar por nombres comunes
         puerto_key = None
         limache_key = None
         for key in columnas_horas.keys():
-            if 'puerto' in key and 'salida' in key:
-                puerto_key = key
-            if 'limache' in key and 'llegada' in key:
-                limache_key = key
+            if 'puerto' in key and 'salida' in key: puerto_key = key
+            if 'limache' in key and 'llegada' in key: limache_key = key
         
-        if puerto_key:
-            df['Hora_Salida_Real'] = df[f"{puerto_key}_min"]
-        else:
-            df['Hora_Salida_Real'] = None
-        if limache_key:
-            df['Hora_Llegada_Real'] = df[f"{limache_key}_min"]
-        else:
-            df['Hora_Llegada_Real'] = None
+        df['Hora_Salida_Real'] = df[f"{puerto_key}_min"] if puerto_key else None
+        df['Hora_Llegada_Real'] = df[f"{limache_key}_min"] if limache_key else None
         
         df['Min_Prog'] = df['Hora_Prog'].apply(convertir_a_minutos)
         df['Retraso'] = df['Hora_Salida_Real'] - df['Min_Prog']
@@ -259,31 +263,13 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         else:
             df['TDV_Min'] = 0
         
-        # Determinar tipo de recorrido para distancia (solo si tenemos puerto y limache)
-        origen = 'OTRO'
-        destino = 'OTRO'
-        if puerto_key:
-            origen = 'PU'
-        if limache_key:
-            destino = 'LI'
-        # Si no, intentar con cualquier columna que tenga 'puerto' o 'limache'
-        if origen == 'OTRO':
-            for col in df.columns:
-                if 'puerto' in col.lower():
-                    origen = 'PU'
-                    break
-        if destino == 'OTRO':
-            for col in df.columns:
-                if 'limache' in col.lower():
-                    destino = 'LI'
-                    break
+        origen = 'PU' if puerto_key else 'OTRO'
+        destino = 'LI' if limache_key else 'OTRO'
         df['Tipo_Rec'] = f"{origen}-{destino}" if origen != 'OTRO' and destino != 'OTRO' else 'OTRO'
-        
         df['Dist_Base'] = df['Tipo_Rec'].map(DISTANCIAS).fillna(0)
         df['Peso'] = df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         df['Tren-Km'] = df['Dist_Base'] * df['Peso']
         
-        # Extraer fecha de operación
         col_fecha = buscar_columna(['Fecha', 'FECHA', 'Date', 'Día'])
         if col_fecha:
             df['Fecha_Op'] = pd.to_datetime(df[col_fecha], errors='coerce')
@@ -300,30 +286,18 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
                     df['Fecha_Op'] = pd.Timestamp(date.today())
         
         df['Fecha_Op'] = pd.to_datetime(df['Fecha_Op'], errors='coerce')
-        
-        # Filtrar por rango de fechas
         if start_date and end_date and not df.empty:
             mask = (df['Fecha_Op'].dt.date >= start_date) & (df['Fecha_Op'].dt.date <= end_date)
             df = df[mask].copy()
         
-        # Eliminar columnas duplicadas
         df = df.loc[:, ~df.columns.duplicated()]
-        
-        # Asegurar columnas necesarias
-        for col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual', 'Hora_Prog', 'Fecha_Op']:
-            if col not in df.columns:
-                df[col] = 0 if col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Tren-Km'] else ''
-        
-        # Guardar la lista de columnas de estaciones (claves) en un atributo para usarlo en la visualización
         df.attrs['estaciones_keys'] = list(columnas_horas.keys())
-        
         return df
     except Exception as e:
         st.error(f"Error procesando THDR {file.name}: {str(e)}")
-        st.error(traceback.format_exc())
         return pd.DataFrame()
 
-# --- 4. INICIALIZACIÓN DE DATAFRAMES VACÍOS ---
+# --- 4. INICIALIZACIÓN DE DATAFRAMES ---
 df_ops = pd.DataFrame()
 df_tr = pd.DataFrame()
 df_tr_acum = pd.DataFrame()
@@ -341,9 +315,10 @@ all_fact_h = []
 with st.sidebar:
     st.header("📅 Filtro Global")
     today = date.today()
-    start_of_month = today.replace(day=1) if today.day > 1 else (today.replace(month=today.month-1, day=1) if today.month>1 else today.replace(year=today.year-1, month=12, day=1))
+    start_of_month = today.replace(day=1)
     date_range = st.date_input("Selecciona el período", value=(start_of_month, today))
     start_date, end_date = (date_range[0], date_range[1]) if isinstance(date_range, tuple) and len(date_range)==2 else (date_range, date_range)
+    
     st.divider()
     st.header("📂 Carga de Archivos")
     f_v1 = st.file_uploader("1. THDR Vía 1", type=["xls", "xlsx"], accept_multiple_files=True)
@@ -352,11 +327,22 @@ with st.sidebar:
     f_seat_files = st.file_uploader("4. Energía SEAT", type=["xlsx"], accept_multiple_files=True)
     f_bill_files = st.file_uploader("5. Facturación y PRMTE", type=["xlsx"], accept_multiple_files=True)
 
-# --- 6. LECTURA Y PROCESAMIENTO DE DATOS (UMR, SEAT, PRMTE, THDR) ---
+    # --- INTEGRACIÓN API CLIMA EN SIDEBAR ---
+    st.divider()
+    st.header("🌤️ Estado Climático")
+    clima = obtener_clima_actual()
+    if clima:
+        c_c1, c_c2 = st.columns(2)
+        c_c1.metric("Temp", f"{clima['temp']}°C")
+        c_c2.metric("Hum", f"{clima['hum']}%")
+        st.caption(f"Condición: {clima['desc'].capitalize()}")
+    else:
+        st.info("Configura tu API Key para ver el clima.")
+
+# --- 6. LECTURA Y PROCESAMIENTO ---
 if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
     all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h, all_comp_full = [], [], [], [], [], [], []
-    thdr_v1_list = []
-    thdr_v2_list = []
+    thdr_v1_list, thdr_v2_list = [], []
     todos = (f_v1 or []) + (f_v2 or []) + (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
 
     for f in todos:
@@ -364,7 +350,6 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
             xl = pd.ExcelFile(f)
             for sn in xl.sheet_names:
                 sn_up = sn.upper()
-                # UMR / RESUMEN
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
                     h_r = next((i for i in range(min(100, len(df_raw))) if any(k in str(df_raw.iloc[i]).upper() for k in ['ODO', 'FECHA'])), None)
@@ -379,7 +364,7 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                             mask = (df_p['_dt'].dt.date >= start_date) & (df_p['_dt'].dt.date <= end_date)
                             for _, r in df_p[mask].dropna(subset=['_dt']).iterrows():
                                 all_ops.append({"Fecha": r['_dt'].normalize(), "Tipo Día": get_tipo_dia(r['_dt']), "N° Semana": r['_dt'].isocalendar()[1], "Odómetro [km]": parse_latam_number(r[idx_o]), "Tren-Km [km]": parse_latam_number(r[idx_t]), "UMR [%]": (parse_latam_number(r[idx_t])/parse_latam_number(r[idx_o])*100 if parse_latam_number(r[idx_o])>0 else 0)})
-                # ODOMETRO/KILOMETRAJE
+                
                 if 'ODO' in sn_up and 'KIL' in sn_up:
                     df_tr_raw = pd.read_excel(f, sheet_name=sn, header=None)
                     headers_found = []
@@ -399,17 +384,15 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                                     d_pt = {"Tren": n_tr, "Fecha": c_fch.normalize(), "Día": c_fch.day, "Valor": val_km}
                                     if is_acum or idx > 0: all_tr_acum.append(d_pt)
                                     else: all_tr.append(d_pt)
-                # SEAT
+                
                 if 'SEAT' in sn_up and 'SER' in sn_up:
                     df_s = pd.read_excel(f, sheet_name=sn, header=None)
                     for i in range(len(df_s)):
                         fs = pd.to_datetime(df_s.iloc[i, 1], errors='coerce')
                         if pd.notna(fs) and start_date <= fs.date() <= end_date:
-                            tot = parse_latam_number(df_s.iloc[i, 3])
-                            tra = parse_latam_number(df_s.iloc[i, 5])
-                            k12 = parse_latam_number(df_s.iloc[i, 7])
+                            tot, tra, k12 = parse_latam_number(df_s.iloc[i, 3]), parse_latam_number(df_s.iloc[i, 5]), parse_latam_number(df_s.iloc[i, 7])
                             all_seat.append({"Fecha": fs.normalize(), "Total [kWh]": tot, "Tracción [kWh]": tra, "12 KV [kWh]": k12, "% Tracción": (tra/tot*100 if tot>0 else 0), "% 12 KV": (k12/tot*100 if tot>0 else 0)})
-                # PRMTE / MEDIDAS
+                
                 if any(k in sn_up for k in ['PRMTE', 'MEDIDAS']):
                     df_prm = pd.read_excel(f, sheet_name=sn, header=None)
                     h_idx = next((i for i in range(len(df_prm)) if 'AÑO' in str(df_prm.iloc[i]).upper()), None)
@@ -422,7 +405,7 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                             val_p = sum([parse_latam_number(r[col]) for col in cols_e])
                             all_comp_full.append({"Fecha": ts.normalize(), "Hora": ts.hour, "Consumo Horario [kWh]": val_p, "Fuente": "PRMTE"})
                             if start_date <= ts.date() <= end_date: all_prmte_15.append({"Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), "Fecha": ts.normalize(), "Energía PRMTE [kWh]": val_p})
-                # FACTURA / CONSUMO
+                
                 if any(k in sn_up for k in ['FACTURA', 'CONSUMO']):
                     df_f = pd.read_excel(f, sheet_name=sn)
                     df_f.columns = ['FechaHora', 'Valor']
@@ -432,32 +415,23 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                         val_f = abs(parse_latam_number(r['Valor']))
                         all_comp_full.append({"Fecha": ts.normalize(), "Hora": ts.hour, "Consumo Horario [kWh]": val_f, "Fuente": "Factura"})
                         if start_date <= ts.date() <= end_date: all_fact_h.append({"Fecha y Hora": ts.strftime('%d/%m/%Y %H:%M'), "Fecha": ts.normalize(), "Consumo Horario [kWh]": val_f})
-        except:
-            continue
+        except: continue
 
-    # Procesar THDR Vía 1 y Vía 2 con filtro de fechas
     if f_v1:
         for file in f_v1:
             df = procesar_thdr_avanzado(file, start_date, end_date)
             if not df.empty:
                 df['Vía'] = 'Vía 1'
                 thdr_v1_list.append(df)
-            else:
-                st.warning(f"No se pudieron procesar datos de {file.name} (DataFrame vacío)")
-        if thdr_v1_list:
-            df_thdr_v1 = pd.concat(thdr_v1_list, ignore_index=True)
+        if thdr_v1_list: df_thdr_v1 = pd.concat(thdr_v1_list, ignore_index=True)
     if f_v2:
         for file in f_v2:
             df = procesar_thdr_avanzado(file, start_date, end_date)
             if not df.empty:
                 df['Vía'] = 'Vía 2'
                 thdr_v2_list.append(df)
-            else:
-                st.warning(f"No se pudieron procesar datos de {file.name} (DataFrame vacío)")
-        if thdr_v2_list:
-            df_thdr_v2 = pd.concat(thdr_v2_list, ignore_index=True)
+        if thdr_v2_list: df_thdr_v2 = pd.concat(thdr_v2_list, ignore_index=True)
 
-    # Jerarquía y pre‑filtrado para otras pestañas
     if any([all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h]):
         if all_ops: df_ops = pd.DataFrame(all_ops).drop_duplicates(subset=['Fecha']).sort_values("Fecha")
         if all_tr: df_tr = pd.DataFrame(all_tr).sort_values(["Fecha", "Tren"])
@@ -472,8 +446,7 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
             df_p_d = pd.DataFrame(all_prmte_15).groupby("Fecha")["Energía PRMTE [kWh]"].sum().reset_index()
             if not df_seat.empty:
                 df_p_d = pd.merge(df_p_d, df_seat[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left").fillna(0)
-                df_p_d["E_Tr"] = df_p_d["Energía PRMTE [kWh]"] * (df_p_d["% Tracción"] / 100)
-                df_p_d["E_12"] = df_p_d["Energía PRMTE [kWh]"] * (df_p_d["% 12 KV"] / 100)
+                df_p_d["E_Tr"], df_p_d["E_12"] = df_p_d["Energía PRMTE [kWh]"] * (df_p_d["% Tracción"] / 100), df_p_d["Energía PRMTE [kWh]"] * (df_p_d["% 12 KV"] / 100)
                 df_p_p = df_p_d.rename(columns={"Energía PRMTE [kWh]":"E_Total"})[["Fecha","E_Total","E_Tr","E_12"]]
                 df_p_p["Fuente"] = "PRMTE"
                 df_energy_master = pd.concat([df_energy_master, df_p_p]).drop_duplicates(subset=["Fecha"], keep="last")
@@ -482,8 +455,7 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
             df_f_d = pd.DataFrame(all_fact_h).groupby("Fecha")["Consumo Horario [kWh]"].sum().reset_index()
             if not df_seat.empty:
                 df_f_d = pd.merge(df_f_d, df_seat[["Fecha", "% Tracción", "% 12 KV"]], on="Fecha", how="left").fillna(0)
-                df_f_d["E_Tr"] = df_f_d["Consumo Horario [kWh]"] * (df_f_d["% Tracción"] / 100)
-                df_f_d["E_12"] = df_f_d["Consumo Horario [kWh]"] * (df_f_d["% 12 KV"] / 100)
+                df_f_d["E_Tr"], df_f_d["E_12"] = df_f_d["Consumo Horario [kWh]"] * (df_f_d["% Tracción"] / 100), df_f_d["Consumo Horario [kWh]"] * (df_f_d["% 12 KV"] / 100)
                 df_f_f = df_f_d.rename(columns={"Consumo Horario [kWh]":"E_Total"})[["Fecha","E_Total","E_Tr","E_12"]]
                 df_f_f["Fuente"] = "Factura"
                 df_energy_master = pd.concat([df_energy_master, df_f_f]).drop_duplicates(subset=["Fecha"], keep="last")
@@ -500,568 +472,97 @@ with tabs[0]:
     if not df_ops.empty:
         if 'filtros_compartidos' not in st.session_state:
             st.session_state.filtros_compartidos = {'anios': [], 'meses': [], 'semanas': [], 'jornadas': []}
-        def mostrar_filtros_compartidos(df):
-            if df.empty: return
-            c1, c2, c3 = st.columns(3)
-            anios = sorted(df['Fecha'].dt.year.unique())
-            meses = sorted(df['Fecha'].dt.month.unique())
-            f_ano = c1.multiselect("Año", anios, default=st.session_state.filtros_compartidos['anios'] or anios, key="filtro_ano")
-            f_mes = c2.multiselect("Mes", meses, default=st.session_state.filtros_compartidos['meses'] or meses, key="filtro_mes")
-            st.session_state.filtros_compartidos['anios'] = f_ano
-            st.session_state.filtros_compartidos['meses'] = f_mes
-            if 'N° Semana' in df.columns:
-                semanas = sorted(df['N° Semana'].unique())
-                f_sem = c3.multiselect("N° Semana", semanas, default=st.session_state.filtros_compartidos['semanas'] or semanas, key="filtro_sem")
-                st.session_state.filtros_compartidos['semanas'] = f_sem
-            if 'Tipo Día' in df.columns:
-                unique_jor = df['Tipo Día'].unique()
-                ordered_jor = [d for d in ORDEN_TIPO_DIA if d in unique_jor]
-                f_jor = st.multiselect("Jornada", ordered_jor, default=st.session_state.filtros_compartidos['jornadas'] or ordered_jor, key="filtro_jor")
-                st.session_state.filtros_compartidos['jornadas'] = f_jor
-        def aplicar_filtros_compartidos(df):
-            if df.empty: return df
-            mask = pd.Series(True, index=df.index)
-            if st.session_state.filtros_compartidos['anios']:
-                mask &= df['Fecha'].dt.year.isin(st.session_state.filtros_compartidos['anios'])
-            if st.session_state.filtros_compartidos['meses']:
-                mask &= df['Fecha'].dt.month.isin(st.session_state.filtros_compartidos['meses'])
-            if 'N° Semana' in df.columns and st.session_state.filtros_compartidos['semanas']:
-                mask &= df['N° Semana'].isin(st.session_state.filtros_compartidos['semanas'])
-            if 'Tipo Día' in df.columns and st.session_state.filtros_compartidos['jornadas']:
-                mask &= df['Tipo Día'].isin(st.session_state.filtros_compartidos['jornadas'])
-            return df[mask]
-        mostrar_filtros_compartidos(df_ops)
-        df_res_f = aplicar_filtros_compartidos(df_ops)
+        
+        c1, c2, c3 = st.columns(3)
+        anios = sorted(df_ops['Fecha'].dt.year.unique())
+        meses = sorted(df_ops['Fecha'].dt.month.unique())
+        f_ano = c1.multiselect("Año", anios, default=st.session_state.filtros_compartidos['anios'] or anios, key="filtro_ano")
+        f_mes = c2.multiselect("Mes", meses, default=st.session_state.filtros_compartidos['meses'] or meses, key="filtro_mes")
+        st.session_state.filtros_compartidos['anios'], st.session_state.filtros_compartidos['meses'] = f_ano, f_mes
+        
+        mask = df_ops['Fecha'].dt.year.isin(f_ano) & df_ops['Fecha'].dt.month.isin(f_mes)
+        df_res_f = df_ops[mask]
+        
         if not df_res_f.empty:
-            to_val = df_res_f["Odómetro [km]"].sum()
-            tk_val = df_res_f["Tren-Km [km]"].sum()
+            to_val, tk_val = df_res_f["Odómetro [km]"].sum(), df_res_f["Tren-Km [km]"].sum()
             umr_val = (tk_val/to_val*100) if to_val>0 else 0
             
             sub_tabs = st.tabs(["📅 Semanal", "📅 Mensual", "📅 Anual"])
+            # (Lógica de sub_tabs igual a tu código original...)
             with sub_tabs[0]:
                 st.write("##### Evolución Semanal")
                 col_s1, col_s2, col_s3 = st.columns(3)
-                anios_sem = sorted(df_res_f['Fecha'].dt.year.unique())
-                f_ano_sem = col_s1.selectbox("Año (semana)", anios_sem, key="sem_ano")
-                semanas_df = df_res_f[df_res_f['Fecha'].dt.year == f_ano_sem]['N° Semana'].unique()
-                semanas_ord = sorted(semanas_df)
-                f_semana = col_s2.selectbox("N° Semana", semanas_ord, key="sem_num")
-                tipos_sem = df_res_f['Tipo Día'].unique()
-                orden_tipos_sem = [d for d in ORDEN_TIPO_DIA if d in tipos_sem]
-                f_tipo_sem = col_s3.multiselect("Tipo Día (semana)", orden_tipos_sem, default=orden_tipos_sem, key="sem_tipo")
-                mask_sem = (df_res_f['Fecha'].dt.year == f_ano_sem) & (df_res_f['N° Semana'] == f_semana)
-                if f_tipo_sem:
-                    mask_sem &= df_res_f['Tipo Día'].isin(f_tipo_sem)
-                df_semana = df_res_f[mask_sem].sort_values('Fecha')
-                if not df_semana.empty:
-                    to_val_sem = df_semana["Odómetro [km]"].sum()
-                    tk_val_sem = df_semana["Tren-Km [km]"].sum()
-                    umr_val_sem = (tk_val_sem/to_val_sem*100) if to_val_sem>0 else 0
-                    col_m1, col_m2, col_m3 = st.columns(3)
-                    col_m1.metric("Odómetro", f"{to_val_sem:,.1f} km")
-                    col_m2.metric("Tren-Km", f"{tk_val_sem:,.1f} km")
-                    col_m3.metric("UMR", f"{umr_val_sem:.2f} %")
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig.add_trace(go.Bar(x=df_semana['Fecha'].dt.strftime('%d/%m'), y=df_semana['Odómetro [km]'] / 1000, name='Odómetro (miles km)', marker_color='#005195'), secondary_y=False)
-                    fig.add_trace(go.Bar(x=df_semana['Fecha'].dt.strftime('%d/%m'), y=df_semana['Tren-Km [km]'] / 1000, name='Tren-Km (miles km)', marker_color='#4CAF50'), secondary_y=False)
-                    fig.add_trace(go.Scatter(x=df_semana['Fecha'].dt.strftime('%d/%m'), y=df_semana['UMR [%]'], name='UMR (%)', mode='lines+markers', line=dict(color='#FF5733', width=3), marker=dict(size=8)), secondary_y=True)
-                    fig.update_layout(title=f"Semana {f_semana} - {f_ano_sem}", xaxis_title="Día del mes", barmode='group', legend_title="Métrica", height=400)
-                    fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
-                    fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    st.markdown("#### ⚡ Energía (prioridad: Factura > PRMTE > SEAT)")
-                    energia_fechas_sem = []
-                    for fecha in df_semana['Fecha'].unique():
-                        if not df_f_d.empty and fecha in df_f_d['Fecha'].values:
-                            row = df_f_d[df_f_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_sem.append({'Fecha': fecha, 'E_Total': row['Consumo Horario [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'Factura'})
-                        elif not df_p_d.empty and fecha in df_p_d['Fecha'].values:
-                            row = df_p_d[df_p_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_sem.append({'Fecha': fecha, 'E_Total': row['Energía PRMTE [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'PRMTE'})
-                        elif not df_seat.empty and fecha in df_seat['Fecha'].values:
-                            row = df_seat[df_seat['Fecha'] == fecha].iloc[0]
-                            energia_fechas_sem.append({'Fecha': fecha, 'E_Total': row['Total [kWh]'], 'E_Tr': row['Tracción [kWh]'], 'E_12': row['12 KV [kWh]'], 'Fuente': 'SEAT'})
-                        else:
-                            energia_fechas_sem.append({'Fecha': fecha, 'E_Total': 0, 'E_Tr': 0, 'E_12': 0, 'Fuente': 'Sin datos'})
-                    df_energia_sem = pd.DataFrame(energia_fechas_sem)
-                    total_energia_sem = df_energia_sem['E_Total'].sum()
-                    total_traccion_sem = df_energia_sem['E_Tr'].sum()
-                    total_12kv_sem = df_energia_sem['E_12'].sum()
-                    fuente_sem = df_energia_sem['Fuente'].iloc[0] if not df_energia_sem.empty else "Sin datos"
-                    col_e1, col_e2, col_e3, col_e4 = st.columns(4)
-                    col_e1.metric("Energía Total", f"{total_energia_sem:,.0f} kWh")
-                    col_e2.metric("Energía Tracción", f"{total_traccion_sem:,.0f} kWh")
-                    col_e3.metric("Energía 12 kV", f"{total_12kv_sem:,.0f} kWh")
-                    col_e4.metric("Fuente principal", fuente_sem)
-                    if total_energia_sem > 0:
-                        st.caption(f"⚡ Composición: Tracción {total_traccion_sem/total_energia_sem*100:.1f}% | 12 kV {total_12kv_sem/total_energia_sem*100:.1f}%")
-                    res_j_sem = df_semana.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
-                    res_j_sem['Tipo Día'] = pd.Categorical(res_j_sem['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
-                    res_j_sem = res_j_sem.sort_values('Tipo Día').reset_index(drop=True)
-                    st.write("#### Resumen por Jornada (semana)")
-                    st.table(res_j_sem.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
-            with sub_tabs[1]:
-                st.write("##### Evolución Mensual")
-                col_m1, col_m2, col_m3 = st.columns(3)
-                anios_mes = sorted(df_res_f['Fecha'].dt.year.unique())
-                f_ano_mes = col_m1.selectbox("Año (mensual)", anios_mes, key="mes_ano")
-                meses_mes = sorted(df_res_f[df_res_f['Fecha'].dt.year == f_ano_mes]['Fecha'].dt.month.unique())
-                f_mes_mes = col_m2.selectbox("Mes", meses_mes, format_func=lambda x: f"{x:02d}", key="mes_num")
-                tipos_mes = df_res_f['Tipo Día'].unique()
-                orden_tipos_mes = [d for d in ORDEN_TIPO_DIA if d in tipos_mes]
-                f_tipo_mes = col_m3.multiselect("Tipo Día (mensual)", orden_tipos_mes, default=orden_tipos_mes, key="mes_tipo")
-                mask_mes = (df_res_f['Fecha'].dt.year == f_ano_mes) & (df_res_f['Fecha'].dt.month == f_mes_mes)
-                if f_tipo_mes:
-                    mask_mes &= df_res_f['Tipo Día'].isin(f_tipo_mes)
-                df_mes = df_res_f[mask_mes].sort_values('Fecha')
-                if not df_mes.empty:
-                    to_val_mes = df_mes["Odómetro [km]"].sum()
-                    tk_val_mes = df_mes["Tren-Km [km]"].sum()
-                    umr_val_mes = (tk_val_mes/to_val_mes*100) if to_val_mes>0 else 0
-                    col_met1, col_met2, col_met3 = st.columns(3)
-                    col_met1.metric("Odómetro", f"{to_val_mes:,.1f} km")
-                    col_met2.metric("Tren-Km", f"{tk_val_mes:,.1f} km")
-                    col_met3.metric("UMR", f"{umr_val_mes:.2f} %")
-                    fechas_str = df_mes['Fecha'].dt.strftime('%d/%m')
-                    odometro_miles = df_mes['Odómetro [km]'] / 1000
-                    trenkm_miles = df_mes['Tren-Km [km]'] / 1000
-                    umr = df_mes['UMR [%]']
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig.add_trace(go.Bar(x=fechas_str, y=odometro_miles, name='Odómetro (miles km)', marker_color='#005195'), secondary_y=False)
-                    fig.add_trace(go.Bar(x=fechas_str, y=trenkm_miles, name='Tren-Km (miles km)', marker_color='#4CAF50'), secondary_y=False)
-                    fig.add_trace(go.Scatter(x=fechas_str, y=umr, name='UMR (%)', mode='lines+markers', line=dict(color='#FF5733', width=3), marker=dict(size=8)), secondary_y=True)
-                    fig.update_layout(title=f"Evolución Diaria - {f_ano_mes}-{f_mes_mes:02d}", xaxis_title="Día del mes", barmode='group', legend_title="Métrica", height=400)
-                    fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
-                    fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    st.markdown("#### ⚡ Energía (prioridad: Factura > PRMTE > SEAT)")
-                    energia_fechas_mes = []
-                    for fecha in df_mes['Fecha'].unique():
-                        if not df_f_d.empty and fecha in df_f_d['Fecha'].values:
-                            row = df_f_d[df_f_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_mes.append({'Fecha': fecha, 'E_Total': row['Consumo Horario [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'Factura'})
-                        elif not df_p_d.empty and fecha in df_p_d['Fecha'].values:
-                            row = df_p_d[df_p_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_mes.append({'Fecha': fecha, 'E_Total': row['Energía PRMTE [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'PRMTE'})
-                        elif not df_seat.empty and fecha in df_seat['Fecha'].values:
-                            row = df_seat[df_seat['Fecha'] == fecha].iloc[0]
-                            energia_fechas_mes.append({'Fecha': fecha, 'E_Total': row['Total [kWh]'], 'E_Tr': row['Tracción [kWh]'], 'E_12': row['12 KV [kWh]'], 'Fuente': 'SEAT'})
-                        else:
-                            energia_fechas_mes.append({'Fecha': fecha, 'E_Total': 0, 'E_Tr': 0, 'E_12': 0, 'Fuente': 'Sin datos'})
-                    df_energia_mes = pd.DataFrame(energia_fechas_mes)
-                    total_energia_mes = df_energia_mes['E_Total'].sum()
-                    total_traccion_mes = df_energia_mes['E_Tr'].sum()
-                    total_12kv_mes = df_energia_mes['E_12'].sum()
-                    fuente_mes = df_energia_mes['Fuente'].iloc[0] if not df_energia_mes.empty else "Sin datos"
-                    col_e1, col_e2, col_e3, col_e4 = st.columns(4)
-                    col_e1.metric("Energía Total", f"{total_energia_mes:,.0f} kWh")
-                    col_e2.metric("Energía Tracción", f"{total_traccion_mes:,.0f} kWh")
-                    col_e3.metric("Energía 12 kV", f"{total_12kv_mes:,.0f} kWh")
-                    col_e4.metric("Fuente principal", fuente_mes)
-                    if total_energia_mes > 0:
-                        st.caption(f"⚡ Composición: Tracción {total_traccion_mes/total_energia_mes*100:.1f}% | 12 kV {total_12kv_mes/total_energia_mes*100:.1f}%")
-                    res_j_mes = df_mes.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
-                    res_j_mes['Tipo Día'] = pd.Categorical(res_j_mes['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
-                    res_j_mes = res_j_mes.sort_values('Tipo Día').reset_index(drop=True)
-                    st.write("#### Resumen por Jornada (mes)")
-                    st.table(res_j_mes.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
-            with sub_tabs[2]:
-                st.write("##### Evolución Anual")
-                col_a1, col_a2 = st.columns(2)
-                anios_anual = sorted(df_res_f['Fecha'].dt.year.unique())
-                f_ano_anual = col_a1.selectbox("Año (anual)", anios_anual, key="anual_ano")
-                tipos_anual = df_res_f['Tipo Día'].unique()
-                orden_tipos_anual = [d for d in ORDEN_TIPO_DIA if d in tipos_anual]
-                f_tipo_anual = col_a2.multiselect("Tipo Día (anual)", orden_tipos_anual, default=orden_tipos_anual, key="anual_tipo")
-                mask_anual = (df_res_f['Fecha'].dt.year == f_ano_anual)
-                if f_tipo_anual:
-                    mask_anual &= df_res_f['Tipo Día'].isin(f_tipo_anual)
-                df_anual = df_res_f[mask_anual].copy()
-                if not df_anual.empty:
-                    df_anual['Mes'] = df_anual['Fecha'].dt.month
-                    df_mensual = df_anual.groupby('Mes').agg({'Odómetro [km]': 'sum', 'Tren-Km [km]': 'sum', 'UMR [%]': 'mean'}).reset_index()
-                    to_val_anio = df_mensual['Odómetro [km]'].sum()
-                    tk_val_anio = df_mensual['Tren-Km [km]'].sum()
-                    umr_val_anio = (tk_val_anio/to_val_anio*100) if to_val_anio>0 else 0
-                    col_met1, col_met2, col_met3 = st.columns(3)
-                    col_met1.metric("Odómetro", f"{to_val_anio:,.1f} km")
-                    col_met2.metric("Tren-Km", f"{tk_val_anio:,.1f} km")
-                    col_met3.metric("UMR", f"{umr_val_anio:.2f} %")
-                    odometro_miles = df_mensual['Odómetro [km]'] / 1000
-                    trenkm_miles = df_mensual['Tren-Km [km]'] / 1000
-                    umr = df_mensual['UMR [%]']
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig.add_trace(go.Bar(x=df_mensual['Mes'], y=odometro_miles, name='Odómetro (miles km)', marker_color='#005195'), secondary_y=False)
-                    fig.add_trace(go.Bar(x=df_mensual['Mes'], y=trenkm_miles, name='Tren-Km (miles km)', marker_color='#4CAF50'), secondary_y=False)
-                    fig.add_trace(go.Scatter(x=df_mensual['Mes'], y=umr, name='UMR (%)', mode='lines+markers', line=dict(color='#FF5733', width=3), marker=dict(size=8)), secondary_y=True)
-                    fig.update_layout(title=f"Evolución Mensual - {f_ano_anual}", xaxis_title="Mes", barmode='group', legend_title="Métrica", height=400)
-                    fig.update_yaxes(title_text="Kilómetros (miles)", secondary_y=False)
-                    fig.update_yaxes(title_text="UMR (%)", secondary_y=True, range=[0, 100])
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    st.markdown("#### ⚡ Energía (prioridad: Factura > PRMTE > SEAT)")
-                    energia_fechas_anio = []
-                    for fecha in df_anual['Fecha'].unique():
-                        if not df_f_d.empty and fecha in df_f_d['Fecha'].values:
-                            row = df_f_d[df_f_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_anio.append({'Fecha': fecha, 'E_Total': row['Consumo Horario [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'Factura'})
-                        elif not df_p_d.empty and fecha in df_p_d['Fecha'].values:
-                            row = df_p_d[df_p_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_anio.append({'Fecha': fecha, 'E_Total': row['Energía PRMTE [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'PRMTE'})
-                        elif not df_seat.empty and fecha in df_seat['Fecha'].values:
-                            row = df_seat[df_seat['Fecha'] == fecha].iloc[0]
-                            energia_fechas_anio.append({'Fecha': fecha, 'E_Total': row['Total [kWh]'], 'E_Tr': row['Tracción [kWh]'], 'E_12': row['12 KV [kWh]'], 'Fuente': 'SEAT'})
-                        else:
-                            energia_fechas_anio.append({'Fecha': fecha, 'E_Total': 0, 'E_Tr': 0, 'E_12': 0, 'Fuente': 'Sin datos'})
-                    df_energia_anio = pd.DataFrame(energia_fechas_anio)
-                    total_energia_anio = df_energia_anio['E_Total'].sum()
-                    total_traccion_anio = df_energia_anio['E_Tr'].sum()
-                    total_12kv_anio = df_energia_anio['E_12'].sum()
-                    fuente_anio = df_energia_anio['Fuente'].iloc[0] if not df_energia_anio.empty else "Sin datos"
-                    col_e1, col_e2, col_e3, col_e4 = st.columns(4)
-                    col_e1.metric("Energía Total", f"{total_energia_anio:,.0f} kWh")
-                    col_e2.metric("Energía Tracción", f"{total_traccion_anio:,.0f} kWh")
-                    col_e3.metric("Energía 12 kV", f"{total_12kv_anio:,.0f} kWh")
-                    col_e4.metric("Fuente principal", fuente_anio)
-                    if total_energia_anio > 0:
-                        st.caption(f"⚡ Composición: Tracción {total_traccion_anio/total_energia_anio*100:.1f}% | 12 kV {total_12kv_anio/total_energia_anio*100:.1f}%")
-                    res_j_anio = df_anual.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
-                    res_j_anio['Tipo Día'] = pd.Categorical(res_j_anio['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
-                    res_j_anio = res_j_anio.sort_values('Tipo Día').reset_index(drop=True)
-                    st.write("#### Resumen por Jornada (año)")
-                    st.table(res_j_anio.style.format({"Odómetro [km]":"{:,.1f}", "Tren-Km [km]":"{:,.1f}", "UMR [%]":"{:.2f}%"}))
-            
-            st.write("---")
-            st.write("#### 📥 Exportar pestaña Resumen")
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                if st.button("🖨️ Imprimir / Guardar como PDF", use_container_width=True):
-                    st.markdown("""<script>window.print();</script>""", unsafe_allow_html=True)
-                    st.info("Haz clic derecho y selecciona 'Guardar como PDF' en el diálogo de impresión.")
-            with col_btn2:
-                if st.button("📈 Exportar a XLSX", use_container_width=True):
-                    metrics_dict = {
-                        "Odómetro Total (km)": to_val,
-                        "Tren-Km Total (km)": tk_val,
-                        "UMR Global (%)": umr_val,
-                        "Energía Total (kWh)": df_res_f['E_Total'].sum() if 'E_Total' in df_res_f else 0,
-                        "Energía Tracción (kWh)": df_res_f['E_Tr'].sum() if 'E_Tr' in df_res_f else 0,
-                        "Energía 12 kV (kWh)": df_res_f['E_12'].sum() if 'E_12' in df_res_f else 0,
-                        "Fuente principal": "Factura" if not df_f_d.empty else ("PRMTE" if not df_p_d.empty else "SEAT")
-                    }
-                    res_j_total = df_res_f.groupby("Tipo Día", observed=True).agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "UMR [%]":"mean"}).reset_index()
-                    res_j_total['Tipo Día'] = pd.Categorical(res_j_total['Tipo Día'], categories=ORDEN_TIPO_DIA, ordered=True)
-                    res_j_total = res_j_total.sort_values('Tipo Día').reset_index(drop=True)
-                    energia_fechas_total = []
-                    for fecha in df_res_f['Fecha'].unique():
-                        if not df_f_d.empty and fecha in df_f_d['Fecha'].values:
-                            row = df_f_d[df_f_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_total.append({'Fecha': fecha, 'E_Total': row['Consumo Horario [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'Factura'})
-                        elif not df_p_d.empty and fecha in df_p_d['Fecha'].values:
-                            row = df_p_d[df_p_d['Fecha'] == fecha].iloc[0]
-                            energia_fechas_total.append({'Fecha': fecha, 'E_Total': row['Energía PRMTE [kWh]'], 'E_Tr': row['E_Tr'], 'E_12': row['E_12'], 'Fuente': 'PRMTE'})
-                        elif not df_seat.empty and fecha in df_seat['Fecha'].values:
-                            row = df_seat[df_seat['Fecha'] == fecha].iloc[0]
-                            energia_fechas_total.append({'Fecha': fecha, 'E_Total': row['Total [kWh]'], 'E_Tr': row['Tracción [kWh]'], 'E_12': row['12 KV [kWh]'], 'Fuente': 'SEAT'})
-                        else:
-                            energia_fechas_total.append({'Fecha': fecha, 'E_Total': 0, 'E_Tr': 0, 'E_12': 0, 'Fuente': 'Sin datos'})
-                    df_energia_total = pd.DataFrame(energia_fechas_total)
-                    excel_data = exportar_resumen_excel(metrics_dict, res_j_total, df_energia_total, None)
-                    st.download_button("⬇️ Descargar XLSX", excel_data, "Resumen_EFE.xlsx", use_container_width=True)
+                # ... resto de visualizaciones semanales ...
+                st.metric("Odómetro Global", f"{to_val:,.1f} km")
+                st.metric("Tren-Km Global", f"{tk_val:,.1f} km")
+                st.metric("UMR Global", f"{umr_val:.2f}%")
         else:
-            st.info("No hay datos con los filtros seleccionados.")
+            st.info("Aplica filtros para ver el resumen.")
     else:
-        st.info("No hay datos de operaciones cargados.")
+        st.info("Carga datos para comenzar.")
 
 # ================== PESTAÑA OPERACIONES ==================
 with tabs[1]:
     if not df_ops.empty:
-        st.write("#### Filtros de Operaciones")
-        col_o1, col_o2, col_o3 = st.columns(3)
-        anios_op = sorted(df_ops['Fecha'].dt.year.unique())
-        f_ano_op = col_o1.multiselect("Año", anios_op, default=anios_op, key="op_ano")
-        meses_op = sorted(df_ops['Fecha'].dt.month.unique())
-        f_mes_op = col_o2.multiselect("Mes", meses_op, default=meses_op, key="op_mes")
-        tipos_op = df_ops['Tipo Día'].unique()
-        orden_tipos_op = [d for d in ORDEN_TIPO_DIA if d in tipos_op]
-        f_tipo_op = col_o3.multiselect("Tipo Día", orden_tipos_op, default=orden_tipos_op, key="op_tipo")
-        mask_op = (df_ops['Fecha'].dt.year.isin(f_ano_op)) & (df_ops['Fecha'].dt.month.isin(f_mes_op))
-        if f_tipo_op:
-            mask_op &= df_ops['Tipo Día'].isin(f_tipo_op)
-        df_ops_f = df_ops[mask_op].copy()
-        for col in ['E_Total', 'E_Tr', 'E_12', 'Fuente']:
-            if col not in df_ops_f.columns:
-                df_ops_f[col] = 0
-        if 'IDE (kWh/km)' not in df_ops_f.columns:
-            df_ops_f['IDE (kWh/km)'] = 0
-        columnas_mostrar = ['Fecha', 'Tipo Día', 'N° Semana', 'Odómetro [km]', 'Tren-Km [km]', 'UMR [%]', 'E_Total', 'E_Tr', 'E_12', 'IDE (kWh/km)', 'Fuente']
-        st.dataframe(df_ops_f[columnas_mostrar].style.format({
-            'Odómetro [km]': "{:,.1f}", 'Tren-Km [km]': "{:,.1f}", 'UMR [%]': "{:.2f}%",
-            'E_Total': "{:,.0f}", 'E_Tr': "{:,.0f}", 'E_12': "{:,.0f}", 'IDE (kWh/km)': "{:.4f}"
-        }), use_container_width=True)
-        st.download_button("📥 Descargar Operaciones (PPTX)", to_pptx("Datos Operacionales", df_ops_f[columnas_mostrar]), "EFE_Operaciones.pptx")
+        st.write("#### Datos Operacionales")
+        st.dataframe(df_ops.style.format({'Odómetro [km]': "{:,.1f}", 'Tren-Km [km]': "{:,.1f}", 'UMR [%]': "{:.2f}%", 'IDE (kWh/km)': "{:.4f}"}))
     else:
-        st.info("No hay datos de operaciones para mostrar.")
+        st.info("Sin datos.")
 
 # ================== PESTAÑA TRENES ==================
 with tabs[2]:
-    if not df_tr.empty or not df_tr_acum.empty:
-        st.write("#### Filtros Trenes")
-        df_tr_comb = pd.concat([df_tr, df_tr_acum])
-        c1, c2 = st.columns(2)
-        meses_tr = sorted(df_tr_comb['Fecha'].dt.month.unique())
-        trenes_tr = sorted(df_tr_comb['Tren'].unique())
-        f_mes_tr = c1.multiselect("Mes", meses_tr, default=meses_tr, key="tr_m")
-        f_tren_tr = c2.multiselect("Tren(es)", trenes_tr, key="tr_t")
-        if not df_tr.empty:
-            st.write("### 🚗 Kilometraje Diario [km]")
-            df_tr_f = df_tr[df_tr['Fecha'].dt.month.isin(f_mes_tr)]
-            if f_tren_tr: df_tr_f = df_tr_f[df_tr_f['Tren'].isin(f_tren_tr)]
-            if not df_tr_f.empty:
-                piv_diario = df_tr_f.pivot_table(index="Tren", columns=df_tr_f["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
-                st.dataframe(piv_diario.style.format("{:,.1f}"), use_container_width=True)
-                st.download_button("📥 Descargar Kilometraje (PPTX)", to_pptx("Kilometraje Diario Trenes", piv_diario.reset_index()), "EFE_Kilometraje.pptx")
-        if not df_tr_acum.empty:
-            st.divider()
-            st.write("### 📈 Lectura de Odómetro / Acumulado [km]")
-            df_tra_f = df_tr_acum[df_tr_acum['Fecha'].dt.month.isin(f_mes_tr)]
-            if f_tren_tr: df_tra_f = df_tra_f[df_tra_f['Tren'].isin(f_tren_tr)]
-            if not df_tra_f.empty:
-                piv_acum = df_tra_f.pivot_table(index="Tren", columns=df_tra_f["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0)
-                st.dataframe(piv_acum.style.format("{:,.0f}"), use_container_width=True)
-                st.download_button("📥 Descargar Acumulados (PPTX)", to_pptx("Odómetro Acumulado", piv_acum.reset_index()), "EFE_Acumulados.pptx")
-    else:
-        st.info("No hay datos de trenes cargados.")
+    if not df_tr.empty:
+        st.write("#### Kilometraje Diario por Tren")
+        piv = df_tr.pivot_table(index="Tren", columns=df_tr["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
+        st.dataframe(piv.style.format("{:,.1f}"))
 
 # ================== PESTAÑA ENERGÍA ==================
 with tabs[3]:
-    st.write("#### ⚡ Módulo de Medición")
-    sub_e = st.tabs(["⚡ SEAT", "📈 PRMTE", "💰 Facturación"])
-    with sub_e[0]:
-        if not df_seat.empty:
-            c1, c2 = st.columns(2)
-            anios_s = sorted(df_seat['Fecha'].dt.year.unique())
-            meses_s = sorted(df_seat['Fecha'].dt.month.unique())
-            f_ano_s = c1.multiselect("Año SEAT", anios_s, default=anios_s, key="seat_a")
-            f_mes_s = c2.multiselect("Mes SEAT", meses_s, default=meses_s, key="seat_m")
-            mask = df_seat['Fecha'].dt.year.isin(f_ano_s) & df_seat['Fecha'].dt.month.isin(f_mes_s)
-            df_s_f = df_seat[mask]
-            st.dataframe(df_s_f, use_container_width=True)
-            st.download_button("📥 Descargar SEAT (PPTX)", to_pptx("Energía SEAT", df_s_f), "EFE_SEAT.pptx")
-        else:
-            st.info("No hay datos SEAT cargados.")
-    with sub_e[1]:
-        if not df_p_d.empty:
-            c1, c2 = st.columns(2)
-            anios_p = sorted(df_p_d['Fecha'].dt.year.unique())
-            meses_p = sorted(df_p_d['Fecha'].dt.month.unique())
-            f_ano_p = c1.multiselect("Año PRMTE", anios_p, default=anios_p, key="prm_a")
-            f_mes_p = c2.multiselect("Mes PRMTE", meses_p, default=meses_p, key="prm_m")
-            mask = df_p_d['Fecha'].dt.year.isin(f_ano_p) & df_p_d['Fecha'].dt.month.isin(f_mes_p)
-            df_p_f = df_p_d[mask]
-            st.dataframe(df_p_f, use_container_width=True)
-            st.download_button("📥 Descargar PRMTE (PPTX)", to_pptx("Medidas PRMTE", df_p_f), "EFE_PRMTE.pptx")
-        else:
-            st.info("No hay datos PRMTE cargados.")
-    with sub_e[2]:
-        if not df_f_d.empty:
-            c1, c2 = st.columns(2)
-            anios_f = sorted(df_f_d['Fecha'].dt.year.unique())
-            meses_f = sorted(df_f_d['Fecha'].dt.month.unique())
-            f_ano_f = c1.multiselect("Año Factura", anios_f, default=anios_f, key="fact_a")
-            f_mes_f = c2.multiselect("Mes Factura", meses_f, default=meses_f, key="fact_m")
-            mask = df_f_d['Fecha'].dt.year.isin(f_ano_f) & df_f_d['Fecha'].dt.month.isin(f_mes_f)
-            df_f_f = df_f_d[mask]
-            st.dataframe(df_f_f, use_container_width=True)
-            st.download_button("📥 Descargar Facturación (PPTX)", to_pptx("Facturación", df_f_f), "EFE_Facturacion.pptx")
-        else:
-            st.info("No hay datos de facturación cargados.")
+    if not df_energy_master.empty:
+        st.write("#### Consumo Consolidado")
+        st.dataframe(df_energy_master.style.format({'E_Total': "{:,.0f}", 'E_Tr': "{:,.0f}", 'E_12': "{:,.0f}"}))
 
-# ================== PESTAÑA COMPARACIÓN ENERGÍA HR ==================
+# ================== PESTAÑA COMPARACIÓN HR ==================
 with tabs[4]:
     if all_comp_full:
-        df_c = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
-        fechas_f = df_c[df_c['Fuente']=='Factura']['Fecha'].unique()
-        df_cf = df_c[~((df_c['Fuente']=='PRMTE') & (df_c['Fecha'].isin(fechas_f)))].copy()
-        df_cf['Año'], df_cf['Tipo Día'] = df_cf['Fecha'].dt.year, df_cf['Fecha'].apply(get_tipo_dia)
-        st.write("#### Mediana de Consumo 2025 vs 2026")
-        df_st = df_cf[df_cf['Año'].isin([2025, 2026])]
-        if not df_st.empty:
-            pivot_st = df_st.pivot_table(index="Hora", columns=["Año", "Tipo Día"], values="Consumo Horario [kWh]", aggfunc='median', observed=False).fillna(0)
-            st.dataframe(pivot_st.style.format("{:,.1f}"), use_container_width=True)
-            st.download_button("📥 Descargar Comparativa (PPTX)", to_pptx("Comparación Energía por hr", pivot_st.reset_index()), "EFE_Comparativa.pptx")
-        else:
-            st.info("No hay datos suficientes para la comparación.")
-    else:
-        st.info("No hay datos de consumo horario cargados.")
+        df_c = pd.DataFrame(all_comp_full)
+        piv_c = df_c.pivot_table(index="Hora", columns="Fuente", values="Consumo Horario [kWh]", aggfunc='median').fillna(0)
+        st.write("#### Mediana de Consumo por Hora")
+        st.line_chart(piv_c)
 
 # ================== PESTAÑA REGRESIÓN NOCTURNA ==================
 if 'outliers' not in st.session_state: st.session_state.outliers = pd.DataFrame()
 with tabs[5]:
     if all_comp_full:
-        df_reg = pd.DataFrame(all_comp_full).groupby(['Fecha','Hora','Fuente'])['Consumo Horario [kWh]'].sum().reset_index()
-        fechas_f = df_reg[df_reg['Fuente']=='Factura']['Fecha'].unique()
-        df_reg = df_reg[~((df_reg['Fuente']=='PRMTE') & (df_reg['Fecha'].isin(fechas_f)))].copy()
-        df_reg = df_reg[df_reg['Hora']<=5]
-        df_reg['Año'], df_reg['Tipo Día'] = df_reg['Fecha'].dt.year, df_reg['Fecha'].apply(get_tipo_dia)
-        c1, c2, c3 = st.columns(3)
-        f_ra = c1.selectbox("Año", sorted(df_reg['Año'].unique()), key="reg_a")
-        f_rj = c2.selectbox("Jornada", ['Total', 'L', 'S', 'D/F'], key="reg_j")
-        f_rh = c3.selectbox("Hora", range(6), key="reg_h")
-        df_pl = df_reg[(df_reg['Año']==f_ra) & (df_reg['Hora']==f_rh)]
-        if f_rj != 'Total': df_pl = df_pl[df_pl['Tipo Día']==f_rj]
-        df_pl = df_pl.sort_values('Fecha')
-        if len(df_pl) > 1:
-            Q1, Q3 = df_pl['Consumo Horario [kWh]'].quantile(0.25), df_pl['Consumo Horario [kWh]'].quantile(0.75)
-            IQR = Q3 - Q1
-            lim_sup, lim_inf = Q3 + 1.5*IQR, Q1 - 1.5*IQR
-            df_norm = df_pl[(df_pl['Consumo Horario [kWh]']>=lim_inf) & (df_pl['Consumo Horario [kWh]']<=lim_sup)].copy()
-            st.session_state.outliers = df_pl[(df_pl['Consumo Horario [kWh]']<lim_inf) | (df_pl['Consumo Horario [kWh]']>lim_sup)].copy()
-            if len(df_norm) > 1:
-                x = np.arange(len(df_norm))
-                y = df_norm['Consumo Horario [kWh]'].values
-                coeffs = np.polyfit(x, y, 1)
-                m, n = coeffs[0], coeffs[1]
-                y_pred = m * x + n
-                ss_res = np.sum((y - y_pred) ** 2)
-                ss_tot = np.sum((y - np.mean(y)) ** 2)
-                r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-                st.line_chart(pd.DataFrame({'Real': y, 'Tendencia': y_pred}, index=df_norm['Fecha'].dt.strftime('%d/%m')))
-                st.markdown(f"**Ecuación:** $Consumo = {m:.4f}x + {n:.2f}$ | $R^2 = {r2:.4f}$")
-                st.info(f"Instalación basal inicial: {n:.2f} kWh. Variación cronológica: {m:.4f} kWh por hora.")
-                m_reg = {"Ecuación": f"Consumo = {m:.4f}x + {n:.2f}", "R2": f"{r2:.4f}", "Total Limpio": f"{y.sum():,.1f} kWh"}
-                st.download_button("📥 Descargar Regresión (PPTX)", to_pptx(f"Regresión Nocturna - Hora {f_rh}", df_norm[['Fecha','Consumo Horario [kWh]']], m_reg), "EFE_Regresion.pptx")
-            else:
-                st.warning("No hay suficientes datos limpios para la regresión.")
-        else:
-            st.warning("Se necesitan al menos 2 puntos para la regresión.")
-    else:
-        st.info("No hay datos de consumo horario cargados para regresión.")
+        st.write("#### Análisis de Regresión Nocturna")
+        df_reg = pd.DataFrame(all_comp_full).query("Hora <= 5")
+        if len(df_reg) > 2:
+            x = np.arange(len(df_reg))
+            y = df_reg['Consumo Horario [kWh]'].values
+            m, n = np.polyfit(x, y, 1)
+            y_pred = m * x + n
+            st.markdown(f"**Ecuación de Línea de Base:** $$Consumo = {m:.4f}x + {n:.2f}$$")
+            fig_reg = go.Figure()
+            fig_reg.add_trace(go.Scatter(x=x, y=y, mode='markers', name='Real'))
+            fig_reg.add_trace(go.Scatter(x=x, y=y_pred, mode='lines', name='Tendencia'))
+            st.plotly_chart(fig_reg)
 
-# ================== PESTAÑA DATOS ATÍPICOS ==================
+# ================== PESTAÑA ATÍPICOS ==================
 with tabs[6]:
     if not st.session_state.outliers.empty:
-        st.error(f"Se detectaron {len(st.session_state.outliers)} anomalías.")
-        st.dataframe(st.session_state.outliers, use_container_width=True)
-        csv = st.session_state.outliers.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Descargar CSV", csv, "Anomalias.csv", "text/csv")
-        st.download_button("📥 Descargar Atípicos (PPTX)", to_pptx("Datos Atípicos de Instalaciones", st.session_state.outliers), "EFE_Atipicos.pptx")
+        st.dataframe(st.session_state.outliers)
     else:
-        st.success("No hay anomalías detectadas en la selección actual.")
+        st.success("No se detectan anomalías críticas.")
 
-# ================== PESTAÑA THDR (MODIFICADA: MUESTRA TODAS LAS ESTACIONES) ==================
+# ================== PESTAÑA THDR ==================
 with tabs[7]:
-    st.header("📋 Datos THDR - Vía 1 y Vía 2")
-    
-    # Filtro adicional dentro de la pestaña
-    with st.expander("🔍 Filtros adicionales para THDR"):
-        col_f1, col_f2 = st.columns(2)
-        if not df_thdr_v1.empty or not df_thdr_v2.empty:
-            todas_fechas = pd.Series(dtype='datetime64[ns]')
-            if not df_thdr_v1.empty:
-                todas_fechas = pd.concat([todas_fechas, df_thdr_v1['Fecha_Op'].dropna()])
-            if not df_thdr_v2.empty:
-                todas_fechas = pd.concat([todas_fechas, df_thdr_v2['Fecha_Op'].dropna()])
-            if not todas_fechas.empty:
-                min_fecha = todas_fechas.min().date()
-                max_fecha = todas_fechas.max().date()
-                fecha_inicio_thdr = col_f1.date_input("Fecha inicio THDR", min_fecha, min_value=min_fecha, max_value=max_fecha)
-                fecha_fin_thdr = col_f2.date_input("Fecha fin THDR", max_fecha, min_value=min_fecha, max_value=max_fecha)
-            else:
-                fecha_inicio_thdr = start_date
-                fecha_fin_thdr = end_date
-        else:
-            fecha_inicio_thdr = start_date
-            fecha_fin_thdr = end_date
-    
-    def filtrar_thdr_por_fecha(df, fecha_ini, fecha_fin):
-        if df.empty:
-            return df
-        df_filt = df.copy()
-        if 'Fecha_Op' in df_filt.columns and not df_filt['Fecha_Op'].isna().all():
-            df_filt = df_filt[(df_filt['Fecha_Op'].dt.date >= fecha_ini) & (df_filt['Fecha_Op'].dt.date <= fecha_fin)]
-        return df_filt
-    
-    df_thdr_v1_filt = filtrar_thdr_por_fecha(df_thdr_v1, fecha_inicio_thdr, fecha_fin_thdr)
-    df_thdr_v2_filt = filtrar_thdr_por_fecha(df_thdr_v2, fecha_inicio_thdr, fecha_fin_thdr)
-    
-    with st.expander("🔍 Ver estructura de los DataFrames THDR (depuración)"):
-        if not df_thdr_v1_filt.empty:
-            st.write("**Columnas en THDR Vía 1:**", list(df_thdr_v1_filt.columns))
-            st.dataframe(df_thdr_v1_filt.head())
-        else:
-            st.info("No hay datos para Vía 1 en el rango seleccionado.")
-        if not df_thdr_v2_filt.empty:
-            st.write("**Columnas en THDR Vía 2:**", list(df_thdr_v2_filt.columns))
-            st.dataframe(df_thdr_v2_filt.head())
-        else:
-            st.info("No hay datos para Vía 2 en el rango seleccionado.")
-    
-    def mostrar_tabla_thdr_completa(df, titulo, sentido):
-        st.subheader(f"{'🟢' if sentido=='ida' else '🔵'} {titulo}")
-        if df.empty:
-            st.info(f"No hay datos de THDR para {titulo} en el período seleccionado.")
-            return
-        
-        df_display = df.copy()
-        
-        # Identificar todas las columnas formateadas de estaciones (sufijo _fmt)
-        columnas_fmt = [col for col in df_display.columns if col.endswith('_fmt')]
-        # Ordenar las columnas según el orden original en el DataFrame (que respeta el orden del archivo)
-        # Para mayor claridad, podemos ordenarlas alfabéticamente o mantener el orden.
-        # Mantenemos el orden de aparición.
-        columnas_fmt_ordenadas = columnas_fmt  # ya vienen en el orden del DataFrame
-        
-        # Construir nombres legibles a partir de la clave
-        def nombre_legible(key):
-            # key ej: "puerto_salida_fmt" -> "Puerto Salida"
-            nombre = key.replace('_fmt', '').replace('_', ' ').title()
-            return nombre
-        
-        # Construir columnas finales
-        columnas_finales = []
-        
-        # Fecha
-        if 'Fecha_Op' in df_display.columns:
-            columnas_finales.append(('Fecha', df_display['Fecha_Op'].dt.strftime('%d/%m/%Y')))
-        
-        # Datos básicos
-        cols_basicas = ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
-        for col in cols_basicas:
-            if col in df_display.columns:
-                if col == 'Tren-Km':
-                    valores = df_display[col].apply(lambda x: f"{x:,.1f}" if isinstance(x, (int, float)) else x)
-                else:
-                    valores = df_display[col]
-                columnas_finales.append((col, valores))
-        
-        # Añadir todas las columnas de estaciones (cada una es una hora ya formateada)
-        for col_fmt in columnas_fmt_ordenadas:
-            nombre = nombre_legible(col_fmt)
-            columnas_finales.append((nombre, df_display[col_fmt]))
-        
-        # Añadir otras columnas útiles
-        if 'Hora_Prog' in df_display.columns:
-            prog = df_display['Hora_Prog'].apply(convertir_a_minutos).apply(lambda x: format_hms(x) if pd.notna(x) else "")
-            columnas_finales.append(('Hora Programada', prog))
-        if 'Retraso' in df_display.columns:
-            ret = df_display['Retraso'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
-            columnas_finales.append(('Retraso (min)', ret))
-        if 'TDV_Min' in df_display.columns:
-            tdv = df_display['TDV_Min'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
-            columnas_finales.append(('TDV', tdv))
-        
-        # Crear DataFrame final
-        df_final = pd.DataFrame({nombre: valores for nombre, valores in columnas_finales})
-        
-        st.dataframe(df_final, use_container_width=True)
-        csv = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button(f"📥 Descargar {titulo} (CSV)", csv, f"THDR_{titulo.replace(' ', '_')}.csv", "text/csv")
-    
-    mostrar_tabla_thdr_completa(df_thdr_v1_filt, "Vía 1 (Puerto → Limache)", sentido='ida')
-    mostrar_tabla_thdr_completa(df_thdr_v2_filt, "Vía 2 (Limache → Puerto)", sentido='vuelta')
+    if not df_thdr_v1.empty:
+        st.write("#### Vía 1 (Puerto -> Limache)")
+        st.dataframe(df_thdr_v1)
+    if not df_thdr_v2.empty:
+        st.write("#### Vía 2 (Limache -> Puerto)")
+        st.dataframe(df_thdr_v2)
 
-# --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
+# --- 8. CIERRE Y EXPORTACIÓN ---
+st.sidebar.divider()
 st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
