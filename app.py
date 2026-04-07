@@ -437,12 +437,29 @@ with tabs[5]:
     st.header("📈 Regresión IDE vs Odómetro")
     if not df_ops.empty and df_ops['IDE (kWh/km)'].sum() > 0:
         df_reg = df_ops[df_ops['IDE (kWh/km)'] > 0].copy()
-        fig = px.scatter(
-            df_reg, x='Odómetro [km]', y='IDE (kWh/km)',
-            color='Tipo Día', trendline='ols',
-            title='IDE vs Odómetro por Tipo de Día',
-            color_discrete_map={"L": "#005195", "S": "#FFA500", "D/F": "#E85500"}
-        )
+        color_map = {"L": "#005195", "S": "#FFA500", "D/F": "#E85500"}
+        fig = go.Figure()
+        for tipo, grp in df_reg.groupby('Tipo Día'):
+            fig.add_trace(go.Scatter(
+                x=grp['Odómetro [km]'], y=grp['IDE (kWh/km)'],
+                mode='markers', name=tipo,
+                marker=dict(color=color_map.get(tipo, '#888'), size=8)
+            ))
+        # Línea de regresión global con numpy
+        x_all = df_reg['Odómetro [km]'].values
+        y_all = df_reg['IDE (kWh/km)'].values
+        if len(x_all) >= 2:
+            coef = np.polyfit(x_all, y_all, 1)
+            x_line = np.linspace(x_all.min(), x_all.max(), 100)
+            y_line = np.polyval(coef, x_line)
+            r2 = np.corrcoef(x_all, y_all)[0, 1] ** 2
+            fig.add_trace(go.Scatter(
+                x=x_line, y=y_line, mode='lines',
+                name=f'Tendencia (R²={r2:.3f})',
+                line=dict(color='gray', dash='dash', width=2)
+            ))
+        fig.update_layout(title='IDE vs Odómetro por Tipo de Día',
+                          xaxis_title='Odómetro [km]', yaxis_title='kWh/km')
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("📂 Sin datos suficientes para regresión.")
