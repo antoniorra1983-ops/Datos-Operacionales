@@ -15,14 +15,16 @@ import traceback
 # --- 0. FUNCIÓN DE SEGURIDAD PARA COLUMNAS DUPLICADAS ---
 def make_columns_unique(df):
     """
-    Recorre las columnas y renombra las duplicadas añadiendo un sufijo .1, .2, etc.
-    Esto es vital para que st.dataframe no lance el ValueError de PyArrow.
+    Detecta nombres duplicados y añade sufijos para evitar el error de PyArrow en st.dataframe.
+    Debe recibir un DataFrame, no un objeto Styler.
     """
+    if not isinstance(df, pd.DataFrame):
+        return df
     if df.empty:
         return df
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique():
-        cols[cols == dup] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
+        cols[cols == dup] = [f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))]
     df.columns = cols
     return df
 
@@ -170,7 +172,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         
         df = df_raw.iloc[2:].copy()
         df.columns = column_names
-        df = make_columns_unique(df) # Evitar duplicados desde el origen
+        df = make_columns_unique(df)
         
         def buscar_columna(nombres_posibles):
             for col in df.columns:
@@ -209,7 +211,6 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Hora_Llegada_Real'] = df[f"{l_key}_min"] if l_key else None
         df['Min_Prog'] = df['Hora_Prog'].apply(convertir_a_minutos)
         df['Retraso'] = df['Hora_Salida_Real'] - df['Min_Prog']
-        df['Puntual'] = (abs(df['Retraso']) <= 5).astype(int)
         
         if p_key and l_key:
             tdv = df['Hora_Llegada_Real'] - df['Hora_Salida_Real']
@@ -263,6 +264,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                 sn_up = sn.upper()
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
+                    # FIX AMBIGÜEDAD CABECERAS
                     h_r = None
                     for i in range(min(100, len(df_raw))):
                         linea = " ".join([str(val).upper() for val in df_raw.iloc[i].tolist()])
@@ -297,8 +299,27 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                             all_seat.append({"Fecha": fs.normalize(), "Total [kWh]": parse_latam_number(df_s.iloc[i, 3]), "Tracción [kWh]": parse_latam_number(df_s.iloc[i, 5]), "12 KV [kWh]": parse_latam_number(df_s.iloc[i, 7])})
                 
                 if any(k in sn_up for k in ['PRMTE', 'MEDIDAS']):
-                    df_pd = pd.read_excel(f, sheet_name=sn) # Carga PRMTE lógica
-                    # (Aquí va tu lógica PRMTE completa del prompt anterior)
+                    df_pd_raw = pd.read_excel(f, sheet_name=sn, header=None)
+                    h_idx = next((i for i in range(len(df_pd_raw)) if 'AÑO' in str(df_pd_raw.iloc[i]).upper()), None)
+                    if h_idx is not None:
+                        df_pd = pd.read_excel(f, sheet_name=sn, header=h_idx)
+                        df_pd['Timestamp'] = pd.to_datetime(df_pd[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'})) + pd.to_timedelta(df_pd['INICIO INTERVALO'].astype(int), unit='m')
+                        cols_e = [c for c in df_pd.columns if 'Retiro_Energia_Activa (kWhD)' in str(c)]
+                        for _, r in df_pd.iterrows():
+                            ts = r['Timestamp']
+                            val_p = sum([parse_latam_number(r[col]) for col in cols_e])
+                            all_comp_full.append({"Fecha": ts.normalize(), "Hora": ts.hour, "Consumo [kWh]": val_p, "Fuente": "PRMTE"})
+                            if start_date <= ts.date() <= end_date: all_prmte_15.append({"Fecha y Hora": ts, "Energía PRMTE [kWh]": val_p})
+
+                if any(k in sn_up for k in ['FACTURA', 'CONSUMO']):
+                    df_f = pd.read_excel(f, sheet_name=sn)
+                    df_f.columns = ['FechaHora', 'Valor']
+                    df_f['Timestamp'] = pd.to_datetime(df_f['FechaHora'], errors='coerce')
+                    for _, r in df_f.dropna(subset=['Timestamp']).iterrows():
+                        ts = r['Timestamp']
+                        val_f = abs(parse_latam_number(r['Valor']))
+                        all_comp_full.append({"Fecha": ts.normalize(), "Hora": ts.hour, "Consumo [kWh]": val_f, "Fuente": "Factura"})
+                        if start_date <= ts.date() <= end_date: all_fact_h.append({"Fecha y Hora": ts, "Consumo [kWh]": val_f})
 
         except: continue
 
@@ -316,10 +337,9 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
             df_ops = pd.merge(df_ops, df_seat, on="Fecha", how="left")
             df_ops['IDE (kWh/km)'] = df_ops.apply(lambda r: r['Tracción [kWh]'] / r['Odómetro [km]'] if r['Odómetro [km]'] > 0 else 0, axis=1)
 
-# --- 7. DASHBOARD ---
+# --- 7. DASHBOARD TABS ---
 tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación hr", "📈 Regresión", "🚨 Atípicos", "📋 THDR"])
 
-# PESTAÑA RESUMEN (Corrección filtros)
 with tabs[0]:
     if not df_ops.empty:
         if 'filtros_compartidos' not in st.session_state:
@@ -329,6 +349,7 @@ with tabs[0]:
         meses = sorted(df_ops['Fecha'].dt.month.unique())
         
         c1, c2 = st.columns(2)
+        # FIX FILTROS DEFAULT
         def_a = [a for a in st.session_state.filtros_compartidos['anios'] if a in anios]
         def_m = [m for m in st.session_state.filtros_compartidos['meses'] if m in meses]
         
@@ -340,27 +361,38 @@ with tabs[0]:
         if not df_rf.empty:
             m1, m2 = st.columns(2)
             m1.metric("Odómetro Total", f"{df_rf['Odómetro [km]'].sum():,.1f} km")
-            m2.metric("IDE Promedio", f"{df_rf['IDE (kWh/km)'].mean():.4f}")
+            m2.metric("Tren-Km Total", f"{df_rf['Tren-Km [km]'].sum():,.1f} km")
 
 with tabs[1]:
-    if not df_ops.empty: st.dataframe(make_columns_unique(df_ops))
+    if not df_ops.empty:
+        st.dataframe(make_columns_unique(df_ops).style.format({'Odómetro [km]': "{:,.1f}", 'IDE (kWh/km)': "{:.4f}"}))
 
 with tabs[2]:
     if all_tr:
-        df_tr_piv = pd.DataFrame(all_tr).pivot_table(index="Tren", columns="Fecha", values="Valor", aggfunc='sum')
-        st.dataframe(make_columns_unique(df_tr_piv.style.format("{:,.1f}")))
+        df_tr_piv = pd.DataFrame(all_tr).pivot_table(index="Tren", columns="Fecha", values="Valor", aggfunc='sum').fillna(0)
+        # FIX ATTRIBUTEERROR: Primero make_columns_unique, luego el formato Styler
+        st.dataframe(make_columns_unique(df_tr_piv).style.format("{:,.1f}"))
 
 with tabs[3]:
-    if not df_seat.empty: st.dataframe(make_columns_unique(df_seat))
+    if not df_seat.empty:
+        st.dataframe(make_columns_unique(df_seat).style.format({'Total [kWh]': "{:,.0f}", 'Tracción [kWh]': "{:,.0f}"}))
+
+with tabs[5]:
+    if all_comp_full:
+        df_reg = pd.DataFrame(all_comp_full).groupby('Hora')['Consumo [kWh]'].median().reset_index()
+        x, y = df_reg['Hora'], df_reg['Consumo [kWh]']
+        m, n = np.polyfit(x, y, 1)
+        st.markdown(f"**Ecuación de Tendencia:** $Consumo = {m:.4f}x + {n:.2f}$")
+        st.line_chart(df_reg.set_index('Hora'))
 
 with tabs[7]:
     st.header("📋 Datos THDR")
     if not df_thdr_v1.empty:
-        st.subheader("Vía 1")
-        st.dataframe(make_columns_unique(df_thdr_v1)) # AQUÍ ESTABA EL ERROR
+        st.subheader("Vía 1 (Puerto -> Limache)")
+        st.dataframe(make_columns_unique(df_thdr_v1))
     if not df_thdr_v2.empty:
-        st.subheader("Vía 2")
+        st.subheader("Vía 2 (Limache -> Puerto)")
         st.dataframe(make_columns_unique(df_thdr_v2))
 
-# REPORTE FINAL
-st.sidebar.download_button("📥 Excel Completo", to_excel_consolidado(df_ops, pd.DataFrame(all_tr), pd.DataFrame(), df_seat, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()), "EFE_SGE.xlsx")
+# REPORTE FINAL SIDEBAR
+st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, pd.DataFrame(all_tr), pd.DataFrame(), df_seat, pd.DataFrame(), pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), pd.DataFrame()), "Reporte_EFE_SGE.xlsx")
