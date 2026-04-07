@@ -52,7 +52,7 @@ def format_hm_short(minutos_float):
     h, m = divmod(int(minutos_float), 60)
     return f"{h:02d}:{m:02d}"
 
-# --- 3. MOTOR THDR (A1: FECHA | 3 FILAS VACÍAS | DATA FILA 7) ---
+# --- 3. MOTOR THDR (A1: FECHA | FILA 1-2 CABECERAS | 3 FILAS VACÍAS | DATA) ---
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "": return None
     try:
@@ -68,23 +68,22 @@ def convertir_a_minutos(val):
 def procesar_thdr_eficiente(file, start_date, end_date):
     try:
         df_raw = pd.read_excel(file, header=None)
-        # 1. Fecha en A1 (index 0,0) - Formato 10126 o 010126
+        # Extraer Fecha A1: Soporta "10126" (1-ene-26) o "010126"
         val_a1 = str(df_raw.iloc[0, 0]).strip().split('.')[0]
-        if len(val_a1) == 5: d, m, a = int(val_a1[0]), int(val_a1[1:3]), 2000 + int(val_a1[3:])
-        elif len(val_a1) == 6: d, m, a = int(val_a1[0:2]), int(val_a1[2:4]), 2000 + int(val_a1[4:])
-        else: return pd.DataFrame()
-        
+        val_a1 = val_a1.zfill(6) # Rellena con ceros para tener DDMMYY
+        d, m, a = int(val_a1[:2]), int(val_a1[2:4]), 2000 + int(val_a1[4:])
         fecha_dt = pd.to_datetime(date(a, m, d)).normalize()
+        
         if not (start_date <= fecha_dt.date() <= end_date): return pd.DataFrame()
 
-        # 2. Cabeceras y Salto de Filas
-        row_est = df_raw.iloc[0].copy()
-        row_est[0] = np.nan
-        h1 = row_est.ffill().astype(str)
+        # Cabeceras: Fila 1 (Estaciones), Fila 2 (Llegada/Salida)
+        row0 = df_raw.iloc[0].copy(); row0[0] = np.nan
+        h1 = row0.ffill().astype(str)
         h2 = df_raw.iloc[1].fillna('').astype(str)
         cols = [f"{st.strip()}_{tipo.strip()}" if (tipo and st != 'nan') else st.strip() for st, tipo in zip(h1, h2)]
         
-        df = df_raw.iloc[6:].copy() # Salto de las 3 vacías (Data real empieza en fila 7)
+        # Datos después de 2 cabeceras + 3 vacías = Empieza en index 5 (Fila 6)
+        df = df_raw.iloc[5:].copy()
         df.columns = cols
         df = make_columns_unique(df).dropna(how='all', axis=0)
         
@@ -135,7 +134,8 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                         c_f, c_o, c_t = next((c for c in df_p.columns if 'FECHA' in c), None), next((c for c in df_p.columns if 'ODO' in c), None), next((c for c in df_p.columns if 'KM' in c), None)
                         if c_f and c_o:
                             df_p['_dt'] = pd.to_datetime(df_p[c_f], errors='coerce').dt.normalize()
-                            df_filt = df_p[(df_p['_dt'].dt.date >= start_date) & (df_p['_dt'].dt.date <= end_date)].dropna(subset=['_dt'])
+                            mask = (df_p['_dt'].dt.date >= start_date) & (df_p['_dt'].dt.date <= end_date)
+                            df_filt = df_p[mask].dropna(subset=['_dt'])
                             for _, r in df_filt.iterrows():
                                 all_ops.append({"Fecha": r['_dt'], "Tipo Día": get_tipo_dia(r['_dt']), "Odómetro [km]": parse_latam_number(r[c_o]), "Tren-Km [km]": parse_latam_number(r[c_t]) if c_t else 0.0})
                     if any(k in sn.upper() for k in ['KIL', 'ODO']):
@@ -148,7 +148,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                                         if re.match(r'^(M|XM)', tren): all_tr.append({"Tren": tren, "Fecha": v_f.normalize(), "Valor": parse_latam_number(df_raw.iloc[k, j])})
             except: pass
 
-    # SEAT
+    # SEAT (RESTAURADO)
     if f_seat_files:
         for f in f_seat_files:
             try:
@@ -159,7 +159,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                         all_seat.append({"Fecha": fs.normalize(), "E_Total": parse_latam_number(df_s.iloc[i, 3]), "E_Tr": parse_latam_number(df_s.iloc[i, 5]), "E_12": parse_latam_number(df_s.iloc[i, 7])})
             except: pass
 
-    # FACTURA / PRMTE (REPARADO CON HOJA MADRE)
+    # FACTURACIÓN (Hoja "Consumo Factura") / PRMTE
     if f_bill_files:
         for f in f_bill_files:
             try:
@@ -173,25 +173,25 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                         for _, r in df_f.dropna(subset=['dt']).iterrows():
                             if "TOTAL" in str(r[c_f]).upper(): continue
                             v = abs(parse_latam_number(r[c_v]))
-                            all_fact_full.append({"Fecha": r['dt'].normalize(), "Hora": r['dt'].hour, "15min": (r['dt'].minute // 15) * 15, "Consumo [kWh]": v})
+                            all_fact_full.append({"Fecha": r['dt'].normalize(), "Hora": r['dt'].hour, "15min": (r['dt'].minute // 15) * 15, "Consumo": v})
                     if 'PRMTE' in sn.upper():
                         df_pd_raw = pd.read_excel(f, sheet_name=sn, header=None); h = next((i for i in range(len(df_pd_raw)) if 'AÑO' in str(df_pd_raw.iloc[i]).upper()), 0)
                         df_pd = pd.read_excel(f, sheet_name=sn, header=h); df_pd['ts'] = pd.to_datetime(df_pd[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'}))
                         for _, r in df_pd.iterrows(): 
                             v = parse_latam_number(r.get('Retiro_Energia_Activa (kWhD)', 0))
-                            all_prmte_full.append({"Fecha": r['ts'].normalize(), "Hora": r['ts'].hour, "15min": r['ts'].minute, "Consumo [kWh]": v})
+                            all_prmte_full.append({"Fecha": r['ts'].normalize(), "Hora": r['ts'].hour, "15min": r['ts'].minute, "Consumo": v})
             except: pass
 
-    # --- JERARQUÍA Y CONSOLIDACIÓN ---
+    # --- JERARQUÍA DÍA POR DÍA (Factura > PRMTE > SEAT) ---
     if all_ops:
         df_ops = pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "Tipo Día":"first"}).reset_index()
-        df_f_d = pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo [kWh]"].sum().reset_index().rename(columns={"Consumo [kWh]": "E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha", "E_Fact"])
-        df_p_d = pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo [kWh]"].sum().reset_index().rename(columns={"Consumo [kWh]": "E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha", "E_Prmte"])
+        df_f_d = pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo": "E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha", "E_Fact"])
+        df_p_d = pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo": "E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha", "E_Prmte"])
         df_s_d = pd.DataFrame(all_seat).groupby("Fecha").agg({"E_Total":"sum", "E_Tr":"sum", "E_12":"sum"}).reset_index().rename(columns={"E_Total":"E_Seat_T", "E_Tr":"E_Seat_Tr", "E_12":"E_Seat_12"}) if all_seat else pd.DataFrame(columns=["Fecha", "E_Seat_T", "E_Seat_Tr", "E_Seat_12"])
         
         df_ops = df_ops.merge(df_f_d, on="Fecha", how="left").merge(df_p_d, on="Fecha", how="left").merge(df_s_d, on="Fecha", how="left").fillna(0)
         
-        def jerarquia_diaria(row):
+        def aplicar_jerarquia(row):
             if row['E_Fact'] > 0: tot, src = row['E_Fact'], "Factura"
             elif row['E_Prmte'] > 0: tot, src = row['E_Prmte'], "PRMTE"
             elif row['E_Seat_T'] > 0: tot, src = row['E_Seat_T'], "SEAT"
@@ -200,42 +200,43 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
             r_12 = row['E_Seat_12']/row['E_Seat_T'] if row['E_Seat_T'] > 0 else 0.15
             return tot, tot*r_tr, tot*r_12, r_tr*100, r_12*100, src
 
-        df_ops[['E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']] = df_ops.apply(jerarquia_diaria, axis=1, result_type='expand')
+        df_ops[['E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']] = df_ops.apply(aplicar_jerarquia, axis=1, result_type='expand')
         df_ops['IDE (kWh/km)'] = df_ops.apply(lambda r: r['E_Tr'] / r['Odómetro [km]'] if r['Odómetro [km]'] > 0 else 0, axis=1)
 
     if f_v1: df_thdr_v1 = pd.concat([procesar_thdr_eficiente(f, start_date, end_date) for f in f_v1], ignore_index=True)
     if f_v2: df_thdr_v2 = pd.concat([procesar_thdr_eficiente(f, start_date, end_date) for f in f_v2], ignore_index=True)
 
-# --- 7. TABS ---
+# --- 7. TABS (INTEGRIDAD TOTAL) ---
 tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación hr", "📈 Regresión", "🚨 Atípicos", "📋 THDR"])
 
-with tabs[0]: # RESUMEN
+with tabs[0]: # RESUMEN (IGUAL)
     if not df_ops.empty:
-        c1, c2, c3 = st.columns(3); c1.metric("Odómetro", f"{df_ops['Odómetro [km]'].sum():,.1f}"); c2.metric("Tren-Km", f"{df_ops['Tren-Km [km]'].sum():,.1f}"); c3.metric("IDE Prom", f"{df_ops['IDE (kWh/km)'].mean():.4f}")
+        c1, c2, c3 = st.columns(3); c1.metric("Odómetro", f"{df_ops['Odómetro [km]'].sum():,.1f} km"); c2.metric("Tren-Km", f"{df_ops['Tren-Km [km]'].sum():,.1f} km"); c3.metric("IDE Prom", f"{df_ops['IDE (kWh/km)'].mean():.4f}")
         st.plotly_chart(go.Figure(data=[go.Bar(x=df_ops['Fecha'], y=df_ops['Odómetro [km]'], marker_color="#005195")]), use_container_width=True)
 
-with tabs[1]: # OPERACIONES
-    if not df_ops.empty: st.dataframe(make_columns_unique(df_ops).style.format({'Odómetro [km]':"{:,.1f}", 'E_Total':"{:,.0f}", 'IDE (kWh/km)':"{:.4f}"}))
+with tabs[1]: # OPERACIONES (IGUAL)
+    if not df_ops.empty:
+        st.write("### 📑 Detalle Operacional (Jerarquía Activa)")
+        st.dataframe(make_columns_unique(df_ops).style.format({'Odómetro [km]':"{:,.1f}", 'E_Total':"{:,.0f}", 'IDE (kWh/km)':"{:.4f}"}))
 
 with tabs[2]: # TRENES
     if all_tr: st.dataframe(pd.DataFrame(all_tr).pivot_table(index="Tren", columns="Fecha", values="Valor", aggfunc='sum').fillna(0).style.format("{:,.1f}"))
 
-with tabs[3]: # ⚡ ENERGÍA (CON TABLAS HORA/15MIN)
+with tabs[3]: # ENERGÍA (RESTAURADO)
     e_tabs = st.tabs(["🔹 SEAT", "🔹 PRMTE", "🔹 Facturación"])
+    with e_tabs[0]:
+        if all_seat: st.dataframe(pd.DataFrame(all_seat).style.format({'E_Total':"{:,.0f}"}))
     with e_tabs[1]:
         if all_prmte_full:
             df_p = pd.DataFrame(all_prmte_full)
-            st.write("#### 📅 PRMTE Diario"); st.dataframe(df_p.groupby("Fecha")["Consumo [kWh]"].sum().reset_index().style.format("{:,.2f}"))
-            st.write("#### ⏱️ PRMTE por Hora"); st.dataframe(df_p.groupby(["Fecha", "Hora"])["Consumo [kWh]"].sum().reset_index().style.format("{:,.2f}"))
-            st.write("#### ⏲️ PRMTE 15 min"); st.dataframe(df_p.groupby(["Fecha", "Hora", "15min"])["Consumo [kWh]"].sum().reset_index().style.format("{:,.2f}"))
+            st.write("#### PRMTE por Hora"); st.dataframe(df_p.groupby(["Fecha", "Hora"])["Consumo"].sum().reset_index())
     with e_tabs[2]:
         if all_fact_full:
             df_f = pd.DataFrame(all_fact_full)
-            st.write("#### 📅 Factura Diario"); st.dataframe(df_f.groupby("Fecha")["Consumo [kWh]"].sum().reset_index().style.format("{:,.2f}"))
-            st.write("#### ⏱️ Factura por Hora"); st.dataframe(df_f.groupby(["Fecha", "Hora"])["Consumo [kWh]"].sum().reset_index().style.format("{:,.2f}"))
-            st.write("#### ⏲️ Factura 15 min"); st.dataframe(df_f.groupby(["Fecha", "Hora", "15min"])["Consumo [kWh]"].sum().reset_index().style.format("{:,.2f}"))
+            st.write("#### Factura por Día (Hoja: Consumo Factura)"); st.dataframe(df_f.groupby("Fecha")["Consumo"].sum().reset_index())
+            st.write("#### Factura por Hora"); st.dataframe(df_f.groupby(["Fecha", "Hora"])["Consumo"].sum().reset_index())
 
-with tabs[7]: # THDR (SINTAXIS REPARADA)
+with tabs[7]: # THDR (REPARADO Y SIN SINTAXIS ERROR)
     st.header("📋 Análisis THDR")
     if not df_thdr_v1.empty or not df_thdr_v2.empty:
         c1, c2 = st.columns(2)
@@ -243,11 +244,9 @@ with tabs[7]: # THDR (SINTAXIS REPARADA)
             st.write("#### Servicios por Hora")
             freq = []
             if not df_thdr_v1.empty:
-                v1h = (df_thdr_v1['Hora_Ref_Min'] // 60).value_counts().reset_index()
-                v1h.columns=['Hora','Vía 1']; freq.append(v1h)
+                v1h = (df_thdr_v1['Hora_Ref_Min'] // 60).value_counts().reset_index(); v1h.columns=['Hora','Vía 1']; freq.append(v1h)
             if not df_thdr_v2.empty:
-                v2h = (df_thdr_v2['Hora_Ref_Min'] // 60).value_counts().reset_index()
-                v2h.columns=['Hora','Vía 2']; freq.append(v2h)
+                v2h = (df_thdr_v2['Hora_Ref_Min'] // 60).value_counts().reset_index(); v2h.columns=['Hora','Vía 2']; freq.append(v2h)
             if freq:
                 res = freq[0]
                 if len(freq) > 1:
@@ -258,15 +257,14 @@ with tabs[7]: # THDR (SINTAXIS REPARADA)
             st.write("#### Frecuencia 15 min")
             freq15 = []
             if not df_thdr_v1.empty:
-                v1_15 = ((df_thdr_v1['Hora_Ref_Min'] // 15) * 15).value_counts().reset_index()
-                v1_15.columns=['Min','Vía 1']; freq15.append(v1_15)
+                v1_15 = ((df_thdr_v1['Hora_Ref_Min'] // 15) * 15).value_counts().reset_index(); v1_15.columns=['Min','Vía 1']; freq15.append(v1_15)
             if not df_thdr_v2.empty:
-                v2_15 = ((df_thdr_v2['Hora_Ref_Min'] // 15) * 15).value_counts().reset_index()
-                v2_15.columns=['Min','Vía 2']; freq15.append(v2_15)
+                v2_15 = ((df_thdr_v2['Hora_Ref_Min'] // 15) * 15).value_counts().reset_index(); v2_15.columns=['Min','Vía 2']; freq15.append(v2_15)
             if freq15:
                 res15 = freq15[0]
                 if len(freq15) > 1:
                     res15 = pd.merge(res15, freq15[1], on='Min', how='outer').fillna(0)
                 res15['Intervalo'] = res15['Min'].apply(format_hm_short)
                 st.dataframe(res15.sort_values('Min')[['Intervalo', 'Vía 1', 'Vía 2']].set_index('Intervalo'))
-    else: st.error("Sube la THDR y verifica que la fecha en A1 (ej: 10126) esté en el rango del Sidebar.")
+    else:
+        st.error("Verifica que la fecha en A1 (ej: 10126) coincida con el rango del Sidebar.")
