@@ -584,43 +584,77 @@ with tabs[6]:
         st.info("📂 Sin datos suficientes para detección de atípicos.")
 
 # TAB 7: THDR
+def render_via_thdr(df_via, label):
+    """Renderiza el contenido de una vía THDR."""
+    if df_via.empty:
+        st.info(f"📂 No hay datos cargados para {label}. Sube archivos en el panel lateral.")
+        return
+
+    df = df_via.copy()
+    df['Fecha'] = df['Fecha_Op'].dt.strftime('%Y-%m-%d')
+
+    # Métricas rápidas
+    total_viajes = len(df)
+    total_trenkm = df['Tren-Km'].sum()
+    fechas_unicas = df['Fecha'].nunique()
+    trenes_M = (df['Unidad'].astype(str).str.strip() == 'M').sum()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total viajes", f"{total_viajes}")
+    c2.metric("Tren-Km", f"{total_trenkm:,.1f}")
+    c3.metric("Días cargados", f"{fechas_unicas}")
+    c4.metric("Viajes doble (M)", f"{trenes_M}")
+
+    # Resumen por fecha
+    st.write("#### 📅 Resumen por Fecha")
+    resumen = df.groupby('Fecha').agg(
+        Viajes=('Unidad', 'count'),
+        Viajes_M=('Unidad', lambda x: (x.astype(str).str.strip() == 'M').sum()),
+        TrenKm=('Tren-Km', 'sum')
+    ).reset_index()
+    st.dataframe(
+        resumen.style.format({'TrenKm': "{:,.1f}"}),
+        use_container_width=True
+    )
+
+    # Detalle completo con selector de fecha
+    st.write("#### 🔍 Detalle por Fecha")
+    fechas_disp = sorted(df['Fecha'].unique())
+    fecha_sel = st.selectbox(f"Seleccionar fecha ({label})", fechas_disp, key=f"sel_{label}")
+    df_sel = df[df['Fecha'] == fecha_sel]
+
+    # Columnas a mostrar: base + columnas _min de estaciones
+    cols_base = ['Viaje', 'Tren', 'Hora Salida Programada', 'Motriz 1', 'Motriz 2', 'Unidad', 'Maquinista', 'Tren-Km']
+    cols_min = [c for c in df_sel.columns if '_min' in c and 'Hora Salida Programada' not in c]
+    cols_show = [c for c in cols_base + cols_min if c in df_sel.columns]
+    st.dataframe(make_columns_unique(df_sel[cols_show]).reset_index(drop=True), use_container_width=True)
+    st.caption(f"{len(df_sel)} viajes el {fecha_sel}")
+
+
 with tabs[7]:
     st.header("📋 Análisis THDR")
 
     # --- Panel de Diagnóstico ---
     diags = st.session_state.get('diag_thdr', [])
     if diags:
-        with st.expander("🔍 Diagnóstico de archivos THDR", expanded=(df_thdr_v1.empty and df_thdr_v2.empty)):
+        with st.expander("🔍 Diagnóstico de archivos cargados",
+                         expanded=(df_thdr_v1.empty and df_thdr_v2.empty)):
             for d in diags:
                 ok = d['error'] is None
-                icono = "✅" if ok else "❌"
-                st.markdown(f"**{icono} {d['archivo']}**")
+                st.markdown(f"**{'✅' if ok else '❌'} {d['archivo']}**")
                 cols_d = st.columns(3)
                 cols_d[0].caption("Fecha parseada"); cols_d[0].code(d['fecha_parseada'] or '—')
-                cols_d[1].caption("¿En rango?"); cols_d[1].code(d['en_rango'] or '—')
+                cols_d[1].caption("¿En rango?");     cols_d[1].code(d['en_rango'] or '—')
                 cols_d[2].caption("Estado")
-                if ok:
-                    cols_d[2].success(f"{d['filas']} filas cargadas")
-                else:
-                    cols_d[2].error(d['error'])
+                if ok: cols_d[2].success(f"{d['filas']} filas cargadas")
+                else:   cols_d[2].error(d['error'])
                 st.divider()
 
-    # --- Datos ---
-    if not df_thdr_v1.empty or not df_thdr_v2.empty:
-        partes = [df for df in [df_thdr_v1, df_thdr_v2] if not df.empty]
-        df_t_v = pd.concat(partes, ignore_index=True)
-        df_t_v['Fecha'] = df_t_v['Fecha_Op'].dt.strftime('%Y-%m-%d')
-        col_min = [c for c in df_t_v.columns if '_min' in c]
-        cols_show = ['Fecha', 'Unidad', 'Tren-Km'] + col_min
-        cols_show = [c for c in cols_show if c in df_t_v.columns]
-        st.write("#### Detalle Registros (primeros 50)")
-        st.dataframe(make_columns_unique(df_t_v[cols_show]).head(50), use_container_width=True)
-        st.write(f"**Total registros:** {len(df_t_v)}")
-        resumen_fecha = df_t_v.groupby('Fecha').agg(
-            Viajes=('Unidad', 'count'),
-            TrenKm=('Tren-Km', 'sum')
-        ).reset_index()
-        st.write("#### Resumen por Fecha")
-        st.dataframe(resumen_fecha.style.format({'TrenKm': "{:,.1f}"}), use_container_width=True)
-    elif not diags:
+    # --- Sub-pestañas V1 / V2 ---
+    t_v1, t_v2 = st.tabs(["🔵 Vía 1 (Puerto → Limache)", "🟠 Vía 2 (Limache → Puerto)"])
+    with t_v1:
+        render_via_thdr(df_thdr_v1, "Vía 1")
+    with t_v2:
+        render_via_thdr(df_thdr_v2, "Vía 2")
+
+    if not diags:
         st.info("📂 Sube archivos THDR desde el panel lateral (Vía 1 o Vía 2).")
