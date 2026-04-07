@@ -204,20 +204,45 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         
         df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
         
-        puerto_col = None
-        limache_col = None
-        for col in df.columns:
-            if 'puerto' in col.lower() and 'hora salida' in col.lower():
-                puerto_col = col
-            if 'limache' in col.lower() and 'hora llegada' in col.lower():
-                limache_col = col
+        # Identificar todas las columnas de estaciones (tanto llegada como salida)
+        # Asumimos que las estaciones relevantes son: Puerto, Viña del Mar, Belloto, Limache
+        # Buscamos columnas que contengan estos nombres
+        estaciones = ['puerto', 'viña', 'vina', 'belloto', 'limache']
+        columnas_estaciones = {}
+        for est in estaciones:
+            for col in df.columns:
+                if est in col.lower():
+                    # Guardamos la columna original y su tipo (llegada/salida)
+                    tipo = 'salida' if 'salida' in col.lower() else 'llegada' if 'llegada' in col.lower() else ''
+                    if tipo:
+                        clave = f"{est}_{tipo}"
+                        if clave not in columnas_estaciones:
+                            columnas_estaciones[clave] = col
+        # También buscamos columnas genéricas "Hora Salida" y "Hora Llegada" sin estación (por si acaso)
+        # pero asumimos que ya están cubiertas.
         
-        if puerto_col:
-            df['Hora_Salida_Real'] = df[puerto_col].apply(convertir_a_minutos)
+        # Para cada columna de estación, convertir a minutos
+        for clave, col in columnas_estaciones.items():
+            df[clave] = df[col].apply(convertir_a_minutos)
+        
+        # También guardar las columnas originales por si se necesitan
+        df['_columnas_estaciones'] = str(columnas_estaciones)  # solo para depuración
+        
+        # Calcular horas de salida y llegada para las estaciones principales (para compatibilidad)
+        puerto_salida = None
+        limache_llegada = None
+        for clave, col in columnas_estaciones.items():
+            if 'puerto' in clave and 'salida' in clave:
+                puerto_salida = clave
+            if 'limache' in clave and 'llegada' in clave:
+                limache_llegada = clave
+        
+        if puerto_salida:
+            df['Hora_Salida_Real'] = df[puerto_salida]
         else:
             df['Hora_Salida_Real'] = None
-        if limache_col:
-            df['Hora_Llegada_Real'] = df[limache_col].apply(convertir_a_minutos)
+        if limache_llegada:
+            df['Hora_Llegada_Real'] = df[limache_llegada]
         else:
             df['Hora_Llegada_Real'] = None
         
@@ -225,30 +250,31 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Retraso'] = df['Hora_Salida_Real'] - df['Min_Prog']
         df['Puntual'] = (abs(df['Retraso']) <= 5).astype(int)
         
-        if puerto_col and limache_col:
+        if puerto_salida and limache_llegada:
             tdv = df['Hora_Llegada_Real'] - df['Hora_Salida_Real']
             tdv = tdv.apply(lambda x: x if x > 0 else x + 1440)
             df['TDV_Min'] = tdv
         else:
             df['TDV_Min'] = 0
         
-        def cod_estacion(nombre):
-            if 'puerto' in nombre.lower():
-                return 'PU'
-            elif 'limache' in nombre.lower():
-                return 'LI'
-            elif 'vina' in nombre.lower() or 'viña' in nombre.lower():
-                return 'VM'
-            elif 'belloto' in nombre.lower():
-                return 'EB'
-            else:
-                return nombre[:2]
-        if puerto_col and limache_col:
-            origen = cod_estacion(puerto_col)
-            destino = cod_estacion(limache_col)
-            df['Tipo_Rec'] = f"{origen}-{destino}"
-        else:
-            df['Tipo_Rec'] = 'OTRO'
+        # Determinar tipo de recorrido (para distancia)
+        # Usamos las columnas de estaciones para determinar origen y destino
+        def obtener_origen_destino():
+            # Intento 1: buscar columnas de salida de puerto y llegada de limache
+            if puerto_salida and limache_llegada:
+                return 'PU', 'LI'
+            # Intento 2: buscar en los nombres de las columnas
+            for col in df.columns:
+                if 'puerto' in col.lower() and 'salida' in col.lower():
+                    origen = 'PU'
+                if 'limache' in col.lower() and 'llegada' in col.lower():
+                    destino = 'LI'
+            if origen and destino:
+                return origen, destino
+            return 'OTRO', 'OTRO'
+        
+        origen, destino = obtener_origen_destino()
+        df['Tipo_Rec'] = f"{origen}-{destino}" if origen != 'OTRO' else 'OTRO'
         
         df['Dist_Base'] = df['Tipo_Rec'].map(DISTANCIAS).fillna(0)
         df['Peso'] = df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
@@ -910,7 +936,7 @@ with tabs[6]:
     else:
         st.success("No hay anomalías detectadas en la selección actual.")
 
-# ================== PESTAÑA THDR (CORREGIDA CON ORDEN DE ESTACIONES) ==================
+# ================== PESTAÑA THDR (MEJORADA: TODAS LAS ESTACIONES, SALIDAS Y LLEGADAS, ORDENADAS POR VÍA) ==================
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
@@ -958,79 +984,92 @@ with tabs[7]:
         else:
             st.info("No hay datos para Vía 2 en el rango seleccionado.")
     
-    def ordenar_columnas_estaciones(columnas, via):
-        # Definir el orden lógico de las estaciones (nombres base)
-        orden_base = ["Puerto", "Viña", "Belloto", "Limache"]
-        # Para Vía 2, invertir el orden
-        if via == "Vía 2":
-            orden_base = list(reversed(orden_base))
-        
-        # Separar columnas base fijas de las de estaciones
-        columnas_fijas = ['Fecha', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Hora Programada', 'Retraso (min)', 'TDV']
-        columnas_estaciones = [col for col in columnas if col not in columnas_fijas]
-        
-        # Ordenar las columnas de estaciones según el orden_base
-        col_ordenadas = []
-        for estacion in orden_base:
-            # Buscar columnas que contengan el nombre de la estación (sin distinción mayúsculas)
-            coincidencias = [col for col in columnas_estaciones if estacion.lower() in col.lower()]
-            # Ordenar las coincidencias para que salga primero "Hora Salida" y luego "Hora Llegada" si ambas existen
-            coincidencias.sort(key=lambda x: ('llegada' in x.lower(), x))  # "Salida" antes que "Llegada"
-            col_ordenadas.extend(coincidencias)
-        # Añadir el resto de columnas de estaciones que no estén en el orden (por si acaso)
-        col_ordenadas.extend([col for col in columnas_estaciones if col not in col_ordenadas])
-        # Combinar fijas + ordenadas
-        columnas_finales = [col for col in columnas_fijas if col in columnas] + col_ordenadas
-        return columnas_finales
-    
-    def mostrar_tabla_thdr_completa(df, titulo, color_emoji, via):
-        st.subheader(f"{color_emoji} {titulo}")
+    def mostrar_tabla_thdr_completa(df, titulo, sentido):  # sentido: 'ida' (Puerto->Limache) o 'vuelta' (Limache->Puerto)
+        st.subheader(f"{'🟢' if sentido=='ida' else '🔵'} {titulo}")
         if df.empty:
             st.info(f"No hay datos de THDR para {titulo} en el período seleccionado.")
             return
         
+        # Copia para no modificar original
         df_display = df.copy()
         
-        # --- Formatear horas de las columnas de estaciones ---
-        # Identificar columnas que contienen "Hora Llegada" o "Hora Salida" (originales)
-        columnas_horas = [col for col in df_display.columns if 'hora llegada' in col.lower() or 'hora salida' in col.lower()]
-        for col in columnas_horas:
-            # Convertir a minutos si es necesario y luego a HH:MM:SS
-            df_display[col] = df_display[col].apply(convertir_a_minutos)
-            df_display[col] = df_display[col].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+        # Identificar todas las columnas que contienen horas de estaciones
+        # Buscamos patrones: "puerto", "vina", "belloto", "limache" + "salida" o "llegada"
+        estaciones_base = ['puerto', 'vina', 'belloto', 'limache']
+        # Mapeo de nombres limpios
+        nombres_estaciones = {
+            'puerto': 'Puerto',
+            'vina': 'Viña del Mar',
+            'belloto': 'Belloto',
+            'limache': 'Limache'
+        }
+        # Para cada estación, buscamos columnas de salida y llegada
+        columnas_horas = {}
+        for est in estaciones_base:
+            for col in df.columns:
+                if est in col.lower():
+                    if 'salida' in col.lower():
+                        key = f"{est}_salida"
+                        columnas_horas[key] = col
+                    elif 'llegada' in col.lower():
+                        key = f"{est}_llegada"
+                        columnas_horas[key] = col
         
-        # También formatear las columnas calculadas (Hora_Prog, etc.) si existen
+        # Convertir esas columnas a minutos y luego a HH:MM:SS
+        for key, col in columnas_horas.items():
+            if col in df_display.columns:
+                # Si ya está en minutos, formatear; si no, convertir
+                if df_display[col].dtype in ['float64', 'int64']:
+                    df_display[f"{key}_fmt"] = df_display[col].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+                else:
+                    # Intentar convertir a minutos
+                    df_display[f"{key}_fmt"] = df_display[col].apply(convertir_a_minutos).apply(lambda x: format_hms(x) if pd.notna(x) else "")
+        
+        # Ahora, armar las columnas en el orden según el sentido
+        # Para Vía 1 (ida): Puerto (salida) → Viña (llegada?) → Belloto → Limache (llegada)
+        # En realidad, en un THDR típico, cada estación tiene hora de salida y llegada.
+        # Mostraremos para cada estación: "Salida" y "Llegada", ordenadas geográficamente.
+        # Orden de estaciones según sentido:
+        if sentido == 'ida':
+            orden_estaciones = ['puerto', 'vina', 'belloto', 'limache']
+        else:
+            orden_estaciones = ['limache', 'belloto', 'vina', 'puerto']
+        
+        # Construimos lista de columnas a mostrar
+        columnas_finales = []
+        # Columnas base
+        base_cols = ['Fecha_Op', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
+        for bc in base_cols:
+            if bc in df_display.columns:
+                if bc == 'Fecha_Op':
+                    columnas_finales.append(('Fecha', df_display['Fecha_Op'].dt.strftime('%d/%m/%Y')))
+                else:
+                    columnas_finales.append((bc, df_display[bc]))
+        
+        # Añadir columnas de estaciones
+        for est in orden_estaciones:
+            # Salida
+            key_salida = f"{est}_salida_fmt"
+            if key_salida in df_display.columns:
+                columnas_finales.append((f"{nombres_estaciones[est]} Salida", df_display[key_salida]))
+            # Llegada
+            key_llegada = f"{est}_llegada_fmt"
+            if key_llegada in df_display.columns:
+                columnas_finales.append((f"{nombres_estaciones[est]} Llegada", df_display[key_llegada]))
+        
+        # También incluir otras columnas útiles como Hora Programada, Retraso, TDV si existen
         if 'Hora_Prog' in df_display.columns:
-            df_display['Hora Programada'] = df_display['Hora_Prog'].apply(convertir_a_minutos)
-            df_display['Hora Programada'] = df_display['Hora Programada'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+            prog = df_display['Hora_Prog'].apply(convertir_a_minutos).apply(lambda x: format_hms(x) if pd.notna(x) else "")
+            columnas_finales.append(('Hora Programada', prog))
         if 'Retraso' in df_display.columns:
-            df_display['Retraso (min)'] = df_display['Retraso'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+            ret = df_display['Retraso'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "")
+            columnas_finales.append(('Retraso (min)', ret))
         if 'TDV_Min' in df_display.columns:
-            df_display['TDV'] = df_display['TDV_Min'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+            tdv = df_display['TDV_Min'].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+            columnas_finales.append(('TDV', tdv))
         
-        # Fecha
-        if 'Fecha_Op' in df_display.columns:
-            df_display['Fecha'] = df_display['Fecha_Op'].dt.strftime('%d/%m/%Y')
-        
-        # Seleccionar columnas de interés: las que tienen horas de estaciones, más las básicas
-        columnas_base = ['Fecha', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
-        columnas_base_existentes = [col for col in columnas_base if col in df_display.columns]
-        # Añadir las calculadas si existen
-        for extra in ['Hora Programada', 'Retraso (min)', 'TDV']:
-            if extra in df_display.columns:
-                columnas_base_existentes.append(extra)
-        
-        # Obtener todas las columnas disponibles que son de estaciones
-        columnas_estaciones = [col for col in df_display.columns if col not in columnas_base_existentes and col != 'Fecha' and col != 'Fecha_Op']
-        
-        # Ordenar las columnas de estaciones según la vía
-        columnas_estaciones_ordenadas = ordenar_columnas_estaciones(columnas_estaciones, via)
-        
-        # Combinar
-        columnas_finales = columnas_base_existentes + columnas_estaciones_ordenadas
-        # Asegurar que solo existan en df_display
-        columnas_finales = [col for col in columnas_finales if col in df_display.columns]
-        df_final = df_display[columnas_finales].copy()
+        # Crear DataFrame final
+        df_final = pd.DataFrame({nombre: valores for nombre, valores in columnas_finales})
         
         # Formatear Tren-Km
         if 'Tren-Km' in df_final.columns:
@@ -1040,10 +1079,10 @@ with tabs[7]:
         csv = df_final.to_csv(index=False).encode('utf-8')
         st.download_button(f"📥 Descargar {titulo} (CSV)", csv, f"THDR_{titulo.replace(' ', '_')}.csv", "text/csv")
     
-    # Mostrar para Vía 1 con orden Puerto -> Limache
-    mostrar_tabla_thdr_completa(df_thdr_v1_filt, "Vía 1", "🟢", "Vía 1")
-    # Mostrar para Vía 2 con orden Limache -> Puerto
-    mostrar_tabla_thdr_completa(df_thdr_v2_filt, "Vía 2", "🔵", "Vía 2")
+    # Mostrar Vía 1 (ida: Puerto → Limache)
+    mostrar_tabla_thdr_completa(df_thdr_v1_filt, "Vía 1 (Puerto → Limache)", sentido='ida')
+    # Mostrar Vía 2 (vuelta: Limache → Puerto)
+    mostrar_tabla_thdr_completa(df_thdr_v2_filt, "Vía 2 (Limache → Puerto)", sentido='vuelta')
 
 # --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
 st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
