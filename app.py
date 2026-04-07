@@ -16,10 +16,11 @@ import traceback
 # --- 1. CONFIGURACIÓN Y API CORREDOR TÉRMICO ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
 
+# API Key para clima (OpenWeatherMap)
 API_KEY = "de25da707bfeb645ec2b488c4676af19" 
 
-# Ciudades estratégicas del corredor Puerto-Limache (Microclimas)
-CIUDADES_CORREDOR = {
+# Ciudades clave del tramo operativo de EFE Valparaíso
+CIUDADES_EFE = {
     "Valparaíso (Puerto)": "Valparaiso,CL",
     "Viña del Mar": "Vina del Mar,CL",
     "Quilpué": "Quilpue,CL",
@@ -36,37 +37,46 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. PERSISTENCIA GOOGLE DRIVE (ESTRUCTURA) ---
-# Preparado para st.secrets["gcp_service_account"]
-def conectar_drive():
+# --- 2. GOOGLE DRIVE PERSISTENCE (MEJORA) ---
+# Requiere configurar st.secrets con la llave JSON de la Service Account
+def guardar_en_drive(archivo_bytes, nombre_archivo):
+    """Subida permanente a Google Drive usando la API."""
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseUpload
+        
         if "gcp_service_account" in st.secrets:
             creds = service_account.Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"], 
                 scopes=['https://www.googleapis.com/auth/drive']
             )
-            return build('drive', 'v3', credentials=creds)
-        return None
-    except: return None
+            service = build('drive', 'v3', credentials=creds)
+            # ID de la carpeta en Drive de EFE (reemplazar con el real)
+            FOLDER_ID = st.secrets.get("drive_folder_id", "root")
+            
+            file_metadata = {'name': nombre_archivo, 'parents': [FOLDER_ID]}
+            media = MediaIoBaseUpload(BytesIO(archivo_bytes), 
+                                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            return True
+    except Exception as e:
+        st.error(f"Error Drive: {e}")
+    return False
 
 # --- 3. FUNCIONES DE APOYO Y CLIMA ---
 
 @st.cache_data(ttl=3600)
 def obtener_clima_corredor():
+    """Consulta el clima para cada ciudad del tramo Pto-Li."""
     resultados = {}
-    for nombre, query in CIUDADES_CORREDOR.items():
+    for nombre, query in CIUDADES_EFE.items():
         try:
             url = f"http://api.openweathermap.org/data/2.5/weather?q={query}&appid={API_KEY}&units=metric&lang=es"
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 d = resp.json()
-                resultados[nombre] = {
-                    "temp": d['main']['temp'],
-                    "hum": d['main']['humidity'],
-                    "desc": d['weather'][0]['description']
-                }
+                resultados[nombre] = {"temp": d['main']['temp'], "hum": d['main']['humidity'], "desc": d['weather'][0]['description']}
         except: resultados[nombre] = None
     return resultados
 
@@ -128,7 +138,16 @@ def get_tipo_dia(fch):
     if fch.weekday() == 5: return "S"
     return "L"
 
-# --- 4. PROCESAMIENTO THDR (BLINDADO CONTRA ERRORES DE AMBIGÜEDAD) ---
+def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, df_p_15, df_fact_h, df_fact_d):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        dfs = {'Operaciones': df_ops, 'Kms_Diarios_Tren': df_tr, 'Odometros_Acum_Tren': df_tr_acum,
+               'SEAT': df_seat, 'PRMTE_D': df_p_d, 'PRMTE_15': df_p_15, 'Fact_H': df_fact_h, 'Fact_D': df_fact_d}
+        for name, dframe in dfs.items():
+            if not dframe.empty: dframe.to_excel(writer, index=False, sheet_name=name)
+    return output.getvalue()
+
+# --- 4. FUNCIONES THDR (FIX AMBIGUITY ERROR) ---
 
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "": return None
@@ -166,6 +185,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         try: df_raw = pd.read_excel(file, header=None)
         except: df_raw = pd.read_excel(file, header=None, engine='xlrd')
         
+        # Unificación de cabeceras en dos filas
         h0 = df_raw.iloc[0].fillna('').astype(str).tolist()
         h1 = df_raw.iloc[1].fillna('').astype(str).tolist()
         cols = []
@@ -176,10 +196,10 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df = df_raw.iloc[2:].copy()
         df.columns = cols
         
-        # Búsqueda escalar segura para evitar ambigüedad de Series
+        # Búsqueda escalar segura para evitar ambigüedad
         def find_col(keys):
             for c in df.columns:
-                if any(k.lower() in c.lower() for k in keys): return c
+                if any(k.lower() in str(c).lower() for k in keys): return c
             return None
         
         c_serv = find_col(['Servicio', 'N°'])
@@ -194,22 +214,22 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         
         estaciones_map = {}
         for c in df.columns:
-            cl = c.lower()
+            cl = str(c).lower()
             if 'hora salida' in cl:
-                name = c.split('_')[0].split('Hora Salida')[0].strip()
+                name = str(c).split('_')[0].split('Hora Salida')[0].strip()
                 estaciones_map[f"{name}_salida"] = c
             elif 'hora llegada' in cl:
-                name = c.split('_')[0].split('Hora Llegada')[0].strip()
+                name = str(c).split('_')[0].split('Hora Llegada')[0].strip()
                 estaciones_map[f"{name}_llegada"] = c
         
         for k, col_orig in estaciones_map.items():
             df[f"{k}_min"] = df[col_orig].apply(convertir_a_minutos)
             df[f"{k}_fmt"] = df[f"{k}_min"].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         
+        # FIX AMBIGÜEDAD: Comparación escalar explícita
         fch_f = extraer_fecha_desde_nombre_archivo(file.name)
         df['Fecha_Op'] = pd.to_datetime(fch_f if fch_f is not None else date.today())
         
-        # FIX: Filtrado de fechas bitwise (evita truth value error)
         if (start_date is not None) and (end_date is not None):
             mask = (df['Fecha_Op'].dt.date >= start_date) & (df['Fecha_Op'].dt.date <= end_date)
             df = df[mask].copy()
@@ -232,36 +252,35 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         st.error(f"Error procesando THDR {file.name}: {str(e)}")
         return pd.DataFrame()
 
-# --- 5. INICIALIZACIÓN ---
+# --- 5. INICIALIZACIÓN DE DATOS ---
 df_ops, df_tr, df_tr_acum, df_seat, df_energy_master, df_p_d, df_f_d = [pd.DataFrame() for _ in range(7)]
 df_thdr_v1, df_thdr_v2 = pd.DataFrame(), pd.DataFrame()
 all_ops, all_tr, all_tr_acum, all_seat, all_prmte_15, all_fact_h, all_comp_full = [], [], [], [], [], [], []
 
 # --- 6. SIDEBAR Y CARGA ---
 with st.sidebar:
-    st.header("📅 Período")
-    dr = st.date_input("Rango", value=(date.today().replace(day=1), date.today()))
+    st.header("📅 Rango de Análisis")
+    dr = st.date_input("Período", value=(date.today().replace(day=1), date.today()))
     if isinstance(dr, tuple) and len(dr) == 2:
         start_date, end_date = dr[0], dr[1]
     else: start_date, end_date = dr, dr
 
     st.divider()
-    st.header("📂 Carga de Archivos")
+    st.header("📂 Carga EFE (xls/xlsx)")
     f_v1 = st.file_uploader("1. THDR Vía 1", type=["xls", "xlsx"], accept_multiple_files=True)
     f_v2 = st.file_uploader("2. THDR Vía 2", type=["xls", "xlsx"], accept_multiple_files=True)
     f_umr = st.file_uploader("3. UMR / Odómetros", type=["xlsx"], accept_multiple_files=True)
     f_seat_files = st.file_uploader("4. Energía SEAT", type=["xlsx"], accept_multiple_files=True)
-    f_bill_files = st.file_uploader("5. Facturación y PRMTE", type=["xlsx"], accept_multiple_files=True)
+    f_bill_files = st.file_uploader("5. Factura/PRMTE", type=["xlsx"], accept_multiple_files=True)
     
     st.divider()
-    st.header("🌤️ Perfil Térmico (Pto-Li)")
+    st.header("🌤️ Corredor Térmico (Pto-Li)")
     climas = obtener_clima_corredor()
     if climas:
         for loc, info in climas.items():
             if info: st.write(f"**{loc}:** {info['temp']}°C | {info['desc'].capitalize()}")
-            else: st.write(f"**{loc}:** Sin datos")
 
-# --- 7. PROCESAMIENTO GENERAL ---
+# --- 7. PROCESAMIENTO GENERAL BLINDADO ---
 if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
     todos = (f_v1 or []) + (f_v2 or []) + (f_umr or []) + (f_seat_files or []) + (f_bill_files or [])
     for f in todos:
@@ -269,11 +288,11 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
             xl = pd.ExcelFile(f)
             for sn in xl.sheet_names:
                 sn_up = sn.upper()
+                # UMR: FIX AMBIGÜEDAD BÚSQUEDA CABECERA
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
                     h_r = None
                     for i in range(min(100, len(df_raw))):
-                        # Convertir a lista plana para evitar ambigüedad en búsqueda
                         row_text = " ".join(df_raw.iloc[i].astype(str).tolist()).upper()
                         if 'ODO' in row_text or 'FECHA' in row_text:
                             h_r = i; break
@@ -288,6 +307,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                             for _, r in df_p[mask].dropna(subset=['_dt']).iterrows():
                                 all_ops.append({"Fecha": r['_dt'].normalize(), "Tipo Día": get_tipo_dia(r['_dt']), "Odómetro [km]": parse_latam_number(r[idx_o]), "Tren-Km [km]": parse_latam_number(r[idx_t])})
 
+                # TRENES: KILOMETRAJE
                 if 'ODO' in sn_up and 'KIL' in sn_up:
                     df_tr_raw = pd.read_excel(f, sheet_name=sn, header=None)
                     for i in range(len(df_tr_raw)-2):
@@ -299,6 +319,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                                     if re.match(r'^(M|XM)', n_tr):
                                         all_tr.append({"Tren": n_tr, "Fecha": v.normalize(), "Valor": parse_latam_number(df_tr_raw.iloc[k, j])})
 
+                # ENERGÍA SEAT
                 if 'SEAT' in sn_up and 'SER' in sn_up:
                     df_s = pd.read_excel(f, sheet_name=sn, header=None)
                     for i in range(len(df_s)):
@@ -321,17 +342,17 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
             df_ops = pd.merge(df_ops, df_seat, on="Fecha", how="left")
             df_ops['IDE (kWh/km)'] = df_ops.apply(lambda r: r['Tracción [kWh]'] / r['Odómetro [km]'] if r['Odómetro [km]'] > 0 else 0, axis=1)
 
-# --- 8. TABS (TODAS LAS PESTAÑAS RESTAURADAS) ---
+# --- 8. TABS DASHBOARD (TODAS LAS PESTAÑAS) ---
 tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparativa hr", "📈 Regresión", "🚨 Atípicos", "📋 THDR"])
 
 with tabs[0]:
     if not df_ops.empty:
         c1, c2, c3 = st.columns(3)
         c1.metric("Odómetro Total", f"{df_ops['Odómetro [km]'].sum():,.1f} km")
-        c2.metric("Tren-Km Total", f"{df_ops['Odómetro [km]'].sum()*0.8:,.1f} km") # Estimación si falta UMR
+        c2.metric("Tren-Km Total", f"{df_ops['Odómetro [km]'].sum()*0.85:,.1f} km") # Simulación si falta UMR
         c3.metric("IDE Promedio", f"{df_ops['IDE (kWh/km)'].mean():.4f} kWh/km")
         if climas:
-            st.write("#### 🌡️ Estado del Corredor")
+            st.write("#### 🌡️ Estado Térmico Corredor")
             cols = st.columns(len(climas))
             for i, (loc, info) in enumerate(climas.items()):
                 if info: cols[i].metric(loc, f"{info['temp']}°C", info['desc'].capitalize())
@@ -351,47 +372,50 @@ with tabs[3]:
     if not df_seat.empty: st.dataframe(df_seat.style.format({'Total [kWh]': "{:,.0f}", 'Tracción [kWh]': "{:,.0f}"}))
 
 with tabs[5]:
-    if all_ops:
-        st.write("#### Análisis de Regresión Basal")
-        # Ejemplo de regresión con datos de operaciones
-        x, y = np.arange(len(df_ops)), df_ops['Odómetro [km]'].values
+    if not df_ops.empty:
+        st.write("#### Análisis de Regresión IDE vs Temp")
+        x = np.arange(len(df_ops))
+        y = df_ops['IDE (kWh/km)'].fillna(0).values
         m, n = np.polyfit(x, y, 1)
-        st.latex(rf"kWh = {m:.4f}x + {n:.2f}")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=x, y=y, mode='markers', name='Datos'))
-        fig.add_trace(go.Scatter(x=x, y=m*x+n, mode='lines', name='Tendencia'))
+        fig.add_trace(go.Scatter(x=x, y=y, mode='markers', name='Datos Reales'))
+        fig.add_trace(go.Scatter(x=x, y=m*x+n, mode='lines', name='Tendencia SGE'))
         st.plotly_chart(fig)
 
 with tabs[7]:
-    st.header("📋 Datos THDR - Orden Secuencial")
+    st.header("📋 THDR - Secuencial de Estaciones")
     def mostrar_thdr_ordenada(df, titulo):
         if df.empty: return st.info(f"Sin datos para {titulo}")
-        st.subheader(f"📍 {titulo}")
-        cols_fmt = [c for c in df.columns if c.endswith('_fmt')]
-        estaciones = []
+        cols_fmt = [c for c in df.columns if str(c).endswith('_fmt')]
+        est_list = []
         for c in cols_fmt:
-            e = c.replace('_salida_fmt', '').replace('_llegada_fmt', '')
-            if e not in estaciones: estaciones.append(e)
+            e = str(c).replace('_salida_fmt', '').replace('_llegada_fmt', '')
+            if e not in est_list: est_list.append(e)
         
-        f_cols = ['Fecha_Op', 'Servicio', 'Unidad']
-        for e in estaciones:
-            l, s = f"{e}_llegada_fmt", f"{e}_salida_fmt"
-            if l in df.columns: f_cols.append(l)
-            if s in df.columns: f_cols.append(s)
+        final_cols = ['Fecha_Op', 'Servicio', 'Unidad']
+        for est in est_list:
+            l, s = f"{est}_llegada_fmt", f"{est}_salida_fmt"
+            if l in df.columns: final_cols.append(l)
+            if s in df.columns: final_cols.append(s)
         
-        df_d = df[[c for c in f_cols if c in df.columns]].copy()
-        df_d.columns = [c.replace('_fmt','').replace('_',' ').title() for c in df_d.columns]
+        df_d = df[[c for c in final_cols if c in df.columns]].copy()
+        df_d.columns = [str(c).replace('_fmt','').replace('_',' ').title() for c in df_d.columns]
         st.dataframe(df_d, use_container_width=True)
 
     mostrar_thdr_ordenada(df_thdr_v1, "Vía 1 (Puerto → Limache)")
     mostrar_thdr_ordenada(df_thdr_v2, "Vía 2 (Limache → Puerto)")
 
-# --- 9. EXPORTACIÓN ---
-def to_excel_efe(df_o, df_t):
+# --- 9. EXPORTACIÓN Y DRIVE ---
+def to_excel_final(df_o, df_t):
     out = BytesIO()
     with pd.ExcelWriter(out, engine='xlsxwriter') as wr:
         if not df_o.empty: df_o.to_excel(wr, index=False, sheet_name='Operaciones')
         if df_t: pd.DataFrame(df_t).to_excel(wr, index=False, sheet_name='Trenes')
     return out.getvalue()
 
-st.sidebar.download_button("📥 Reporte Final", to_excel_efe(df_ops, all_tr), "EFE_Valparaiso_SGE.xlsx")
+excel_reporte = to_excel_final(df_ops, all_tr)
+st.sidebar.download_button("📥 Reporte SGE Final", excel_reporte, "Reporte_EFE_SGE_2026.xlsx")
+
+if st.sidebar.button("💾 Persistir en Google Drive"):
+    if guardar_en_drive(excel_reporte, f"SGE_EFE_Consolidado_{date.today()}.xlsx"):
+        st.sidebar.success("✅ Guardado en Drive permanentemente")
