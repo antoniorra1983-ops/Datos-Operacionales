@@ -18,7 +18,7 @@ st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wi
 
 # Configuración API Clima (OpenWeatherMap)
 # Nota: Reemplaza con tu propia clave para producción
-API_KEY = "tu_api_key_aqui" 
+API_KEY = "d0d9f7f061e2abae49b2c6bdf37fe137" 
 CIUDAD = "Valparaiso,CL"
 
 chile_holidays = holidays.Chile()
