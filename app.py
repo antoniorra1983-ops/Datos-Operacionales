@@ -595,15 +595,14 @@ with tabs[7]:
                 ok = d['error'] is None
                 icono = "✅" if ok else "❌"
                 st.markdown(f"**{icono} {d['archivo']}**")
-                cols_d = st.columns(4)
-                cols_d[0].caption("A1 leído"); cols_d[0].code(d['A1_raw'] or '—')
-                cols_d[1].caption("Fecha parseada"); cols_d[1].code(d['fecha_parseada'] or '—')
-                cols_d[2].caption("¿En rango?"); cols_d[2].code(d['en_rango'] or '—')
-                cols_d[3].caption("Estado")
+                cols_d = st.columns(3)
+                cols_d[0].caption("Fecha parseada"); cols_d[0].code(d['fecha_parseada'] or '—')
+                cols_d[1].caption("¿En rango?"); cols_d[1].code(d['en_rango'] or '—')
+                cols_d[2].caption("Estado")
                 if ok:
-                    cols_d[3].success(f"{d['filas']} filas cargadas")
+                    cols_d[2].success(f"{d['filas']} filas cargadas")
                 else:
-                    cols_d[3].error(d['error'])
+                    cols_d[2].error(d['error'])
                 st.divider()
 
     # --- Datos ---
