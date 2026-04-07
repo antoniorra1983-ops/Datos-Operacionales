@@ -910,7 +910,7 @@ with tabs[6]:
     else:
         st.success("No hay anomalías detectadas en la selección actual.")
 
-# ================== PESTAÑA THDR (CORREGIDA Y CON TODAS LAS ESTACIONES) ==================
+# ================== PESTAÑA THDR (CORREGIDA CON ORDEN DE ESTACIONES) ==================
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
@@ -958,7 +958,32 @@ with tabs[7]:
         else:
             st.info("No hay datos para Vía 2 en el rango seleccionado.")
     
-    def mostrar_tabla_thdr_completa(df, titulo, color_emoji):
+    def ordenar_columnas_estaciones(columnas, via):
+        # Definir el orden lógico de las estaciones (nombres base)
+        orden_base = ["Puerto", "Viña", "Belloto", "Limache"]
+        # Para Vía 2, invertir el orden
+        if via == "Vía 2":
+            orden_base = list(reversed(orden_base))
+        
+        # Separar columnas base fijas de las de estaciones
+        columnas_fijas = ['Fecha', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Hora Programada', 'Retraso (min)', 'TDV']
+        columnas_estaciones = [col for col in columnas if col not in columnas_fijas]
+        
+        # Ordenar las columnas de estaciones según el orden_base
+        col_ordenadas = []
+        for estacion in orden_base:
+            # Buscar columnas que contengan el nombre de la estación (sin distinción mayúsculas)
+            coincidencias = [col for col in columnas_estaciones if estacion.lower() in col.lower()]
+            # Ordenar las coincidencias para que salga primero "Hora Salida" y luego "Hora Llegada" si ambas existen
+            coincidencias.sort(key=lambda x: ('llegada' in x.lower(), x))  # "Salida" antes que "Llegada"
+            col_ordenadas.extend(coincidencias)
+        # Añadir el resto de columnas de estaciones que no estén en el orden (por si acaso)
+        col_ordenadas.extend([col for col in columnas_estaciones if col not in col_ordenadas])
+        # Combinar fijas + ordenadas
+        columnas_finales = [col for col in columnas_fijas if col in columnas] + col_ordenadas
+        return columnas_finales
+    
+    def mostrar_tabla_thdr_completa(df, titulo, color_emoji, via):
         st.subheader(f"{color_emoji} {titulo}")
         if df.empty:
             st.info(f"No hay datos de THDR para {titulo} en el período seleccionado.")
@@ -990,16 +1015,21 @@ with tabs[7]:
         # Seleccionar columnas de interés: las que tienen horas de estaciones, más las básicas
         columnas_base = ['Fecha', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
         columnas_base_existentes = [col for col in columnas_base if col in df_display.columns]
-        columnas_estaciones = [col for col in columnas_horas if col in df_display.columns]
-        # Ordenar las columnas de estaciones de forma lógica (por orden de recorrido)
-        # Se puede ordenar alfabéticamente o mantener el orden original
-        columnas_estaciones_ordenadas = sorted(columnas_estaciones)
-        columnas_finales = columnas_base_existentes + columnas_estaciones_ordenadas
-        # Añadir algunas calculadas si existen
+        # Añadir las calculadas si existen
         for extra in ['Hora Programada', 'Retraso (min)', 'TDV']:
             if extra in df_display.columns:
-                columnas_finales.append(extra)
+                columnas_base_existentes.append(extra)
         
+        # Obtener todas las columnas disponibles que son de estaciones
+        columnas_estaciones = [col for col in df_display.columns if col not in columnas_base_existentes and col != 'Fecha' and col != 'Fecha_Op']
+        
+        # Ordenar las columnas de estaciones según la vía
+        columnas_estaciones_ordenadas = ordenar_columnas_estaciones(columnas_estaciones, via)
+        
+        # Combinar
+        columnas_finales = columnas_base_existentes + columnas_estaciones_ordenadas
+        # Asegurar que solo existan en df_display
+        columnas_finales = [col for col in columnas_finales if col in df_display.columns]
         df_final = df_display[columnas_finales].copy()
         
         # Formatear Tren-Km
@@ -1010,8 +1040,10 @@ with tabs[7]:
         csv = df_final.to_csv(index=False).encode('utf-8')
         st.download_button(f"📥 Descargar {titulo} (CSV)", csv, f"THDR_{titulo.replace(' ', '_')}.csv", "text/csv")
     
-    mostrar_tabla_thdr_completa(df_thdr_v1_filt, "Vía 1", "🟢")
-    mostrar_tabla_thdr_completa(df_thdr_v2_filt, "Vía 2", "🔵")
+    # Mostrar para Vía 1 con orden Puerto -> Limache
+    mostrar_tabla_thdr_completa(df_thdr_v1_filt, "Vía 1", "🟢", "Vía 1")
+    # Mostrar para Vía 2 con orden Limache -> Puerto
+    mostrar_tabla_thdr_completa(df_thdr_v2_filt, "Vía 2", "🔵", "Vía 2")
 
 # --- 8. DESCARGA DE REPORTE EXCEL COMPLETO ---
 st.sidebar.download_button("📥 Reporte Excel Completo", to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, pd.DataFrame(all_prmte_15), pd.DataFrame(all_fact_h), df_f_d), "Reporte_EFE_SGE.xlsx")
