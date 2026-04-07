@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import traceback
 
-# --- 1. CONFIGURACIÓN Y API CORREDOR TÉRMICO ---
+# --- 1. CONFIGURACIÓN, API Y PERSISTENCIA ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
 
 # API Key real integrada
@@ -166,7 +166,6 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         try: df_raw = pd.read_excel(file, header=None, engine=None)
         except: df_raw = pd.read_excel(file, header=None, engine='xlrd')
         
-        # Unificación de cabeceras de dos filas
         header0, header1 = df_raw.iloc[0].fillna('').astype(str), df_raw.iloc[1].fillna('').astype(str)
         column_names = []
         for i in range(len(header0)):
@@ -176,7 +175,6 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df = df_raw.iloc[2:].copy()
         df.columns = column_names
         
-        # Detección de columnas clave
         def find_col(keys):
             for c in df.columns:
                 if any(k.lower() in c.lower() for k in keys): return c
@@ -191,7 +189,6 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Motriz 2'] = pd.to_numeric(df[c_m2], errors='coerce').fillna(0).astype(int) if c_m2 else 0
         df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
         
-        # Procesamiento de estaciones (Llegadas y Salidas)
         columnas_horas = {}
         for col in df.columns:
             clow = col.lower()
@@ -204,7 +201,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         
         for k, c in columnas_horas.items():
             df[f"{k}_min"] = df[c].apply(convertir_a_minutos)
-            df[f"{key}_fmt"] = df[f"{key}_min"].apply(lambda x: format_hms(x) if pd.notna(x) else "")
+            df[f"{k}_fmt"] = df[f"{k}_min"].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         
         p_key = next((k for k in columnas_horas.keys() if 'puerto' in k.lower() and 'salida' in k), None)
         l_key = next((k for k in columnas_horas.keys() if 'limache' in k.lower() and 'llegada' in k), None)
@@ -214,7 +211,6 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Min_Prog'] = df['Hora_Prog'].apply(convertir_a_minutos)
         df['Retraso'] = df['Hora_Salida_Real'] - df['Min_Prog']
         
-        # FIX TRUTH VALUE: Uso de apply para evitar evaluación vectorial ambigua
         if p_key and l_key:
             df['TDV_Min'] = (df['Hora_Llegada_Real'] - df['Hora_Salida_Real']).apply(lambda x: x if x > 0 else (x + 1440 if pd.notna(x) else 0))
         else: df['TDV_Min'] = 0
@@ -270,13 +266,10 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
                 sn_up = sn.upper()
                 if any(k in sn_up for k in ['UMR', 'RESUMEN']):
                     df_raw = pd.read_excel(f, sheet_name=sn, header=None)
-                    # Arreglo de Truth Value Error en detección de fila de cabecera
                     h_r = None
                     for i in range(min(100, len(df_raw))):
                         row_val = str(df_raw.iloc[i]).upper()
-                        if 'ODO' in row_val or 'FECHA' in row_val:
-                            h_r = i
-                            break
+                        if 'ODO' in row_val or 'FECHA' in row_val: h_r = i; break
                     if h_r is not None:
                         df_p = pd.read_excel(f, sheet_name=sn, header=h_r)
                         df_p.columns = [re.sub(r'[^A-Z]', '', str(c).upper()) for c in df_p.columns]
@@ -290,14 +283,15 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
 
                 if 'ODO' in sn_up and 'KIL' in sn_up:
                     df_tr_raw = pd.read_excel(f, sheet_name=sn, header=None)
+                    headers_found = []
                     for i in range(len(df_tr_raw)-2):
                         for j in range(1, len(df_tr_raw.columns)):
                             val = pd.to_datetime(df_tr_raw.iloc[i, j], errors='coerce')
-                            if pd.notna(val) and start_date <= val.date() <= end_date:
-                                for k in range(i+3, min(i+40, len(df_tr_raw))):
-                                    n_tr = str(df_tr_raw.iloc[k, 0]).strip().upper()
-                                    if re.match(r'^(M|XM)', n_tr):
-                                        all_tr.append({"Tren": n_tr, "Fecha": val.normalize(), "Valor": parse_latam_number(df_tr_raw.iloc[k, j])})
+                            if pd.notna(val) and start_date <= val.date() <= end_date: headers_found.append((i, val, j))
+                    for r_idx, s_dt, c_idx in headers_found:
+                        for k in range(r_idx+3, min(r_idx+40, len(df_tr_raw))):
+                            n_tr = str(df_tr_raw.iloc[k, 0]).strip().upper()
+                            if re.match(r'^(M|XM)', n_tr): all_tr.append({"Tren": n_tr, "Fecha": s_dt.normalize(), "Valor": parse_latam_number(df_tr_raw.iloc[k, c_idx])})
 
                 if 'SEAT' in sn_up and 'SER' in sn_up:
                     df_s = pd.read_excel(f, sheet_name=sn, header=None)
@@ -359,16 +353,11 @@ with tabs[0]:
             st.write("#### 🚉 Perfil Térmico Corredor")
             c_cols = st.columns(len(climas))
             for i, (loc, info) in enumerate(climas.items()):
-                if info: c_cols[i].metric(loc, f"{info['temp']}°C", info['desc'])
+                if info: c_cols[i].metric(loc, f"{info['temp']}°C", info['desc'].capitalize())
     else: st.info("Carga datos para visualizar.")
 
 with tabs[1]:
-    if not df_ops.empty: st.dataframe(df_ops.style.format({'Odómetro [km]': "{:,.1f}", 'IDE (kWh/km)': "{:.4f}"}))
-
-with tabs[2]:
-    if not df_tr.empty:
-        piv = df_tr.pivot_table(index="Tren", columns=df_tr["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0)
-        st.dataframe(piv.style.format("{:,.1f}"))
+    if not df_ops.empty: st.dataframe(df_ops.style.format({'Odómetro [km]': "{:,.1f}", 'Tren-Km [km]': "{:,.1f}", 'IDE (kWh/km)': "{:.4f}"}))
 
 with tabs[5]:
     if all_comp_full:
@@ -392,16 +381,14 @@ with tabs[7]:
         for c in cols_fmt:
             est = c.replace('_salida_fmt', '').replace('_llegada_fmt', '')
             if est not in estaciones: estaciones.append(est)
-        
-        final_cols = ['Fecha_Op', 'Servicio', 'Unidad']
+        final_cols = ['Fecha_Op', 'Servicio', 'Unidad', 'Tren-Km']
         for est in estaciones:
             l, s = f"{est}_llegada_fmt", f"{est}_salida_fmt"
             if l in df.columns: final_cols.append(l)
             if s in df.columns: final_cols.append(s)
-        
-        existentes = [c for c in final_cols if c in df.columns]
-        df_final = df[existentes].copy()
-        names = {c: c.replace('_fmt','').replace('_',' ').title() for c in existentes}
+        final_cols += ['Retraso', 'TDV_Min']
+        df_final = df[[c for c in final_cols if c in df.columns]].copy()
+        names = {c: c.replace('_fmt','').replace('_',' ').title() for c in df_final.columns}
         st.dataframe(df_final.rename(columns=names), use_container_width=True)
 
     mostrar_thdr_ordenada(df_thdr_v1, "Vía 1 (Puerto → Limache)")
