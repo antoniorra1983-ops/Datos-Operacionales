@@ -201,27 +201,40 @@ def procesar_thdr_avanzado(file):
         col_motriz2 = buscar_columna(['Motriz 2', 'Motriz2', 'M2', 'Motor 2'])
         col_unidad = buscar_columna(['Unidad', 'Tren', 'Formación'])
         
-        # Asignar o crear columnas con valores por defecto
-        df['Recorrido'] = df[col_recorrido] if col_recorrido else ''
-        df['Servicio'] = df[col_servicio] if col_servicio else 0
-        df['Hora_Prog'] = df[col_hora_prog] if col_hora_prog else '00:00:00'
+        # Asignar o crear columnas con valores por defecto (evitando duplicados)
+        if col_recorrido:
+            df['Recorrido'] = df[col_recorrido]
+        else:
+            df['Recorrido'] = ''
+        if col_servicio:
+            df['Servicio'] = df[col_servicio]
+        else:
+            df['Servicio'] = 0
+        if col_hora_prog:
+            df['Hora_Prog'] = df[col_hora_prog]
+        else:
+            df['Hora_Prog'] = '00:00:00'
         
         # Motriz 1: si no se encuentra, crear Serie de ceros del mismo tamaño
         if col_motriz1:
-            df['Motriz 1'] = pd.to_numeric(df[col_motriz1], errors='coerce').fillna(0).astype(int)
+            df['Motriz_1'] = pd.to_numeric(df[col_motriz1], errors='coerce').fillna(0).astype(int)
         else:
-            df['Motriz 1'] = pd.Series(0, index=df.index)
+            df['Motriz_1'] = pd.Series(0, index=df.index, dtype=int)
         
         # Motriz 2: similar
         if col_motriz2:
-            df['Motriz 2'] = pd.to_numeric(df[col_motriz2], errors='coerce').fillna(0).astype(int)
+            df['Motriz_2'] = pd.to_numeric(df[col_motriz2], errors='coerce').fillna(0).astype(int)
         else:
-            df['Motriz 2'] = pd.Series(0, index=df.index)
+            df['Motriz_2'] = pd.Series(0, index=df.index, dtype=int)
         
-        df['Unidad_Original'] = df[col_unidad] if col_unidad else ''
+        # Unidad original (si existe)
+        if col_unidad:
+            df['Unidad_Original'] = df[col_unidad]
+        else:
+            df['Unidad_Original'] = ''
         
         # Calcular Unidad según Motriz 2: 0 -> S, >0 -> M
-        df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
+        df['Unidad'] = df['Motriz_2'].apply(lambda x: 'M' if x > 0 else 'S')
         
         # Identificar primera estación (Puerto) y última (Limache) por sus nombres
         puerto_col = None
@@ -286,6 +299,12 @@ def procesar_thdr_avanzado(file):
             df['Fecha_Op'] = f"{fecha_info[0]:02d}/{fecha_info[1]:02d}/{fecha_info[2]}"
         else:
             df['Fecha_Op'] = ''
+        
+        # Renombrar Motriz_1 y Motriz_2 a los nombres finales deseados
+        df.rename(columns={'Motriz_1': 'Motriz 1', 'Motriz_2': 'Motriz 2'}, inplace=True)
+        
+        # Eliminar columnas duplicadas (si las hay)
+        df = df.loc[:, ~df.columns.duplicated()]
         
         # Asegurar columnas necesarias
         for col in ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km', 'Retraso', 'Puntual', 'Hora_Prog', 'Fecha_Op']:
