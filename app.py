@@ -56,7 +56,7 @@ def format_hm_short(minutos_float):
     h, m = divmod(int(minutos_float), 60)
     return f"{h:02d}:{m:02d}"
 
-# --- 3. PROCESAMIENTO THDR ESPECIALIZADO ---
+# --- 3. PROCESAMIENTO THDR (REPARADO PARA ESTRUCTURA A1 + 3 VACÍAS) ---
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "": return None
     try:
@@ -73,46 +73,46 @@ def procesar_thdr_eficiente(file, start_date, end_date):
     try:
         df_raw = pd.read_excel(file, header=None)
         
-        # 1. Extraer Fecha desde A1 (Formato 10126 o 010126)
-        fecha_str = str(df_raw.iloc[0, 0]).strip().split('.')[0]
-        if len(fecha_str) == 5: fecha_str = "0" + fecha_str
-        dia, mes, anio = int(fecha_str[:2]), int(fecha_str[2:4]), 2000 + int(fecha_str[4:])
+        # 1. Extraer Fecha desde A1 (Celda 0,0)
+        fecha_val = str(df_raw.iloc[0, 0]).strip().split('.')[0]
+        if len(fecha_val) == 5: fecha_val = "0" + fecha_val
+        dia, mes, anio = int(fecha_val[:2]), int(fecha_val[2:4]), 2000 + int(fecha_val[4:])
         fecha_dt = pd.to_datetime(date(anio, mes, dia)).normalize()
         
+        # Filtro de seguridad por fecha
         if not (start_date <= fecha_dt.date() <= end_date): return pd.DataFrame()
 
-        # 2. Construir Cabeceras (Fila 1: Estaciones, Fila 2: Llegada/Salida)
-        h1 = df_raw.iloc[0].fillna(method='ffill').astype(str)
+        # 2. Definir Cabeceras (Estaciones en fila 0, Llegada/Salida en fila 1)
+        # Limpiamos la fila 0 para que la fecha en A1 no se propague
+        row_estaciones = df_raw.iloc[0].copy()
+        row_estaciones[0] = np.nan # Borramos la fecha para que ffill no la use
+        h1 = row_estaciones.fillna(method='ffill').astype(str)
         h2 = df_raw.iloc[1].fillna('').astype(str)
         cols = [f"{st.strip()}_{tipo.strip()}" if tipo else st.strip() for st, tipo in zip(h1, h2)]
         
-        # 3. Limpiar Datos (Saltar 3 filas vacías -> Data empieza en fila index 5)
+        # 3. Datos empiezan en Fila 6 (Index 5) saltando las 3 vacías
         df = df_raw.iloc[5:].copy()
         df.columns = cols
-        df = make_columns_unique(df)
-        df = df.dropna(how='all', axis=0)
+        df = make_columns_unique(df).dropna(how='all', axis=0)
         
-        # 4. Procesar Tiempos y Metadatos
+        # 4. Procesar tiempos
         for col in df.columns:
             if 'Hora' in col:
                 df[f"{col}_min"] = df[col].apply(convertir_a_minutos)
         
-        # Identificar Motrices para Tren-Km
-        c_m1 = next((c for c in df.columns if 'Motriz 1' in str(c)), None)
+        # Tren-Km (Puerto-Limache)
         c_m2 = next((c for c in df.columns if 'Motriz 2' in str(c)), None)
         df['Unidad'] = df[c_m2].apply(lambda x: 'M' if parse_latam_number(x) > 0 else 'S') if c_m2 else 'S'
-        
-        # Distancia (Puerto-Limache = 43.13)
-        es_v1 = any('PUERTO' in str(c).upper() for c in df.columns)
         df['Tren-Km'] = 43.13 * df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         df['Fecha_Op'] = fecha_dt
         
-        # Columna de Referencia para Frecuencias (Salida de la primera estación)
+        # Referencia para Frecuencias (Salida Origen)
         col_ref = next((c for c in df.columns if ('PUERTO' in c.upper() or 'LIMACHE' in c.upper()) and 'Salida' in c and '_min' in c), None)
         if col_ref: df['Hora_Ref_Min'] = df[col_ref]
         
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
 
 # --- 4. INICIALIZACIÓN ---
 df_ops, df_tr, df_seat = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -130,7 +130,7 @@ with st.sidebar:
     f_seat_files = st.file_uploader("4. Energía SEAT", accept_multiple_files=True)
     f_bill_files = st.file_uploader("5. Facturación y PRMTE", accept_multiple_files=True)
 
-# --- 6. PROCESAMIENTO TOTAL (MANTENIENDO OPERACIONES, TRENES Y ENERGÍA) ---
+# --- 6. PROCESAMIENTO TOTAL (MANTENIENDO TODO LO ANTERIOR) ---
 if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
     if f_umr:
         for f in f_umr:
@@ -183,7 +183,7 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                         for _, r in df_pd.iterrows(): all_comp_full.append({"Fecha": r['ts'].normalize(), "Hora": r['ts'].hour, "Consumo": parse_latam_number(r.get('Retiro_Energia_Activa (kWhD)', 0)), "Fuente": "PRMTE"})
             except: pass
 
-    # Consolidación IDE
+    # Cruce IDE Operaciones
     if all_ops:
         df_ops = pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum", "Tren-Km [km]":"sum", "Tipo Día":"first"}).reset_index()
         df_ops['E_Total'], df_ops['E_Tr'], df_ops['IDE (kWh/km)'] = 0.0, 0.0, 0.0
@@ -199,26 +199,25 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
 # --- 7. TABS ---
 tabs = st.tabs(["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Comparación hr", "📈 Regresión", "🚨 Atípicos", "📋 THDR"])
 
-with tabs[0]: # RESUMEN
+with tabs[0]: # PESTAÑA RESUMEN
     if not df_ops.empty:
         df_rf = df_ops[df_ops['Fecha'].dt.year.isin(st.multiselect("Año", sorted(df_ops['Fecha'].dt.year.unique()), sorted(df_ops['Fecha'].dt.year.unique())))]
         if not df_rf.empty:
             c1, c2, c3 = st.columns(3); c1.metric("Odómetro", f"{df_rf['Odómetro [km]'].sum():,.1f} km"); c2.metric("Tren-Km", f"{df_rf['Tren-Km [km]'].sum():,.1f} km"); c3.metric("IDE Prom", f"{df_rf['IDE (kWh/km)'].mean():.4f}")
             st.plotly_chart(go.Figure(data=[go.Bar(x=df_rf['Fecha'], y=df_rf['Odómetro [km]'], marker_color="#005195")]), use_container_width=True)
 
-with tabs[2]: # TRENES
-    if all_tr:
-        st.dataframe(pd.DataFrame(all_tr).pivot_table(index="Tren", columns="Fecha", values="Valor", aggfunc='sum').fillna(0).style.format("{:,.1f}"))
+with tabs[2]: # PESTAÑA TRENES
+    if all_tr: st.dataframe(pd.DataFrame(all_tr).pivot_table(index="Tren", columns="Fecha", values="Valor", aggfunc='sum').fillna(0).style.format("{:,.1f}"))
 
-with tabs[3]: # ENERGÍA
+with tabs[3]: # PESTAÑA ENERGÍA
     e_tabs = st.tabs(["🔹 SEAT", "🔹 PRMTE", "🔹 Facturación"])
     with e_tabs[1]:
         if all_comp_full: st.dataframe(pd.DataFrame(all_comp_full).groupby("Fecha")["Consumo"].sum().reset_index())
 
-with tabs[7]: # 📋 THDR (CON TABLAS DE FRECUENCIA CORREGIDAS)
+with tabs[7]: # 📋 PESTAÑA THDR (CON TABLAS DE FRECUENCIA)
     st.header("📋 Análisis THDR")
     if not df_thdr_v1.empty or not df_thdr_v2.empty:
-        # Tabla 1: Servicios por Hora
+        # Frecuencia por Hora
         st.subheader("⏱️ Servicios por Hora")
         freq_h = []
         if not df_thdr_v1.empty and 'Hora_Ref_Min' in df_thdr_v1.columns:
@@ -231,7 +230,7 @@ with tabs[7]: # 📋 THDR (CON TABLAS DE FRECUENCIA CORREGIDAS)
             df_fh['Hora'] = df_fh['Hora'].apply(lambda x: f"{int(x):02d}:00")
             st.table(df_fh.sort_values('Hora').set_index('Hora'))
 
-        # Tabla 2: Servicios cada 15 Minutos
+        # Frecuencia cada 15 Minutos
         st.subheader("⏲️ Frecuencia cada 15 Minutos")
         freq_15 = []
         if not df_thdr_v1.empty and 'Hora_Ref_Min' in df_thdr_v1.columns:
@@ -245,8 +244,8 @@ with tabs[7]: # 📋 THDR (CON TABLAS DE FRECUENCIA CORREGIDAS)
             st.dataframe(df_f15.sort_values('Min')[['Intervalo', 'Vía 1', 'Vía 2']].set_index('Intervalo'))
 
         st.divider()
-        st.subheader("📄 Registros THDR")
+        st.subheader("📄 Detalle Registros THDR")
         c1, c2 = st.columns(2)
         with c1: st.write("Vía 1"); st.dataframe(make_columns_unique(df_thdr_v1))
         with c2: st.write("Vía 2"); st.dataframe(make_columns_unique(df_thdr_v2))
-    else: st.info("Sube archivos THDR y verifica que el rango de fecha coincida con la celda A1.")
+    else: st.info("Sube archivos THDR y verifica que el rango del Sidebar incluya la fecha del archivo.")
