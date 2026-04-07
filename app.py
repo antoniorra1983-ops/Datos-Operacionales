@@ -22,7 +22,21 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. FUNCIONES DE APOYO Y EXPORTACIÓN ---
+# --- 2. FUNCIONES DE EXPORTACIÓN Y APOYO ---
+
+def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, df_p_15, df_fact_h, df_fact_d):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        dict_dfs = {
+            'Operaciones': df_ops, 'Kms_Diarios_Tren': df_tr, 
+            'Odometros_Acum_Tren': df_tr_acum, 'SEAT': df_seat, 
+            'PRMTE_D': df_p_d, 'PRMTE_15': df_p_15, 
+            'Fact_H': df_fact_h, 'Fact_D': df_fact_d
+        }
+        for name, df in dict_dfs.items():
+            if df is not None and not df.empty:
+                df.to_excel(writer, index=False, sheet_name=name)
+    return output.getvalue()
 
 def parse_latam_number(val):
     if pd.isna(val): return 0.0
@@ -54,27 +68,7 @@ def convertir_a_minutos(val):
         return None
     except: return None
 
-def format_hms(m, con_signo=False):
-    if pd.isna(m) or m == 0: return "00:00:00"
-    signo = ("+" if m > 0 else "-" if m < 0 else "") if con_signo else ""
-    sec = int(round(abs(m) * 60))
-    h, r = divmod(sec, 3600); mi, se = divmod(r, 60)
-    return f"{signo}{h:02d}:{mi:02d}:{se:02d}"
-
-def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, df_p_15, df_fact_h, df_fact_d):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        dict_dfs = {
-            'Operaciones': df_ops, 'Kms_Diarios_Tren': df_tr, 
-            'Odometros_Acum_Tren': df_tr_acum, 'SEAT': df_seat, 
-            'PRMTE_D': df_p_d, 'PRMTE_15': df_p_15, 
-            'Fact_H': df_fact_h, 'Fact_D': df_fact_d
-        }
-        for name, df in dict_dfs.items():
-            if df is not None and not df.empty: df.to_excel(writer, index=False, sheet_name=name)
-    return output.getvalue()
-
-# --- 3. PROCESAMIENTO THDR (DINÁMICO PARA SERVICIOS CORTOS) ---
+# --- 3. PROCESAMIENTO THDR DINÁMICO ---
 
 DISTANCIAS = {"PU-LI": 43.13, "LI-PU": 43.13, "PU-SA": 29.11, "SA-PU": 29.11, "EB-PU": 25.40, "PU-EB": 25.40, "VM-LI": 34.03, "LI-VM": 34.03, "VM-PU": 9.10, "PU-VM": 9.10}
 
@@ -87,11 +81,12 @@ def procesar_thdr_avanzado(file):
         for i in range(len(h0)):
             base, sub = h0[i].strip(), h1[i].strip()
             cols_raw.append(f"{base} ({sub})" if "Hora" in sub else base)
-        # Deduplicar columnas para Streamlit/PyArrow
+        
         final_cols, counts = [], {}
         for name in cols_raw:
             if name in counts: counts[name] += 1; final_cols.append(f"{name}_{counts[name]}")
             else: counts[name] = 0; final_cols.append(name)
+        
         df = df_raw.iloc[2:].copy(); df.columns = final_cols
         c_sal = [c for c in df.columns if 'Hora Salida' in c]
         c_lle = [c for c in df.columns if 'Hora Llegada' in c]
@@ -99,24 +94,23 @@ def procesar_thdr_avanzado(file):
         def detectar(row):
             iv, In, fv, fn = None, None, None, None
             for c in c_sal:
-                v = convertir_a_minutos(row[c]); 
+                v = convertir_a_minutos(row[c])
                 if v is not None: iv, In = v, c.split('(')[0].strip(); break
             for c in reversed(c_lle):
-                v = convertir_a_minutos(row[c]); 
+                v = convertir_a_minutos(row[c])
                 if v is not None: fv, fn = v, c.split('(')[0].strip(); break
             return pd.Series([iv, In, fv, fn])
-            
+
         df[['T_Ini', 'Origen', 'T_Fin', 'Destino']] = df.apply(detectar, axis=1)
         
         def find_k(ks):
             for c in df.columns:
                 if any(k.lower() in c.lower() for k in ks): return c
             return None
+
         cs, cp, cm1, cm2 = find_k(['Servicio', 'N°']), find_k(['Prog']), find_k(['Motriz 1', 'M1']), find_k(['Motriz 2', 'M2'])
         df['Servicio'] = pd.to_numeric(df[cs], errors='coerce').fillna(0).astype(int) if cs else 0
-        df['Motriz 1'] = pd.to_numeric(df[cm1], errors='coerce').fillna(0).astype(int) if cm1 else 0
-        df['Motriz 2'] = pd.to_numeric(df[cm2], errors='coerce').fillna(0).astype(int) if cm2 else 0
-        df['Unidad'] = df['Motriz 2'].apply(lambda x: 'M' if x > 0 else 'S')
+        df['Unidad'] = pd.to_numeric(df[cm2], errors='coerce').fillna(0).apply(lambda x: 'M' if x > 0 else 'S')
         df['Min_Prog'] = df[cp].apply(convertir_a_minutos) if cp else 0
         df['Retraso'] = df['T_Ini'] - df['Min_Prog']
         
@@ -125,19 +119,20 @@ def procesar_thdr_avanzado(file):
             map_e = {"PU":"PU", "VA":"PU", "LI":"LI", "VI":"VM", "EL":"EB"}
             k = f"{map_e.get(o,o)}-{map_e.get(d,d)}"
             return DISTANCIAS.get(k, 43.13) * (2 if r['Unidad'] == 'M' else 1)
-        
+            
         df['Tren-Km'] = df.apply(calc_km, axis=1)
         try:
             f_str = str(df_raw.iloc[0, 0]).split('.')[0].strip().zfill(6)
             df['Fecha_Op'] = f"{f_str[0:2]}/{f_str[2:4]}/20{f_str[4:6]}"
         except: df['Fecha_Op'] = ""
+        
         return df[df['Servicio'] > 0]
     except Exception as e:
-        st.error(f"Error: {e}"); return pd.DataFrame()
+        st.error(f"Error procesando archivo: {e}"); return pd.DataFrame()
 
 # --- 4. INICIALIZACIÓN ---
 df_ops = df_tr = df_tr_acum = df_seat = df_p_d = df_thdr_v1 = df_thdr_v2 = pd.DataFrame()
-all_ops, all_tr, all_tr_acum, all_seat = [], [], [], []
+all_ops, all_tr, all_tr_acum, all_seat, all_comp_full = [], [], [], [], []
 
 # --- 5. SIDEBAR ---
 with st.sidebar:
@@ -148,9 +143,10 @@ with st.sidebar:
     fv2 = st.file_uploader("2. THDR Vía 2", accept_multiple_files=True)
     fumr = st.file_uploader("3. UMR / Odómetros", accept_multiple_files=True)
     fseat = st.file_uploader("4. Energía SEAT", accept_multiple_files=True)
+    f_bill_f = st.file_uploader("5. Facturación y PRMTE", accept_multiple_files=True)
 
 # --- 6. PROCESAMIENTO ---
-if any([fv1, fv2, fumr, fseat]):
+if any([fv1, fv2, fumr, fseat, f_bill_f]):
     if fumr:
         for f in fumr:
             xl = pd.ExcelFile(f)
@@ -170,13 +166,15 @@ if any([fv1, fv2, fumr, fseat]):
                     df_tr_raw = pd.read_excel(f, sheet_name=sn, header=None)
                     for i in range(len(df_tr_raw)-2):
                         for j in range(1, len(df_tr_raw.columns)):
-                            vf = pd.to_datetime(df_tr_raw.iloc[i,j], errors='coerce')
-                            if pd.notna(vf):
+                            v_fch = pd.to_datetime(df_tr_raw.iloc[i,j], errors='coerce')
+                            if pd.notna(v_fch):
                                 for k in range(i+3, min(i+40, len(df_tr_raw))):
                                     nt = str(df_tr_raw.iloc[k,0]).strip().upper()
                                     if nt.startswith(('M','XM')):
-                                        all_tr.append({"Tren": nt, "Fecha": vf.normalize(), "Valor": parse_latam_number(df_tr_raw.iloc[k,j])})
-                                        all_tr_acum.append({"Tren": nt, "Fecha": vf.normalize(), "Valor": parse_latam_number(df_tr_raw.iloc[k,j])})
+                                        val = parse_latam_number(df_tr_raw.iloc[k,j])
+                                        all_tr.append({"Tren": nt, "Fecha": v_fch.normalize(), "Valor": val})
+                                        all_tr_acum.append({"Tren": nt, "Fecha": v_fch.normalize(), "Valor": val})
+
     if fseat:
         for f in fseat:
             df_s = pd.read_excel(f, header=None)
@@ -184,6 +182,18 @@ if any([fv1, fv2, fumr, fseat]):
                 dt = pd.to_datetime(df_s.iloc[i,1], errors='coerce')
                 if pd.notna(dt):
                     all_seat.append({"Fecha": dt.normalize(), "E_Total": parse_latam_number(df_s.iloc[i,3]), "E_Tr": parse_latam_number(df_s.iloc[i,5]), "E_12": parse_latam_number(df_s.iloc[i,7])})
+    
+    if f_bill_f:
+        for f in f_bill_f:
+            xl_b = pd.ExcelFile(f)
+            for sn in xl_b.sheet_names:
+                df_b = pd.read_excel(f, sheet_name=sn)
+                if 'AÑO' in str(df_b.columns).upper():
+                    df_b['TS'] = pd.to_datetime(df_b[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'}))
+                    for _, r in df_b.iterrows():
+                        v_p = parse_latam_number(r.get('Retiro_Energia_Activa (kWhD)', 0))
+                        all_comp_full.append({"Fecha": r['TS'].normalize(), "Hora": r['TS'].hour, "Consumo": v_p})
+
     if fv1: df_thdr_v1 = pd.concat([procesar_thdr_avanzado(f) for f in fv1])
     if fv2: df_thdr_v2 = pd.concat([procesar_thdr_avanzado(f) for f in fv2])
 
@@ -213,34 +223,36 @@ with tabs[0]: # PESTAÑA RESUMEN
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Odómetro [km]", f"{df_f['Odómetro [km]'].sum():,.1f}")
                 m2.metric("Tren-Km [km]", f"{df_f['Tren-Km [km]'].sum():,.1f}")
-                m3.metric("IDE Promedio", f"{df_f['IDE'].mean():.4f}")
+                m3.metric("IDE [kWh/km]", f"{df_f['IDE'].mean():.4f}")
                 et, e12 = df_f['E_Tr'].sum(), df_f['E_12'].sum()
-                if (et+e12) > 0:
-                    st.info(f"⚡ Composición Energía: Tracción **{et/(et+e12)*100:.1f}%** | 12kV **{e12/(et+e12)*100:.1f}%**")
+                if (et+e12) > 0: st.info(f"⚡ Composición Energía: Tracción **{et/(et+e12)*100:.1f}%** | Otros 12kV **{e12/(et+e12)*100:.1f}%**")
                 st.plotly_chart(go.Figure(go.Scatter(x=df_f['Fecha'], y=df_f['IDE'], name="IDE")), use_container_width=True)
 
-with tabs[1]: # PESTAÑA OPERACIONES
-    if not df_ops.empty: st.dataframe(df_ops.style.format({'IDE': '{:.4f}', 'Odómetro [km]': '{:,.1f}'}), use_container_width=True)
-
-with tabs[2]: # PESTAÑA TRENES
+with tabs[2]: # TRENES
     if all_tr:
         df_t = pd.DataFrame(all_tr)
         st.write("#### Kilometraje Diario por Unidad [km]")
         st.dataframe(df_t.pivot_table(index="Tren", columns=df_t["Fecha"].dt.day, values="Valor", aggfunc='sum').fillna(0))
     if all_tr_acum:
-        st.divider(); st.write("#### Lectura de Odómetro Acumulado [km]")
+        st.divider(); st.write("#### Odómetro Acumulado por Unidad [km]")
         df_ta = pd.DataFrame(all_tr_acum)
         st.dataframe(df_ta.pivot_table(index="Tren", columns=df_ta["Fecha"].dt.day, values="Valor", aggfunc='max').fillna(0))
 
-with tabs[7]: # PESTAÑA THDR
+with tabs[4]: # COMPARATIVA HORARIA
+    if all_comp_full:
+        df_c = pd.DataFrame(all_comp_full)
+        piv_c = df_c.pivot_table(index="Hora", columns=df_c['Fecha'].dt.year, values="Consumo", aggfunc='median').fillna(0)
+        st.line_chart(piv_c)
+
+with tabs[7]: # THDR
     st.write("### 📋 Tabla Horaria de Desempeño Real")
     col1, col2 = st.columns(2)
     with col1:
-        if not df_thdr_v1.empty: 
-            st.write("#### Vía 1"); st.dataframe(df_thdr_v1[['Fecha_Op', 'Servicio', 'Origen', 'Destino', 'Unidad', 'Tren-Km', 'Retraso']], use_container_width=True)
+        st.write("#### Vía 1")
+        if not df_thdr_v1.empty: st.dataframe(df_thdr_v1[['Fecha_Op', 'Servicio', 'Origen', 'Destino', 'Unidad', 'Tren-Km', 'Retraso']], use_container_width=True)
     with col2:
-        if not df_thdr_v2.empty: 
-            st.write("#### Vía 2"); st.dataframe(df_thdr_v2[['Fecha_Op', 'Servicio', 'Origen', 'Destino', 'Unidad', 'Tren-Km', 'Retraso']], use_container_width=True)
+        st.write("#### Vía 2")
+        if not df_thdr_v2.empty: st.dataframe(df_thdr_v2[['Fecha_Op', 'Servicio', 'Origen', 'Destino', 'Unidad', 'Tren-Km', 'Retraso']], use_container_width=True)
 
 if not df_ops.empty:
     st.sidebar.download_button("📥 Reporte Completo", to_excel_consolidado(df_ops, pd.DataFrame(all_tr), pd.DataFrame(all_tr_acum), pd.DataFrame(all_seat), None, None, None, None), "Reporte_SGE_EFE.xlsx")
