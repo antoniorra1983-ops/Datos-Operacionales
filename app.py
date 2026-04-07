@@ -65,49 +65,56 @@ def convertir_a_minutos(val):
         return None
     except: return None
 
-def parsear_fecha_a1(val_raw):
+def parsear_fecha_nombre(nombre_archivo):
     """
-    Parsea la celda A1 soportando múltiples formatos.
-    Retorna (date, descripcion) o (None, mensaje_error).
+    Extrae la fecha desde el nombre del archivo.
+    Soporta: DD-MM-YYYY, DD_MM_YYYY, YYYY-MM-DD, YYYY_MM_DD, DDMMYYYY, DDMMYY
+    Ej: Escenario_6_21-12-2025_XT32.xlsx → 2025-12-21
     """
-    try:
-        dt = pd.to_datetime(val_raw)
-        if pd.notna(dt):
-            return dt.date(), f"datetime directo → {dt.date()}"
-    except: pass
+    nombre = str(nombre_archivo)
 
-    s = str(val_raw).strip().split('.')[0].strip()
-
-    # Numérico DDMMYY (5-6 dígitos): 10126 o 010126
-    if re.fullmatch(r'\d{5,6}', s):
-        padded = s.zfill(6)
+    # DD-MM-YYYY o DD_MM_YYYY
+    m = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', nombre)
+    if m:
         try:
-            d2, m2, a2 = int(padded[:2]), int(padded[2:4]), 2000 + int(padded[4:])
-            return date(a2, m2, d2), f"DDMMYY ({s} → {d2:02d}/{m2:02d}/{a2})"
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1))), f"DD-MM-YYYY desde nombre ({m.group()})"
         except: pass
 
-    for fmt in ('%d-%m-%Y','%d/%m/%Y','%d.%m.%Y','%Y-%m-%d','%d-%m-%y','%d/%m/%y'):
+    # YYYY-MM-DD o YYYY_MM_DD
+    m = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})', nombre)
+    if m:
         try:
-            dt2 = datetime.strptime(s, fmt)
-            return dt2.date(), f"texto '{fmt}' → {dt2.date()}"
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))), f"YYYY-MM-DD desde nombre ({m.group()})"
         except: pass
 
-    return None, f"no reconocido: valor='{val_raw}', limpio='{s}'"
+    # DDMMYYYY (8 dígitos seguidos)
+    m = re.search(r'(\d{8})', nombre)
+    if m:
+        s = m.group(1)
+        try:
+            return date(int(s[4:]), int(s[2:4]), int(s[:2])), f"DDMMYYYY desde nombre ({s})"
+        except: pass
+
+    # DDMMYY (6 dígitos seguidos)
+    m = re.search(r'(\d{6})', nombre)
+    if m:
+        s = m.group(1)
+        try:
+            return date(2000 + int(s[4:]), int(s[2:4]), int(s[:2])), f"DDMMYY desde nombre ({s})"
+        except: pass
+
+    return None, f"sin fecha reconocible en: '{nombre}'"
 
 
 def procesar_thdr_eficiente(file, start_date, end_date):
-    diag = {"archivo": getattr(file, 'name', '?'), "A1_raw": None,
-            "fecha_parseada": None, "en_rango": None, "filas": 0, "error": None}
+    nombre = getattr(file, 'name', str(file))
+    diag = {"archivo": nombre, "fecha_parseada": None, "en_rango": None, "filas": 0, "error": None}
     try:
-        df_raw = pd.read_excel(file, header=None)
-        val_a1 = df_raw.iloc[0, 0]
-        diag["A1_raw"] = str(val_a1)
-
-        fch_date, desc = parsear_fecha_a1(val_a1)
+        fch_date, desc = parsear_fecha_nombre(nombre)
         diag["fecha_parseada"] = desc
 
         if fch_date is None:
-            diag["error"] = "No se pudo parsear la fecha de A1"
+            diag["error"] = "No se encontró fecha en el nombre del archivo"
             return pd.DataFrame(), diag
 
         diag["en_rango"] = f"{start_date} ≤ {fch_date} ≤ {end_date} → {start_date <= fch_date <= end_date}"
@@ -117,36 +124,50 @@ def procesar_thdr_eficiente(file, start_date, end_date):
 
         fch_dt = pd.to_datetime(fch_date).normalize()
 
-        # Cabeceras fila 0 (estaciones) y fila 1 (llegada/salida)
-        r0 = df_raw.iloc[0].copy(); r0[0] = np.nan
+        # Leer con xlrd para .xls, openpyxl para .xlsx
+        engine = "xlrd" if nombre.lower().endswith(".xls") else "openpyxl"
+        df_raw = pd.read_excel(file, header=None, engine=engine)
+
+        # --- Construcción de cabeceras ---
+        # Fila 0: fecha en col 0, estaciones desde col 11 (con merged cells = ffill)
+        # Fila 1: nombres de columnas base (Viaje, Tren, ..., Hora Llegada, Hora Salida, ...)
+        r0 = df_raw.iloc[0].copy()
+        r0[0] = np.nan          # quitar la fecha del ffill
         h1 = r0.ffill().astype(str)
         h2 = df_raw.iloc[1].fillna('').astype(str)
-        cols = [f"{stn.strip()}_{tip.strip()}" if (tip and stn != 'nan') else stn.strip()
-                for stn, tip in zip(h1, h2)]
 
-        # Detectar fila inicio de datos (primera fila con >2 celdas no vacías después de fila 2)
-        data_start = 5
-        for i in range(2, min(10, len(df_raw))):
-            if df_raw.iloc[i].dropna().shape[0] > 2:
-                data_start = i
-                break
+        cols = []
+        for stn, tip in zip(h1, h2):
+            stn, tip = str(stn).strip(), str(tip).strip()
+            if stn == 'nan' or stn == '':
+                cols.append(tip if tip else '_vacio')
+            else:
+                cols.append(f"{stn}_{tip}" if tip else stn)
 
-        df = df_raw.iloc[data_start:].copy().reset_index(drop=True)
-        n_cols = len(df.columns)
-        cols_adj = (cols[:n_cols] if len(cols) >= n_cols
-                    else cols + [f"_C{j}" for j in range(n_cols - len(cols))])
+        # --- Datos desde fila 5 (índice 5, saltando las 3 filas vacías) ---
+        df = df_raw.iloc[5:].copy().reset_index(drop=True)
+        n = len(df.columns)
+        cols_adj = cols[:n] if len(cols) >= n else cols + [f"_C{j}" for j in range(n - len(cols))]
         df.columns = cols_adj
         df = make_columns_unique(df).dropna(how='all', axis=0).reset_index(drop=True)
 
+        # Convertir columnas de hora a minutos
         for col in df.columns:
-            if any(k in str(col) for k in ['Hora', 'Salida', 'Llegada']):
+            if any(k in str(col) for k in ['Hora Llegada', 'Hora Salida', 'Hora Salida Programada']):
                 df[f"{col}_min"] = df[col].apply(convertir_a_minutos)
 
-        c_m2 = next((c for c in df.columns if 'Motriz 2' in str(c)), None)
-        df['Unidad'] = df[c_m2].apply(lambda x: 'M' if parse_latam_number(x) > 0 else 'S') if c_m2 else 'S'
-        df['Tren-Km'] = 43.13 * df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
+        # Unidad: leer directo de la columna (ya tiene 'M' o vacío)
+        if 'Unidad' in df.columns:
+            df['Unidad'] = df['Unidad'].fillna('S').replace('', 'S')
+        else:
+            # Fallback: derivar de Motriz 2
+            c_m2 = next((c for c in df.columns if 'Motriz 2' in str(c)), None)
+            df['Unidad'] = df[c_m2].apply(lambda x: 'M' if parse_latam_number(x) > 0 else 'S') if c_m2 else 'S'
+
+        df['Tren-Km'] = 43.13 * df['Unidad'].apply(lambda x: 2 if str(x).strip() == 'M' else 1)
         df['Fecha_Op'] = fch_dt
 
+        # Hora de referencia (salida desde Puerto o Limache)
         col_ref = next((c for c in df.columns
                         if ('PUERTO' in str(c).upper() or 'LIMACHE' in str(c).upper())
                         and 'Salida' in str(c) and '_min' in str(c)), None)
