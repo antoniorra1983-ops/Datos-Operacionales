@@ -10,6 +10,7 @@ from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import traceback
 
 # --- 1. CONFIGURACIÓN Y ESTILOS ---
 st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
@@ -105,7 +106,7 @@ def to_excel_consolidado(df_ops, df_tr, df_tr_acum, df_seat, df_p_d, df_p_15, df
             if not df.empty: df.to_excel(writer, index=False, sheet_name=name)
     return output.getvalue()
 
-# --- 3. FUNCIONES PARA PROCESAR THDR (MEJORADAS) ---
+# --- 3. FUNCIONES PARA PROCESAR THDR (MEJORADAS CON DEPURACIÓN) ---
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "":
         return None
@@ -159,11 +160,13 @@ def extraer_fecha_desde_nombre_archivo(nombre_archivo):
 
 def procesar_thdr_avanzado(file, start_date=None, end_date=None):
     try:
+        # Leer archivo sin cabeceras
         try:
             df_raw = pd.read_excel(file, header=None, engine=None)
-        except Exception:
+        except Exception as e:
             df_raw = pd.read_excel(file, header=None, engine='xlrd')
         
+        # Las dos primeras filas contienen los encabezados
         header0 = df_raw.iloc[0].fillna('').astype(str)
         header1 = df_raw.iloc[1].fillna('').astype(str)
         column_names = []
@@ -177,6 +180,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df = df_raw.iloc[2:].copy()
         df.columns = column_names
         
+        # Buscar columnas de interés
         def buscar_columna(nombres_posibles):
             for col in df.columns:
                 for posible in nombres_posibles:
@@ -190,6 +194,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         col_motriz2 = buscar_columna(['Motriz 2', 'Motriz2', 'M2', 'Motor 2'])
         col_unidad = buscar_columna(['Unidad', 'Tren', 'Formación'])
         
+        # Asignar valores por defecto
         df['Servicio'] = df[col_servicio] if col_servicio is not None else 0
         df['Hora_Prog'] = df[col_hora_prog] if col_hora_prog is not None else '00:00:00'
         
@@ -215,21 +220,22 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
                     elif 'llegada' in col.lower():
                         columnas_horas[f"{est}_llegada"] = col
         
-        # Convertir las columnas detectadas a minutos
+        # Convertir las columnas detectadas a minutos y formato
         for key, col in columnas_horas.items():
             df[f"{key}_min"] = df[col].apply(convertir_a_minutos)
+            df[f"{key}_fmt"] = df[f"{key}_min"].apply(lambda x: format_hms(x) if pd.notna(x) else "")
         
         # Obtener hora de salida de Puerto y llegada a Limache para métricas básicas
-        puerto_salida_col = columnas_horas.get('puerto_salida')
-        limache_llegada_col = columnas_horas.get('limache_llegada')
+        puerto_salida_key = 'puerto_salida_min' if 'puerto_salida_min' in df.columns else None
+        limache_llegada_key = 'limache_llegada_min' if 'limache_llegada_min' in df.columns else None
         
-        if puerto_salida_col:
-            df['Hora_Salida_Real'] = df[f"{puerto_salida_col}_min"] if f"{puerto_salida_col}_min" in df.columns else None
+        if puerto_salida_key:
+            df['Hora_Salida_Real'] = df[puerto_salida_key]
         else:
             df['Hora_Salida_Real'] = None
         
-        if limache_llegada_col:
-            df['Hora_Llegada_Real'] = df[f"{limache_llegada_col}_min"] if f"{limache_llegada_col}_min" in df.columns else None
+        if limache_llegada_key:
+            df['Hora_Llegada_Real'] = df[limache_llegada_key]
         else:
             df['Hora_Llegada_Real'] = None
         
@@ -237,7 +243,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         df['Retraso'] = df['Hora_Salida_Real'] - df['Min_Prog']
         df['Puntual'] = (abs(df['Retraso']) <= 5).astype(int)
         
-        if puerto_salida_col and limache_llegada_col:
+        if puerto_salida_key and limache_llegada_key:
             tdv = df['Hora_Llegada_Real'] - df['Hora_Salida_Real']
             tdv = tdv.apply(lambda x: x if x > 0 else x + 1440)
             df['TDV_Min'] = tdv
@@ -245,32 +251,27 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
             df['TDV_Min'] = 0
         
         # Determinar tipo de recorrido para distancia
-        # Inicializar origen y destino con valores por defecto
         origen = 'OTRO'
         destino = 'OTRO'
-        
-        # Buscar origen (puerto) y destino (limache) en las columnas de estaciones
+        # Buscar si existe columna de puerto (origen) y limache (destino)
         if any('puerto' in key for key in columnas_horas.keys()):
             origen = 'PU'
         if any('limache' in key for key in columnas_horas.keys()):
             destino = 'LI'
-        
-        # Si no se encontró origen o destino, intentar con los nombres de las columnas originales
-        if origen == 'OTRO' and destino == 'OTRO':
-            # Buscar en los nombres de las columnas (sin distinguir llegada/salida)
+        # Si no, intentar con nombres de columnas genéricas
+        if origen == 'OTRO' or destino == 'OTRO':
             for col in df.columns:
                 if 'puerto' in col.lower():
                     origen = 'PU'
                 if 'limache' in col.lower():
                     destino = 'LI'
-        
         df['Tipo_Rec'] = f"{origen}-{destino}" if origen != 'OTRO' and destino != 'OTRO' else 'OTRO'
         
         df['Dist_Base'] = df['Tipo_Rec'].map(DISTANCIAS).fillna(0)
         df['Peso'] = df['Unidad'].apply(lambda x: 2 if x == 'M' else 1)
         df['Tren-Km'] = df['Dist_Base'] * df['Peso']
         
-        # Extraer fecha
+        # Extraer fecha de operación
         col_fecha = buscar_columna(['Fecha', 'FECHA', 'Date', 'Día'])
         if col_fecha:
             df['Fecha_Op'] = pd.to_datetime(df[col_fecha], errors='coerce')
@@ -284,21 +285,15 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
                     dia, mes, anio = int(primera_celda[0:2]), int(primera_celda[2:4]), 2000 + int(primera_celda[4:6])
                     df['Fecha_Op'] = pd.Timestamp(date(anio, mes, dia))
                 except:
-                    df['Fecha_Op'] = pd.NaT
+                    # Si todo falla, asignar fecha actual
+                    df['Fecha_Op'] = pd.Timestamp(date.today())
         
         df['Fecha_Op'] = pd.to_datetime(df['Fecha_Op'], errors='coerce')
         
+        # Filtrar por rango de fechas
         if start_date and end_date and not df.empty:
             mask = (df['Fecha_Op'].dt.date >= start_date) & (df['Fecha_Op'].dt.date <= end_date)
             df = df[mask].copy()
-        
-        # Renombrar columnas de minutos formateadas para su uso posterior
-        for key in columnas_horas.keys():
-            if f"{key}_min" in df.columns:
-                df[f"{key}_fmt"] = df[f"{key}_min"].apply(lambda x: format_hms(x) if pd.notna(x) else "")
-        
-        # Guardar el diccionario de columnas formateadas en el DataFrame como metadato (no se usa directamente)
-        df.attrs['columnas_estaciones'] = {key: f"{key}_fmt" for key in columnas_horas.keys()}
         
         # Eliminar columnas duplicadas
         df = df.loc[:, ~df.columns.duplicated()]
@@ -310,8 +305,7 @@ def procesar_thdr_avanzado(file, start_date=None, end_date=None):
         
         return df
     except Exception as e:
-        st.error(f"Error procesando THDR {file.name}: {e}")
-        import traceback
+        st.error(f"Error procesando THDR {file.name}: {str(e)}")
         st.error(traceback.format_exc())
         return pd.DataFrame()
 
@@ -434,6 +428,8 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
             if not df.empty:
                 df['Vía'] = 'Vía 1'
                 thdr_v1_list.append(df)
+            else:
+                st.warning(f"No se pudieron procesar datos de {file.name} (DataFrame vacío)")
         if thdr_v1_list:
             df_thdr_v1 = pd.concat(thdr_v1_list, ignore_index=True)
     if f_v2:
@@ -442,6 +438,8 @@ if f_v1 or f_v2 or f_umr or f_seat_files or f_bill_files:
             if not df.empty:
                 df['Vía'] = 'Vía 2'
                 thdr_v2_list.append(df)
+            else:
+                st.warning(f"No se pudieron procesar datos de {file.name} (DataFrame vacío)")
         if thdr_v2_list:
             df_thdr_v2 = pd.concat(thdr_v2_list, ignore_index=True)
 
@@ -939,7 +937,7 @@ with tabs[6]:
     else:
         st.success("No hay anomalías detectadas en la selección actual.")
 
-# ================== PESTAÑA THDR (MEJORADA: TODAS LAS ESTACIONES, SALIDAS Y LLEGADAS, ORDENADAS POR VÍA) ==================
+# ================== PESTAÑA THDR (MEJORADA) ==================
 with tabs[7]:
     st.header("📋 Datos THDR - Vía 1 y Vía 2")
     
@@ -995,11 +993,10 @@ with tabs[7]:
         
         df_display = df.copy()
         
-        # Identificar columnas formateadas de estaciones (deben tener sufijo _fmt)
+        # Identificar columnas formateadas de estaciones (sufijo _fmt)
         columnas_fmt = [col for col in df_display.columns if col.endswith('_fmt')]
         if not columnas_fmt:
             st.warning("No se encontraron columnas de horas formateadas. Mostrando datos básicos.")
-            # Mostrar al menos las columnas básicas
             columnas_base = ['Fecha_Op', 'Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
             columnas_existentes = [col for col in columnas_base if col in df_display.columns]
             df_final = df_display[columnas_existentes].copy()
@@ -1009,7 +1006,7 @@ with tabs[7]:
             st.dataframe(df_final, use_container_width=True)
             return
         
-        # Mapeo de claves a nombres legibles
+        # Mapeo de nombres legibles
         mapeo_nombres = {
             'puerto_salida_fmt': 'Puerto Salida',
             'puerto_llegada_fmt': 'Puerto Llegada',
@@ -1034,7 +1031,7 @@ with tabs[7]:
         if 'Fecha_Op' in df_display.columns:
             columnas_finales.append(('Fecha', df_display['Fecha_Op'].dt.strftime('%d/%m/%Y')))
         
-        # Servicio, Motrices, Unidad, Recorrido, Tren-Km
+        # Datos básicos
         cols_basicas = ['Servicio', 'Motriz 1', 'Motriz 2', 'Unidad', 'Tipo_Rec', 'Tren-Km']
         for col in cols_basicas:
             if col in df_display.columns:
@@ -1057,7 +1054,7 @@ with tabs[7]:
                 nombre = mapeo_nombres.get(col_llegada, col_llegada.replace('_fmt', '').replace('_', ' ').title())
                 columnas_finales.append((nombre, df_display[col_llegada]))
         
-        # Añadir otras columnas útiles (Hora Programada, Retraso, TDV)
+        # Añadir otras columnas útiles
         if 'Hora_Prog' in df_display.columns:
             prog = df_display['Hora_Prog'].apply(convertir_a_minutos).apply(lambda x: format_hms(x) if pd.notna(x) else "")
             columnas_finales.append(('Hora Programada', prog))
