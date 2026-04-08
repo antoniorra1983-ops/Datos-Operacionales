@@ -1132,9 +1132,10 @@ def _precalcular(v1_json, v2_json, e_json, franjas):
     Recibe DataFrames como JSON para que st.cache_data los serialice.
     Devuelve dict {franja: {'v1': [...], 'v2': [...], 'kwh': float}}
     """
-    df_v1 = pd.read_json(v1_json) if v1_json else pd.DataFrame()
-    df_v2 = pd.read_json(v2_json) if v2_json else pd.DataFrame()
-    df_e  = pd.read_json(e_json)  if e_json  else pd.DataFrame()
+    from io import StringIO
+    df_v1 = pd.read_json(StringIO(v1_json)) if v1_json else pd.DataFrame()
+    df_v2 = pd.read_json(StringIO(v2_json)) if v2_json else pd.DataFrame()
+    df_e  = pd.read_json(StringIO(e_json))  if e_json  else pd.DataFrame()
 
     resultado = {}
     for t_min in franjas:
