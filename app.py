@@ -400,18 +400,58 @@ if _hay_archivos and _recalcular:
                     if 'PRMTE' in sn.upper():
                         f.seek(0)
                         df_pd_raw = pd.read_excel(f, sheet_name=sn, header=None, engine=engine_bill)
-                        h = next((i for i in range(len(df_pd_raw)) if 'AÑO' in str(df_pd_raw.iloc[i]).upper()), 0)
+                        # Buscar fila cabecera: contiene AÑO/ANO/YEAR/FECHA
+                        h = next((i for i in range(min(20, len(df_pd_raw)))
+                                  if any(k in str(df_pd_raw.iloc[i]).upper()
+                                         for k in ['AÑO','ANO','YEAR','FECHA'])), 0)
                         f.seek(0)
                         df_pd = pd.read_excel(f, sheet_name=sn, header=h, engine=engine_bill)
-                        df_pd['ts'] = pd.to_datetime(
-                            df_pd[['AÑO','MES','DIA','HORA']].astype(int).rename(
-                                columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'}))
-                        for _, r in df_pd.iterrows():
-                            v = parse_latam_number(r.get('Retiro_Energia_Activa (kWhD)', 0))
+                        # Normalizar nombres de columna: quitar tildes, espacios, mayúsculas
+                        def _norm(c):
+                            return (str(c).upper().strip()
+                                    .replace('Á','A').replace('É','E').replace('Í','I')
+                                    .replace('Ó','O').replace('Ú','U').replace('Ñ','N'))
+                        df_pd.columns = [_norm(c) for c in df_pd.columns]
+                        cols_pd = list(df_pd.columns)
+
+                        # Mapear columnas reales a año/mes/dia/hora
+                        def _find(opciones):
+                            return next((c for c in cols_pd
+                                         if any(o in c for o in opciones)), None)
+
+                        c_anio = _find(['ANO','YEAR'])
+                        c_mes  = _find(['MES','MONTH'])
+                        c_dia  = _find(['DIA','DAY'])
+                        c_hora = _find(['HORA','HOUR'])
+                        c_fecha= _find(['FECHA','DATE','TIMESTAMP'])
+                        c_cons = _find(['RETIRO','CONSUMO','ENERGIA','ENERGY','KWH'])
+
+                        if c_anio and c_mes and c_dia and c_hora:
+                            # Formato columnas separadas AÑO/MES/DIA/HORA
+                            df_pd['ts'] = pd.to_datetime(
+                                df_pd[[c_anio,c_mes,c_dia,c_hora]].apply(
+                                    lambda r: pd.Timestamp(
+                                        year=int(r[c_anio]), month=int(r[c_mes]),
+                                        day=int(r[c_dia]),   hour=int(r[c_hora])), axis=1))
+                        elif c_fecha:
+                            # Formato columna fecha única
+                            df_pd['ts'] = pd.to_datetime(df_pd[c_fecha], errors='coerce')
+                            if c_hora and c_fecha != c_hora:
+                                df_pd['ts'] = df_pd['ts'] + pd.to_timedelta(
+                                    df_pd[c_hora].astype(str).str.extract(r'(\d+)')[0]
+                                    .fillna(0).astype(int), unit='h')
+                        else:
+                            raise ValueError(f"No se encontraron columnas de fecha. Columnas disponibles: {cols_pd}")
+
+                        for _, r in df_pd.dropna(subset=['ts']).iterrows():
+                            ts = r['ts']
+                            if not (start_date <= ts.date() <= end_date):
+                                continue
+                            v = parse_latam_number(r.get(c_cons, 0) if c_cons else 0)
                             all_prmte_full.append({
-                                "Fecha": r['ts'].normalize(),
-                                "Hora":  f"{r['ts'].hour:02d}:00",
-                                "15min": f"{r['ts'].hour:02d}:{r['ts'].minute:02d}",
+                                "Fecha": ts.normalize(),
+                                "Hora":  f"{ts.hour:02d}:00",
+                                "15min": f"{ts.hour:02d}:{ts.minute:02d}",
                                 "Consumo": v
                             })
             except Exception as e:
