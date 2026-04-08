@@ -286,7 +286,9 @@ f_seat_all      = combinar_fuentes(f_seat_files, DATA_DIRS["seat"])
 f_bill_all      = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
 
 # Clave de caché: tuple con rango + nombres de archivos
+_CACHE_VERSION = "v3_15min"  # cambiar esto fuerza recálculo en todos los usuarios
 _cache_key = (
+    _CACHE_VERSION,
     str(start_date), str(end_date),
     tuple(sorted(f.name for f in f_v1_all)),
     tuple(sorted(f.name for f in f_v2_all)),
