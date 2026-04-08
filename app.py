@@ -884,24 +884,32 @@ with tabs[9]:
     if not fechas_m: st.warning("Sin fechas disponibles."); st.stop()
 
     # ── Controles ─────────────────────────────────────────────────────────────
-    cc1,cc2,cc3=st.columns([2,3,1])
+    # Inicializar estado antes del slider
+    if 'mapa_minuto' not in st.session_state:
+        st.session_state['mapa_minuto'] = 360
+
+    # Botones ANTES del slider para que el cambio de estado se aplique al renderizar
+    cc1,cc3=st.columns([2,1])
     with cc1:
         fecha_m=st.selectbox("📅 Fecha",fechas_m,key="mapa_fecha")
-    with cc2:
-        hora_m=st.slider("🕐 Hora (minutos desde 00:00)",min_value=0,max_value=1439,
-                          value=360,step=1,key="mapa_minuto")
-        st.caption(f"Hora seleccionada: **{hora_m//60:02d}:{hora_m%60:02d}**")
     with cc3:
         use_rm=st.checkbox("Vel. RM",value=False,help="Usar velocidades de Restricción de Marcha")
 
-    hora_s=f"{hora_m//60:02d}:{hora_m%60:02d}"
-
     cp1,cp2,cp3,cp4,_=st.columns([1,1,1,1,2])
-    if cp1.button("−1 min", key="btn_m1"):  st.session_state['mapa_minuto']=max(0,hora_m-1);   st.rerun()
-    if cp2.button("+1 min", key="btn_p1"):  st.session_state['mapa_minuto']=min(1439,hora_m+1); st.rerun()
-    if cp3.button("−15 min",key="btn_m15"): st.session_state['mapa_minuto']=max(0,hora_m-15);  st.rerun()
-    if cp4.button("+15 min",key="btn_p15"): st.session_state['mapa_minuto']=min(1439,hora_m+15);st.rerun()
+    if cp1.button("−1 min", key="btn_m1"):
+        st.session_state['mapa_minuto']=max(0,   st.session_state['mapa_minuto']-1);  st.rerun()
+    if cp2.button("+1 min", key="btn_p1"):
+        st.session_state['mapa_minuto']=min(1439, st.session_state['mapa_minuto']+1); st.rerun()
+    if cp3.button("−15 min",key="btn_m15"):
+        st.session_state['mapa_minuto']=max(0,   st.session_state['mapa_minuto']-15); st.rerun()
+    if cp4.button("+15 min",key="btn_p15"):
+        st.session_state['mapa_minuto']=min(1439, st.session_state['mapa_minuto']+15);st.rerun()
+
+    # Slider renderiza DESPUÉS de los botones (lee el estado ya actualizado)
+    hora_m=st.slider("🕐 Hora",min_value=0,max_value=1439,step=1,key="mapa_minuto")
+    hora_s=f"{hora_m//60:02d}:{hora_m%60:02d}"
     st.caption(f"Trenes a las **{hora_s}** · **{fecha_m}** · Velocidades: {'RM' if use_rm else 'Normales'}")
+
 
     # ── Calcular posiciones usando perfil real ────────────────────────────────
     df_dia=df_m[df_m['Fecha_str']==fecha_m].copy()
