@@ -888,8 +888,9 @@ with tabs[9]:
     with cc1:
         fecha_m=st.selectbox("📅 Fecha",fechas_m,key="mapa_fecha")
     with cc2:
-        hora_m=st.slider("🕐 Hora",min_value=0,max_value=1439,value=360,step=1,
-                          format_func=lambda m: f"{m//60:02d}:{m%60:02d}",key="mapa_minuto")
+        hora_m=st.slider("🕐 Hora (minutos desde 00:00)",min_value=0,max_value=1439,
+                          value=360,step=1,key="mapa_minuto")
+        st.caption(f"Hora seleccionada: **{hora_m//60:02d}:{hora_m%60:02d}**")
     with cc3:
         use_rm=st.checkbox("Vel. RM",value=False,help="Usar velocidades de Restricción de Marcha")
 
