@@ -305,17 +305,22 @@ if _hay_archivos and not _recalcular and 'df_ops' in st.session_state:
     all_fact_full  = st.session_state['all_fact_full']
     all_prmte_full = st.session_state['all_prmte_full']
 
+_errores_proc = {}  # {nombre_archivo: mensaje_error}
+
 if _hay_archivos and _recalcular:
     # UMR / TRENES
     if f_umr_all:
         for f in f_umr_all:
             try:
-                xl = pd.ExcelFile(f)
+                engine_umr = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                xl = pd.ExcelFile(f, engine=engine_umr)
                 for sn in xl.sheet_names:
-                    df_raw = pd.read_excel(f, sheet_name=sn, header=None)
+                    f.seek(0)
+                    df_raw = pd.read_excel(f, sheet_name=sn, header=None, engine=engine_umr)
                     h_r = next((i for i in range(min(100, len(df_raw))) if any(k in str(df_raw.iloc[i].tolist()).upper() for k in ['FECHA', 'ODO', 'KILOM'])), None)
                     if h_r is not None:
-                        df_p = pd.read_excel(f, sheet_name=sn, header=h_r)
+                        f.seek(0)
+                        df_p = pd.read_excel(f, sheet_name=sn, header=h_r, engine=engine_umr)
                         df_p.columns = [str(c).upper().replace('Ó','O').strip() for c in df_p.columns]
                         c_f = next((c for c in df_p.columns if 'FECHA' in c), None)
                         c_o = next((c for c in df_p.columns if 'ODO' in c), None)
@@ -344,14 +349,15 @@ if _hay_archivos and _recalcular:
                                                 "Fecha": v_f.normalize(),
                                                 "Valor": parse_latam_number(df_raw.iloc[k, j])
                                             })
-            except:
-                pass
+            except Exception as e:
+                _errores_proc[f.name] = f"UMR: {e}"
 
     # SEAT
     if f_seat_all:
         for f in f_seat_all:
             try:
-                df_s = pd.read_excel(f, header=None)
+                engine_seat = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                df_s = pd.read_excel(f, header=None, engine=engine_seat)
                 for i in range(len(df_s)):
                     fs = pd.to_datetime(df_s.iloc[i, 1], errors='coerce')
                     if pd.notna(fs):
@@ -360,51 +366,57 @@ if _hay_archivos and _recalcular:
                             all_seat.append({
                                 "Fecha": fs,
                                 "E_Total": parse_latam_number(df_s.iloc[i, 3]),
-                                "E_Tr": parse_latam_number(df_s.iloc[i, 5]),
-                                "E_12": parse_latam_number(df_s.iloc[i, 7])
+                                "E_Tr":    parse_latam_number(df_s.iloc[i, 5]),
+                                "E_12":    parse_latam_number(df_s.iloc[i, 7])
                             })
-            except:
-                pass
+            except Exception as e:
+                _errores_proc[f.name] = f"SEAT: {e}"
 
     # FACTURA / PRMTE
     if f_bill_all:
         for f in f_bill_all:
             try:
-                xl = pd.ExcelFile(f)
+                engine_bill = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                f.seek(0)
+                xl = pd.ExcelFile(f, engine=engine_bill)
                 for sn in xl.sheet_names:
                     if sn == "Consumo Factura":
-                        df_f = pd.read_excel(f, sheet_name=sn)
-                        c_f = next((c for c in df_f.columns if 'FECHA' in str(c).upper()), df_f.columns[0])
-                        c_v = next((c for c in df_f.columns if 'CONSUMO' in str(c).upper() or 'VALOR' in str(c).upper()), df_f.columns[1])
-                        df_f['dt'] = pd.to_datetime(df_f[c_f], errors='coerce')
-                        for _, r in df_f.dropna(subset=['dt']).iterrows():
+                        f.seek(0)
+                        df_ff = pd.read_excel(f, sheet_name=sn, engine=engine_bill)
+                        c_f = next((c for c in df_ff.columns if 'FECHA' in str(c).upper()), df_ff.columns[0])
+                        c_v = next((c for c in df_ff.columns if 'CONSUMO' in str(c).upper() or 'VALOR' in str(c).upper()), df_ff.columns[1])
+                        df_ff['dt'] = pd.to_datetime(df_ff[c_f], errors='coerce')
+                        for _, r in df_ff.dropna(subset=['dt']).iterrows():
                             if "TOTAL" in str(r[c_f]).upper(): continue
                             v = abs(parse_latam_number(r[c_v]))
                             all_fact_full.append({
                                 "Fecha": r['dt'].normalize(),
-                                "Hora": f"{r['dt'].hour:02d}:00",
+                                "Hora":  f"{r['dt'].hour:02d}:00",
                                 "15min": f"{r['dt'].hour:02d}:{(r['dt'].minute//15)*15:02d}",
                                 "Consumo": v
                             })
                     if 'PRMTE' in sn.upper():
-                        df_pd_raw = pd.read_excel(f, sheet_name=sn, header=None)
+                        f.seek(0)
+                        df_pd_raw = pd.read_excel(f, sheet_name=sn, header=None, engine=engine_bill)
                         h = next((i for i in range(len(df_pd_raw)) if 'AÑO' in str(df_pd_raw.iloc[i]).upper()), 0)
-                        df_pd = pd.read_excel(f, sheet_name=sn, header=h)
+                        f.seek(0)
+                        df_pd = pd.read_excel(f, sheet_name=sn, header=h, engine=engine_bill)
                         df_pd['ts'] = pd.to_datetime(
-                            df_pd[['AÑO', 'MES', 'DIA', 'HORA']].astype(int).rename(
-                                columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'}
-                            )
-                        )
+                            df_pd[['AÑO','MES','DIA','HORA']].astype(int).rename(
+                                columns={'AÑO':'year','MES':'month','DIA':'day','HORA':'hour'}))
                         for _, r in df_pd.iterrows():
                             v = parse_latam_number(r.get('Retiro_Energia_Activa (kWhD)', 0))
                             all_prmte_full.append({
                                 "Fecha": r['ts'].normalize(),
-                                "Hora": f"{r['ts'].hour:02d}:00",
+                                "Hora":  f"{r['ts'].hour:02d}:00",
                                 "15min": f"{r['ts'].hour:02d}:{r['ts'].minute:02d}",
                                 "Consumo": v
                             })
-            except:
-                pass
+            except Exception as e:
+                _errores_proc[f.name] = f"Factura/PRMTE: {e}"
+
+    if _errores_proc:
+        st.session_state['_errores_proc'] = _errores_proc
 
     # CONSOLIDACIÓN
     if all_ops:
@@ -499,6 +511,13 @@ tabs = st.tabs([
 
 # TAB 0: RESUMEN
 with tabs[0]:
+    # Mostrar errores de procesamiento si los hay
+    _ep = st.session_state.get('_errores_proc', {})
+    if _ep:
+        with st.expander(f"⚠️ {len(_ep)} archivo(s) con error al procesar", expanded=True):
+            for _nombre, _msg in _ep.items():
+                st.error(f"**{_nombre}**: {_msg}")
+
     if not df_ops.empty:
         df_rf = df_ops.copy()
         c1, c2, c3 = st.columns(3)
