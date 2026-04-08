@@ -209,13 +209,16 @@ def listar_archivos(carpeta):
 class _ArchivoEnDisco:
     """Wrapper de archivo en disco compatible con pd.read_excel y getattr(f, 'name')."""
     def __init__(self, path):
+        from io import BytesIO
         self.name = os.path.basename(path)
         self._path = path
-    def read(self):
-        with open(self._path, 'rb') as f: return f.read()
-    def getbuffer(self):
-        with open(self._path, 'rb') as f: return f.read()
-    def __str__(self): return self._path
+        with open(path, 'rb') as f:
+            self._bio = BytesIO(f.read())
+    def read(self, *a, **kw):   return self._bio.read(*a, **kw)
+    def seek(self, *a, **kw):   return self._bio.seek(*a, **kw)
+    def tell(self, *a, **kw):   return self._bio.tell(*a, **kw)
+    def getbuffer(self):        return self._bio.getvalue()
+    def __str__(self):          return self._path
 
 def combinar_fuentes(uploaded_list, carpeta):
     nombres_subidos = {uf.name for uf in (uploaded_list or [])}
