@@ -400,59 +400,52 @@ if _hay_archivos and _recalcular:
                     if 'PRMTE' in sn.upper():
                         f.seek(0)
                         df_pd_raw = pd.read_excel(f, sheet_name=sn, header=None, engine=engine_bill)
-                        # Buscar fila cabecera: contiene AÑO/ANO/YEAR/FECHA
+                        # Buscar fila cabecera (contiene AÑO o ANO)
                         h = next((i for i in range(min(20, len(df_pd_raw)))
                                   if any(k in str(df_pd_raw.iloc[i]).upper()
-                                         for k in ['AÑO','ANO','YEAR','FECHA'])), 0)
+                                         for k in ['AÑO','ANO','YEAR'])), 0)
                         f.seek(0)
                         df_pd = pd.read_excel(f, sheet_name=sn, header=h, engine=engine_bill)
-                        # Normalizar nombres de columna: quitar tildes, espacios, mayúsculas
-                        def _norm(c):
-                            return (str(c).upper().strip()
-                                    .replace('Á','A').replace('É','E').replace('Í','I')
-                                    .replace('Ó','O').replace('Ú','U').replace('Ñ','N'))
-                        df_pd.columns = [_norm(c) for c in df_pd.columns]
-                        cols_pd = list(df_pd.columns)
+                        df_pd = df_pd.dropna(how='all')
 
-                        # Mapear columnas reales a año/mes/dia/hora
-                        def _find(opciones):
-                            return next((c for c in cols_pd
-                                         if any(o in c for o in opciones)), None)
+                        # Columnas de timestamp
+                        c_anio  = next((c for c in df_pd.columns if str(c).upper().replace('Ñ','N').startswith('AN')), None)
+                        c_mes   = next((c for c in df_pd.columns if str(c).upper().startswith('MES')), None)
+                        c_dia   = next((c for c in df_pd.columns if str(c).upper().startswith('DIA')), None)
+                        c_hora  = next((c for c in df_pd.columns if str(c).upper() == 'HORA'), None)
+                        c_ini   = next((c for c in df_pd.columns if 'INICIO' in str(c).upper()), None)
 
-                        c_anio = _find(['ANO','YEAR'])
-                        c_mes  = _find(['MES','MONTH'])
-                        c_dia  = _find(['DIA','DAY'])
-                        c_hora = _find(['HORA','HOUR'])
-                        c_fecha= _find(['FECHA','DATE','TIMESTAMP'])
-                        c_cons = _find(['RETIRO','CONSUMO','ENERGIA','ENERGY','KWH'])
+                        if not (c_anio and c_mes and c_dia and c_hora):
+                            raise ValueError(f"Columnas de fecha no encontradas. Disponibles: {list(df_pd.columns)}")
 
-                        if c_anio and c_mes and c_dia and c_hora:
-                            # Formato columnas separadas AÑO/MES/DIA/HORA
-                            df_pd['ts'] = pd.to_datetime(
-                                df_pd[[c_anio,c_mes,c_dia,c_hora]].apply(
-                                    lambda r: pd.Timestamp(
-                                        year=int(r[c_anio]), month=int(r[c_mes]),
-                                        day=int(r[c_dia]),   hour=int(r[c_hora])), axis=1))
-                        elif c_fecha:
-                            # Formato columna fecha única
-                            df_pd['ts'] = pd.to_datetime(df_pd[c_fecha], errors='coerce')
-                            if c_hora and c_fecha != c_hora:
-                                df_pd['ts'] = df_pd['ts'] + pd.to_timedelta(
-                                    df_pd[c_hora].astype(str).str.extract(r'(\d+)')[0]
-                                    .fillna(0).astype(int), unit='h')
-                        else:
-                            raise ValueError(f"No se encontraron columnas de fecha. Columnas disponibles: {cols_pd}")
+                        # Construir timestamp con minutos del intervalo
+                        def _build_ts(r):
+                            try:
+                                minuto = int(r[c_ini]) if c_ini and not pd.isna(r[c_ini]) else 0
+                                return pd.Timestamp(year=int(r[c_anio]), month=int(r[c_mes]),
+                                                    day=int(r[c_dia]),   hour=int(r[c_hora]),
+                                                    minute=minuto)
+                            except:
+                                return pd.NaT
+
+                        df_pd['ts'] = df_pd.apply(_build_ts, axis=1)
+
+                        # Sumar todas las columnas Retiro_Energia_Activa (H1 + H2 + ...)
+                        cols_retiro = [c for c in df_pd.columns if 'Retiro_Energia_Activa' in str(c)]
+                        if not cols_retiro:
+                            cols_retiro = [c for c in df_pd.columns if 'RETIRO' in str(c).upper()
+                                           or ('ENERGIA' in str(c).upper() and 'ACTIVA' in str(c).upper())]
 
                         for _, r in df_pd.dropna(subset=['ts']).iterrows():
                             ts = r['ts']
-                            if not (start_date <= ts.date() <= end_date):
+                            if pd.isna(ts) or not (start_date <= ts.date() <= end_date):
                                 continue
-                            v = parse_latam_number(r.get(c_cons, 0) if c_cons else 0)
+                            consumo = sum(parse_latam_number(r.get(c, 0)) for c in cols_retiro)
                             all_prmte_full.append({
                                 "Fecha": ts.normalize(),
                                 "Hora":  f"{ts.hour:02d}:00",
                                 "15min": f"{ts.hour:02d}:{ts.minute:02d}",
-                                "Consumo": v
+                                "Consumo": consumo
                             })
             except Exception as e:
                 _errores_proc[f.name] = f"Factura/PRMTE: {e}"
@@ -641,18 +634,57 @@ with tabs[3]:
         if all_prmte_full:
             df_p = pd.DataFrame(all_prmte_full)
             df_p['Fecha_Str'] = df_p['Fecha'].dt.strftime('%Y-%m-%d')
-            st.write("#### 📅 PRMTE Diario")
-            st.dataframe(
-                df_p.groupby("Fecha_Str")["Consumo"].sum().reset_index()
-                .style.format({'Consumo': "{:,.0f}"}),
-                use_container_width=True
+
+            # Métricas rápidas
+            total_kwh = df_p['Consumo'].sum()
+            dias = df_p['Fecha_Str'].nunique()
+            pico_row = df_p.loc[df_p['Consumo'].idxmax()]
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total kWh", f"{total_kwh:,.0f}")
+            m2.metric("Días cargados", f"{dias}")
+            m3.metric("Pico 15 min", f"{pico_row['Consumo']:,.0f} kWh",
+                      f"{pico_row['Fecha_Str']} {pico_row['15min']}")
+
+            # Selector de fecha
+            fechas_p = sorted(df_p['Fecha_Str'].unique())
+            col_f, col_v = st.columns([2, 1])
+            fecha_p_sel = col_f.selectbox("Fecha", fechas_p, key="prmte_fecha")
+            vista_p = col_v.radio("Vista", ["15 min", "Horario", "Diario"], horizontal=True, key="prmte_vista")
+
+            df_p_sel = df_p[df_p['Fecha_Str'] == fecha_p_sel]
+
+            if vista_p == "15 min":
+                df_show = (df_p_sel.groupby("15min")["Consumo"].sum()
+                           .reset_index().rename(columns={"15min": "Franja", "Consumo": "kWh"}))
+                df_show = df_show.sort_values("Franja")
+            elif vista_p == "Horario":
+                df_show = (df_p_sel.groupby("Hora")["Consumo"].sum()
+                           .reset_index().rename(columns={"Hora": "Franja", "Consumo": "kWh"}))
+                df_show = df_show.sort_values("Franja")
+            else:
+                df_show = (df_p.groupby("Fecha_Str")["Consumo"].sum()
+                           .reset_index().rename(columns={"Fecha_Str": "Franja", "Consumo": "kWh"}))
+
+            # Gráfico de barras
+            fig_p = go.Figure(go.Bar(
+                x=df_show['Franja'], y=df_show['kWh'],
+                marker_color='#005195',
+                hovertemplate='<b>%{x}</b><br>%{y:,.0f} kWh<extra></extra>'
+            ))
+            fig_p.update_layout(
+                title=f"PRMTE — {fecha_p_sel} ({vista_p})" if vista_p != "Diario" else "PRMTE — Consumo diario",
+                xaxis_title="Franja", yaxis_title="kWh",
+                xaxis=dict(tickangle=-45),
+                height=380
             )
-            st.write("#### ⏱️ PRMTE por Hora")
-            st.dataframe(
-                df_p.groupby(["Fecha_Str", "Hora"])["Consumo"].sum().reset_index()
-                .style.format({'Consumo': "{:,.0f}"}),
-                use_container_width=True
-            )
+            st.plotly_chart(fig_p, use_container_width=True)
+
+            # Tabla
+            with st.expander("📋 Ver tabla"):
+                st.dataframe(
+                    df_show.style.format({'kWh': "{:,.1f}"}),
+                    use_container_width=True, height=300
+                )
         else:
             st.info("📂 Sin datos PRMTE.")
     with e_tabs[2]:
