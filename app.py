@@ -548,7 +548,8 @@ tabs = st.tabs([
     "⚖️ Comparación hr",
     "📈 Regresión",
     "🚨 Atípicos",
-    "📋 THDR"
+    "📋 THDR",
+    "🔬 Servicios vs Energía"
 ])
 
 # TAB 0: RESUMEN
@@ -824,5 +825,224 @@ with tabs[7]:
     with t_v2:
         render_via_thdr(df_thdr_v2, "Vía 2")
 
-    if not diags:
-        st.info("📂 Sube archivos THDR desde el panel lateral (Vía 1 o Vía 2).")
+
+
+# TAB 8: SERVICIOS VS ENERGÍA
+with tabs[8]:
+    st.header("🔬 Servicios vs Consumo de Energía (15 min)")
+
+    # --- Verificar datos disponibles ---
+    _tiene_prmte = len(all_prmte_full) > 0
+    _tiene_thdr  = not df_thdr_v1.empty or not df_thdr_v2.empty
+
+    if not _tiene_prmte and not _tiene_thdr:
+        st.info("📂 Sube archivos PRMTE (en Facturación) y THDR (Vía 1 y/o Vía 2) para este análisis.")
+        st.stop()
+
+    col_av, col_at = st.columns(2)
+    col_av.metric("PRMTE disponible", "✅" if _tiene_prmte else "❌ Sin datos")
+    col_at.metric("THDR disponible",  "✅" if _tiene_thdr  else "❌ Sin datos")
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+    def minutos_a_franja15(minutos):
+        """Convierte minutos flotantes a string HH:MM redondeado a 15 min."""
+        if minutos is None or (isinstance(minutos, float) and np.isnan(minutos)):
+            return None
+        total = int(minutos)
+        h = total // 60
+        m = (total % 60 // 15) * 15
+        if h >= 24:
+            return None
+        return f"{h:02d}:{m:02d}"
+
+    def str_franja_a_minutos(s):
+        """HH:MM → minutos para ordenar."""
+        try:
+            h, m = map(int, s.split(':'))
+            return h * 60 + m
+        except:
+            return 0
+
+    # ── Construir series de SERVICIOS por franja 15 min ──────────────────────
+    df_servicios = pd.DataFrame()
+    if _tiene_thdr:
+        partes = [df for df in [df_thdr_v1, df_thdr_v2] if not df.empty]
+        df_all_thdr = pd.concat(partes, ignore_index=True)
+        df_all_thdr['Fecha_str'] = df_all_thdr['Fecha_Op'].dt.strftime('%Y-%m-%d')
+
+        # Usar Hora_Ref_Min si existe, sino buscar cualquier columna _min de salida
+        if 'Hora_Ref_Min' not in df_all_thdr.columns:
+            col_min_ref = next((c for c in df_all_thdr.columns
+                                if '_min' in c and 'Salida' in c), None)
+            if col_min_ref:
+                df_all_thdr['Hora_Ref_Min'] = df_all_thdr[col_min_ref]
+
+        if 'Hora_Ref_Min' in df_all_thdr.columns:
+            df_all_thdr['Franja'] = df_all_thdr['Hora_Ref_Min'].apply(minutos_a_franja15)
+            df_servicios = (df_all_thdr
+                .dropna(subset=['Franja'])
+                .groupby(['Fecha_str', 'Franja'])
+                .agg(Servicios=('Unidad', 'count'),
+                     Servicios_M=('Unidad', lambda x: (x.astype(str).str.strip()=='M').sum()))
+                .reset_index()
+                .rename(columns={'Fecha_str': 'Fecha'}))
+
+    # ── Construir series de ENERGÍA por franja 15 min ────────────────────────
+    df_energia = pd.DataFrame()
+    if _tiene_prmte:
+        df_prmte = pd.DataFrame(all_prmte_full)
+        df_prmte['Fecha'] = df_prmte['Fecha'].dt.strftime('%Y-%m-%d')
+        df_energia = (df_prmte
+            .groupby(['Fecha', '15min'])['Consumo'].sum()
+            .reset_index()
+            .rename(columns={'15min': 'Franja', 'Consumo': 'kWh'}))
+
+    # ── Merge ─────────────────────────────────────────────────────────────────
+    if df_servicios.empty and df_energia.empty:
+        st.warning("Sin datos suficientes para el análisis.")
+        st.stop()
+
+    if not df_servicios.empty and not df_energia.empty:
+        df_merge = pd.merge(df_energia, df_servicios, on=['Fecha', 'Franja'], how='outer').fillna(0)
+    elif not df_energia.empty:
+        df_merge = df_energia.copy()
+        df_merge['Servicios'] = 0
+        df_merge['Servicios_M'] = 0
+    else:
+        df_merge = df_servicios.copy()
+        df_merge['kWh'] = 0
+
+    df_merge['_ord'] = df_merge['Franja'].apply(str_franja_a_minutos)
+    df_merge = df_merge.sort_values(['Fecha', '_ord']).drop(columns='_ord')
+
+    # ── Filtros ───────────────────────────────────────────────────────────────
+    fechas_disp = sorted(df_merge['Fecha'].unique())
+    if not fechas_disp:
+        st.warning("Sin fechas en el rango seleccionado.")
+        st.stop()
+
+    st.divider()
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
+    with col_f1:
+        modo = st.radio("Vista", ["Por día", "Promedio del período"], horizontal=True)
+    with col_f2:
+        if modo == "Por día":
+            fecha_sel = st.selectbox("Fecha", fechas_disp)
+            df_plot = df_merge[df_merge['Fecha'] == fecha_sel].copy()
+        else:
+            df_plot = df_merge.groupby('Franja').agg(
+                kWh=('kWh','mean'),
+                Servicios=('Servicios','mean'),
+                Servicios_M=('Servicios_M','mean')
+            ).reset_index()
+            df_plot['_ord'] = df_plot['Franja'].apply(str_franja_a_minutos)
+            df_plot = df_plot.sort_values('_ord').drop(columns='_ord')
+    with col_f3:
+        mostrar_m = st.checkbox("Solo tracción doble (M)", value=False)
+
+    col_srv = 'Servicios_M' if mostrar_m else 'Servicios'
+    lbl_srv = 'Servicios tracción doble' if mostrar_m else 'Servicios totales'
+
+    # ── Métricas rápidas ─────────────────────────────────────────────────────
+    if not df_plot.empty:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total kWh",        f"{df_plot['kWh'].sum():,.0f}")
+        m2.metric("Pico kWh (franja)", f"{df_plot['kWh'].max():,.0f}",
+                  df_plot.loc[df_plot['kWh'].idxmax(), 'Franja'])
+        m3.metric("Total servicios",   f"{df_plot[col_srv].sum():.0f}")
+        m4.metric("Pico servicios",    f"{df_plot[col_srv].max():.0f}",
+                  df_plot.loc[df_plot[col_srv].idxmax(), 'Franja'] if df_plot[col_srv].max() > 0 else "—")
+
+    st.divider()
+
+    # ── Gráfico principal: dual axis ──────────────────────────────────────────
+    if not df_plot.empty:
+        fig_dual = go.Figure()
+
+        fig_dual.add_trace(go.Bar(
+            x=df_plot['Franja'], y=df_plot['kWh'],
+            name='Energía PRMTE (kWh)',
+            marker_color='rgba(0,81,149,0.7)',
+            yaxis='y1'
+        ))
+        fig_dual.add_trace(go.Scatter(
+            x=df_plot['Franja'], y=df_plot[col_srv],
+            name=lbl_srv,
+            mode='lines+markers',
+            line=dict(color='#E85500', width=2),
+            marker=dict(size=5),
+            yaxis='y2'
+        ))
+
+        titulo = (f"Energía vs Servicios — {fecha_sel}"
+                  if modo == "Por día"
+                  else f"Energía vs Servicios — Promedio {fechas_disp[0]} a {fechas_disp[-1]}")
+
+        fig_dual.update_layout(
+            title=titulo,
+            xaxis=dict(title="Franja 15 min", tickangle=-45,
+                       tickmode='array',
+                       tickvals=df_plot['Franja'][::4].tolist()),
+            yaxis =dict(title="kWh",       side='left',  showgrid=True),
+            yaxis2=dict(title="Servicios", side='right', overlaying='y', showgrid=False),
+            legend=dict(orientation='h', y=1.08),
+            hovermode='x unified',
+            height=450,
+        )
+        st.plotly_chart(fig_dual, use_container_width=True)
+
+    # ── Correlación ───────────────────────────────────────────────────────────
+    df_corr = df_plot.dropna(subset=['kWh', col_srv])
+    df_corr = df_corr[(df_corr['kWh'] > 0) & (df_corr[col_srv] > 0)]
+
+    if len(df_corr) >= 5:
+        st.divider()
+        corr = np.corrcoef(df_corr['kWh'].values, df_corr[col_srv].values)[0, 1]
+        st.subheader(f"📐 Correlación energía ↔ servicios: **{corr:.3f}**")
+
+        interp = ("muy alta 🟢" if abs(corr) > 0.8
+                  else "alta 🟡" if abs(corr) > 0.6
+                  else "moderada 🟠" if abs(corr) > 0.4
+                  else "baja 🔴")
+        st.caption(f"Correlación {interp}. {'Positiva: más servicios → más consumo.' if corr > 0 else 'Negativa: relación inversa.'}")
+
+        # Scatter correlación
+        coef = np.polyfit(df_corr[col_srv].values, df_corr['kWh'].values, 1)
+        x_line = np.linspace(df_corr[col_srv].min(), df_corr[col_srv].max(), 100)
+        y_line = np.polyval(coef, x_line)
+
+        fig_sc = go.Figure()
+        fig_sc.add_trace(go.Scatter(
+            x=df_corr[col_srv], y=df_corr['kWh'],
+            mode='markers',
+            text=df_corr['Franja'],
+            hovertemplate='<b>%{text}</b><br>Servicios: %{x}<br>kWh: %{y:,.0f}<extra></extra>',
+            marker=dict(color='#005195', size=7, opacity=0.7),
+            name='Franjas'
+        ))
+        fig_sc.add_trace(go.Scatter(
+            x=x_line, y=y_line, mode='lines',
+            line=dict(color='#E85500', dash='dash'),
+            name=f'Tendencia (R²={corr**2:.3f})'
+        ))
+        fig_sc.update_layout(
+            title='Dispersión: Servicios vs kWh por franja',
+            xaxis_title=lbl_srv,
+            yaxis_title='kWh',
+            height=380
+        )
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+    # ── Tabla detalle ─────────────────────────────────────────────────────────
+    with st.expander("📋 Ver tabla de datos"):
+        cols_show = ['Franja', 'kWh', 'Servicios', 'Servicios_M']
+        cols_show = [c for c in cols_show if c in df_plot.columns]
+        st.dataframe(
+            df_plot[cols_show].style.format({
+                'kWh': '{:,.1f}',
+                'Servicios': '{:.1f}',
+                'Servicios_M': '{:.1f}'
+            }),
+            use_container_width=True,
+            height=300
+        )
