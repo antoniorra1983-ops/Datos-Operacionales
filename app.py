@@ -67,9 +67,12 @@ def get_tipo_dia(fch):
     return "L"
 
 def format_hm_short(minutos_float):
-    if pd.isna(minutos_float): return "00:00"
-    h, m = divmod(int(minutos_float), 60)
-    return f"{h:02d}:{m:02d}"
+    if pd.isna(minutos_float): return "00:00:00"
+    total_seg = int(round(minutos_float * 60))
+    h = total_seg // 3600
+    m = (total_seg % 3600) // 60
+    s = total_seg % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 # --- 3. MOTOR THDR (A1: FECHA | 2 CABECERAS | 3 FILAS VACÍAS | DATA) ---
 def convertir_a_minutos(val):
@@ -536,14 +539,6 @@ if _hay_archivos and _recalcular:
         st.session_state['diag_thdr'] = diagnosticos_thdr
 
     # Guardar resultados en session_state y marcar caché
-    st.session_state['df_ops']     = df_ops
-    st.session_state['df_thdr_v1'] = df_thdr_v1
-    st.session_state['df_thdr_v2'] = df_thdr_v2
-    st.session_state['all_tr']        = all_tr
-    st.session_state['all_seat']      = all_seat
-    st.session_state['all_fact_full'] = all_fact_full
-    st.session_state['all_prmte_full']= all_prmte_full
-    # Guardar en session_state
     st.session_state['df_ops']        = df_ops
     st.session_state['df_thdr_v1']    = df_thdr_v1
     st.session_state['df_thdr_v2']    = df_thdr_v2
@@ -568,7 +563,6 @@ tabs = st.tabs([
 
 # TAB 0: RESUMEN
 with tabs[0]:
-    # Mostrar errores de procesamiento si los hay
     _ep = st.session_state.get('_errores_proc', {})
     if _ep:
         with st.expander(f"⚠️ {len(_ep)} archivo(s) con error al procesar", expanded=True):
@@ -656,7 +650,6 @@ with tabs[3]:
             df_p = pd.DataFrame(all_prmte_full)
             df_p['Fecha_Str'] = df_p['Fecha'].dt.strftime('%Y-%m-%d')
 
-            # Métricas rápidas
             total_kwh = df_p['Consumo'].sum()
             dias = df_p['Fecha_Str'].nunique()
             pico_row = df_p.loc[df_p['Consumo'].idxmax()]
@@ -666,7 +659,6 @@ with tabs[3]:
             m3.metric("Pico 15 min", f"{pico_row['Consumo']:,.0f} kWh",
                       f"{pico_row['Fecha_Str']} {pico_row['15min']}")
 
-            # Selector de fecha
             fechas_p = sorted(df_p['Fecha_Str'].unique())
             col_f, col_v = st.columns([2, 1])
             fecha_p_sel = col_f.selectbox("Fecha", fechas_p, key="prmte_fecha")
@@ -686,7 +678,6 @@ with tabs[3]:
                 df_show = (df_p.groupby("Fecha_Str")["Consumo"].sum()
                            .reset_index().rename(columns={"Fecha_Str": "Franja", "Consumo": "kWh"}))
 
-            # Gráfico de barras
             fig_p = go.Figure(go.Bar(
                 x=df_show['Franja'], y=df_show['kWh'],
                 marker_color='#005195',
@@ -700,7 +691,6 @@ with tabs[3]:
             )
             st.plotly_chart(fig_p, use_container_width=True)
 
-            # Tabla
             with st.expander("📋 Ver tabla"):
                 st.dataframe(
                     df_show.style.format({'kWh': "{:,.1f}"}),
@@ -766,7 +756,6 @@ with tabs[5]:
                 mode='markers', name=tipo,
                 marker=dict(color=color_map.get(tipo, '#888'), size=8)
             ))
-        # Línea de regresión global con numpy
         x_all = df_reg['Odómetro [km]'].values
         y_all = df_reg['IDE (kWh/km)'].values
         if len(x_all) >= 2:
@@ -858,20 +847,24 @@ def render_via_thdr(df_via, label):
     st.write("#### 🔍 Detalle por Fecha")
     fechas_disp = sorted(df['Fecha'].unique())
     fecha_sel = st.selectbox(f"Seleccionar fecha ({label})", fechas_disp, key=f"sel_{label}")
-    df_sel = df[df['Fecha'] == fecha_sel]
+    df_sel = df[df['Fecha'] == fecha_sel].copy()
 
-    # Columnas a mostrar: base + columnas _min de estaciones
+    # Convertir columnas _min a formato HH:MM:SS para visualización
+    cols_min = [c for c in df_sel.columns if '_min' in c]
+    for col_min in cols_min:
+        col_display = col_min.replace('_min', '_hms')
+        df_sel[col_display] = df_sel[col_min].apply(format_hm_short)
+
+    # Columnas a mostrar: base + columnas _hms (en lugar de _min)
     cols_base = ['Viaje', 'Tren', 'Hora Salida Programada', 'Motriz 1', 'Motriz 2', 'Unidad', 'Maquinista', 'Tren-Km']
-    cols_min = [c for c in df_sel.columns if '_min' in c and 'Hora Salida Programada' not in c]
-    cols_show = [c for c in cols_base + cols_min if c in df_sel.columns]
+    cols_hms  = [c for c in df_sel.columns if '_hms' in c]
+    cols_show = [c for c in cols_base + cols_hms if c in df_sel.columns]
     st.dataframe(make_columns_unique(df_sel[cols_show]).reset_index(drop=True), use_container_width=True)
     st.caption(f"{len(df_sel)} viajes el {fecha_sel}")
 
 
 with tabs[7]:
     st.header("📋 Análisis THDR")
-
-    # --- Sub-pestañas V1 / V2 ---
     t_v1, t_v2 = st.tabs(["🔵 Vía 1 (Puerto → Limache)", "🟠 Vía 2 (Limache → Puerto)"])
     with t_v1:
         render_via_thdr(df_thdr_v1, "Vía 1")
@@ -879,12 +872,10 @@ with tabs[7]:
         render_via_thdr(df_thdr_v2, "Vía 2")
 
 
-
 # TAB 8: SERVICIOS VS ENERGÍA
 with tabs[8]:
     st.header("🔬 Servicios vs Consumo de Energía (15 min)")
 
-    # --- Verificar datos disponibles ---
     _tiene_prmte = len(all_prmte_full) > 0
     _tiene_thdr  = not df_thdr_v1.empty or not df_thdr_v2.empty
 
@@ -896,9 +887,7 @@ with tabs[8]:
     col_av.metric("PRMTE disponible", "✅" if _tiene_prmte else "❌ Sin datos")
     col_at.metric("THDR disponible",  "✅" if _tiene_thdr  else "❌ Sin datos")
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
     def minutos_a_franja15(minutos):
-        """Convierte minutos flotantes a string HH:MM redondeado a 15 min."""
         if minutos is None or (isinstance(minutos, float) and np.isnan(minutos)):
             return None
         total = int(minutos)
@@ -909,32 +898,24 @@ with tabs[8]:
         return f"{h:02d}:{m:02d}"
 
     def str_franja_a_minutos(s):
-        """HH:MM → minutos para ordenar."""
         try:
             h, m = map(int, s.split(':'))
             return h * 60 + m
         except:
             return 0
 
-    # ── Construir series de SERVICIOS por franja 15 min ──────────────────────
-    # Lógica: un tren cuenta en una franja si está circulando en ese intervalo,
-    # es decir t_salida_origen <= franja < t_llegada_destino.
-    # Esto refleja que un viaje dura ~1hr y ocupa ~4 franjas de 15 min.
     df_servicios = pd.DataFrame()
     if _tiene_thdr:
         partes = [df for df in [df_thdr_v1, df_thdr_v2] if not df.empty]
         df_all_thdr = pd.concat(partes, ignore_index=True)
         df_all_thdr['Fecha_str'] = df_all_thdr['Fecha_Op'].dt.strftime('%Y-%m-%d')
 
-        # t_inicio: primera salida del viaje (salida desde origen)
-        # t_fin:    última llegada del viaje (llegada a destino)
         def _primera_salida(row):
             cols_sal = [c for c in row.index if 'Salida' in c and '_min' in c]
             vals = [row[c] for c in cols_sal if pd.notna(row[c])]
             return min(vals) if vals else np.nan
 
         def _ultima_llegada(row):
-            cols_lle = [c for c in row.index if 'Llegada' in c and '_min' in c]
             vals = [row[c] for c in row.index if 'Llegada' in c and '_min' in c and pd.notna(row[c])]
             return max(vals) if vals else np.nan
 
@@ -942,27 +923,22 @@ with tabs[8]:
         df_all_thdr['t_fin'] = df_all_thdr.apply(_ultima_llegada, axis=1)
         df_all_thdr = df_all_thdr.dropna(subset=['t_ini', 't_fin'])
 
-        # Calcular km recorridos por cada tren en su viaje
-        # Velocidad = KM_TOTAL / duración_viaje → km recorridos en los min activos de la franja
         def _km_en_franja(t_ini, t_fin, t_f, unidad):
-            """Km recorridos por un tren en la franja [t_f, t_f+15)."""
             duracion = t_fin - t_ini
             if duracion <= 0: return 0.0
             dist_total = KM_TOTAL * (2 if str(unidad).strip() == 'M' else 1)
-            vel = dist_total / duracion          # km/min
+            vel = dist_total / duracion
             t_activo_ini = max(t_ini, t_f)
             t_activo_fin = min(t_fin, t_f + 15)
             mins_activos = max(0.0, t_activo_fin - t_activo_ini)
             return round(vel * mins_activos, 3)
 
-        # Para cada franja de 15 min del día, contar trenes activos y km
         todas_franjas = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0,60,15)]
         filas_srv = []
         for fecha_g, grp in df_all_thdr.groupby('Fecha_str'):
             for franja in todas_franjas:
                 h_f, m_f = int(franja[:2]), int(franja[3:])
                 t_f = h_f * 60 + m_f
-                # Tren activo si t_ini <= t_franja < t_fin
                 mask = (grp['t_ini'] <= t_f) & (grp['t_fin'] > t_f)
                 n_total = mask.sum()
                 if n_total == 0:
@@ -984,7 +960,6 @@ with tabs[8]:
         if filas_srv:
             df_servicios = pd.DataFrame(filas_srv)
 
-    # ── Construir series de ENERGÍA por franja 15 min ────────────────────────
     df_energia = pd.DataFrame()
     if _tiene_prmte:
         df_prmte = pd.DataFrame(all_prmte_full)
@@ -994,7 +969,6 @@ with tabs[8]:
             .reset_index()
             .rename(columns={'15min': 'Franja', 'Consumo': 'kWh'}))
 
-    # ── Merge ─────────────────────────────────────────────────────────────────
     if df_servicios.empty and df_energia.empty:
         st.warning("Sin datos suficientes para el análisis.")
         st.stop()
@@ -1015,7 +989,6 @@ with tabs[8]:
     df_merge['_ord'] = df_merge['Franja'].apply(str_franja_a_minutos)
     df_merge = df_merge.sort_values(['Fecha', '_ord']).drop(columns='_ord')
 
-    # ── Filtros ───────────────────────────────────────────────────────────────
     fechas_disp = sorted(df_merge['Fecha'].unique())
     if not fechas_disp:
         st.warning("Sin fechas en el rango seleccionado.")
@@ -1044,9 +1017,7 @@ with tabs[8]:
     col_srv = 'Servicios_M' if mostrar_m else 'Servicios'
     lbl_srv = 'Servicios tracción doble' if mostrar_m else 'Servicios totales'
 
-    # ── Métricas rápidas ─────────────────────────────────────────────────────
     if not df_plot.empty:
-        m1, m2, m3, m4 = st.columns(4)
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Total kWh",         f"{df_plot['kWh'].sum():,.0f}")
         m2.metric("Pico kWh (franja)", f"{df_plot['kWh'].max():,.0f}",
@@ -1058,7 +1029,6 @@ with tabs[8]:
 
     st.divider()
 
-    # ── Gráfico principal: dual axis ──────────────────────────────────────────
     if not df_plot.empty:
         fig_dual = go.Figure()
 
@@ -1104,7 +1074,6 @@ with tabs[8]:
         )
         st.plotly_chart(fig_dual, use_container_width=True)
 
-    # ── Correlación ───────────────────────────────────────────────────────────
     df_corr = df_plot.dropna(subset=['kWh', col_srv])
     df_corr = df_corr[(df_corr['kWh'] > 0) & (df_corr[col_srv] > 0)]
 
@@ -1119,7 +1088,6 @@ with tabs[8]:
                   else "baja 🔴")
         st.caption(f"Correlación {interp}. {'Positiva: más servicios → más consumo.' if corr > 0 else 'Negativa: relación inversa.'}")
 
-        # Scatter correlación
         coef = np.polyfit(df_corr[col_srv].values, df_corr['kWh'].values, 1)
         x_line = np.linspace(df_corr[col_srv].min(), df_corr[col_srv].max(), 100)
         y_line = np.polyval(coef, x_line)
@@ -1146,7 +1114,6 @@ with tabs[8]:
         )
         st.plotly_chart(fig_sc, use_container_width=True)
 
-    # ── Tabla detalle ─────────────────────────────────────────────────────────
     with st.expander("📋 Ver tabla de datos"):
         cols_show = ['Franja', 'kWh', 'Servicios', 'Servicios_M', 'Tren_Km']
         cols_show = [c for c in cols_show if c in df_plot.columns]
