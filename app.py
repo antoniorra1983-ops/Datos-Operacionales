@@ -38,14 +38,56 @@ KM_ACUM  = [0.0]
 for _k in KM_TRAMO: KM_ACUM.append(round(KM_ACUM[-1]+_k, 2))
 KM_TOTAL = KM_ACUM[-1]
 
-# Coordenadas reales interpoladas para las 21 estaciones
-_ANCHORS_KM  = [0.0, 8.3, 21.4, 28.5, 43.13]
-_ANCHORS_LAT = [-33.0385, -33.0264, -33.0453, -33.0426, -32.9843]
-_ANCHORS_LON = [-71.6271, -71.5518, -71.4445, -71.3735, -71.2777]
-EST_LATS = [float(np.interp(k, _ANCHORS_KM, _ANCHORS_LAT)) for k in KM_ACUM]
-EST_LONS = [float(np.interp(k, _ANCHORS_KM, _ANCHORS_LON)) for k in KM_ACUM]
+# Coordenadas GPS reales de cada estación (fuente: Google Places)
+EST_LATS = [
+    -33.03846,  # Puerto
+    -33.04295,  # Bellavista
+    -33.04405,  # Francia
+    -33.04241,  # Baron
+    -33.03284,  # Portales
+    -33.02703,  # Recreo
+    -33.02496,  # Miramar
+    -33.02642,  # Viña del Mar
+    -33.02868,  # Hospital
+    -33.03300,  # Chorrillos
+    -33.04113,  # El Salto
+    -33.04031,  # Valencia
+    -33.04532,  # Quilpue
+    -33.03966,  # El Sol
+    -33.04311,  # El Belloto
+    -33.04385,  # Las Americas
+    -33.04158,  # La Concepcion
+    -33.04258,  # Villa Alemana
+    -33.04203,  # Sargento Aldea
+    -33.04019,  # Peñablanca
+    -32.98427,  # Limache
+]
+EST_LONS = [
+    -71.62709,  # Puerto
+    -71.62088,  # Bellavista
+    -71.61244,  # Francia
+    -71.60567,  # Baron
+    -71.59123,  # Portales
+    -71.57501,  # Recreo
+    -71.56160,  # Miramar
+    -71.55180,  # Viña del Mar
+    -71.54315,  # Hospital
+    -71.53346,  # Chorrillos
+    -71.52104,  # El Salto
+    -71.46888,  # Valencia
+    -71.44453,  # Quilpue
+    -71.42884,  # El Sol
+    -71.40651,  # El Belloto
+    -71.39467,  # Las Americas
+    -71.38193,  # La Concepcion
+    -71.37354,  # Villa Alemana
+    -71.36594,  # Sargento Aldea
+    -71.35302,  # Peñablanca
+    -71.27771,  # Limache
+]
 
 def interpolar_posicion(km_pos):
+    """Interpola lat/lon a lo largo de la ruta real usando las 21 estaciones."""
     km_pos = max(0.0, min(float(km_pos), KM_TOTAL))
     return (float(np.interp(km_pos, KM_ACUM, EST_LATS)),
             float(np.interp(km_pos, KM_ACUM, EST_LONS)))
@@ -930,11 +972,14 @@ with tabs[9]:
         return 0
     df_act['vel_inst']=df_act.apply(lambda r: vel_instantanea(r['km_pos'],r['Via'],use_rm),axis=1)
 
-    df_act['tooltip']=(df_act['_id']+'<br>'+df_act['dir']+
-                        '<br>km '+df_act['km_pos'].round(2).astype(str)+
-                        '<br>'+df_act['vel_inst'].astype(int).astype(str)+' km/h'+
-                        '<br>'+df_act['t_ini'].apply(format_hm_short)+
-                        ' – '+df_act['t_fin'].apply(format_hm_short))
+    df_act['doble']  = df_act['Unidad'].astype(str).str.strip() == 'M'
+    df_act['tooltip']=(df_act['_id']
+                        +'<br>'+df_act['dir']
+                        +'<br>'+ df_act['doble'].map({True:'🚈 DOBLE tracción',False:'🚃 Simple'})
+                        +'<br>km '+df_act['km_pos'].round(2).astype(str)
+                        +'<br>'+df_act['vel_inst'].astype(int).astype(str)+' km/h'
+                        +'<br>'+df_act['t_ini'].apply(format_hm_short)
+                        +' – '+df_act['t_fin'].apply(format_hm_short))
 
     # ── Figura mapa ───────────────────────────────────────────────────────────
     fig_m=go.Figure()
@@ -946,17 +991,25 @@ with tabs[9]:
                                       name='Estaciones',hovertext=ESTACIONES,
                                       hovertemplate='<b>%{hovertext}</b><br>km %{customdata:.1f}<extra></extra>',
                                       customdata=KM_ACUM))
-    dv1a=df_act[df_act['Via']==1]; dv2a=df_act[df_act['Via']==2]
-    if not dv1a.empty:
-        fig_m.add_trace(go.Scattermapbox(lat=dv1a['lat'],lon=dv1a['lon'],mode='markers',
-                                          marker=dict(size=18,color='#005195'),
-                                          name='Vía 1 → Limache',hovertext=dv1a['tooltip'],
-                                          hovertemplate='%{hovertext}<extra></extra>'))
-    if not dv2a.empty:
-        fig_m.add_trace(go.Scattermapbox(lat=dv2a['lat'],lon=dv2a['lon'],mode='markers',
-                                          marker=dict(size=18,color='#E85500'),
-                                          name='Vía 2 ← Puerto',hovertext=dv2a['tooltip'],
-                                          hovertemplate='%{hovertext}<extra></extra>'))
+
+    # 4 grupos: V1 simple, V1 doble, V2 simple, V2 doble
+    _grupos = [
+        (1, False, '#005195', 16, '● V1 Simple → Limache'),
+        (1, True,  '#FFD700', 22, '◆ V1 Doble  → Limache'),
+        (2, False, '#E85500', 16, '● V2 Simple ← Puerto'),
+        (2, True,  '#FF69B4', 22, '◆ V2 Doble  ← Puerto'),
+    ]
+    for via_, doble_, color_, size_, label_ in _grupos:
+        sub = df_act[(df_act['Via']==via_) & (df_act['doble']==doble_)]
+        if sub.empty: continue
+        fig_m.add_trace(go.Scattermapbox(
+            lat=sub['lat'], lon=sub['lon'], mode='markers',
+            marker=dict(size=size_, color=color_),
+            name=label_,
+            hovertext=sub['tooltip'],
+            hovertemplate='%{hovertext}<extra></extra>'
+        ))
+
     fig_m.update_layout(
         mapbox=dict(style='open-street-map',
                     center=dict(lat=float(np.mean(EST_LATS)),lon=float(np.mean(EST_LONS))),zoom=10),
@@ -966,15 +1019,18 @@ with tabs[9]:
     st.plotly_chart(fig_m,use_container_width=True)
 
     # ── Métricas ──────────────────────────────────────────────────────────────
-    c1,c2,c3=st.columns(3)
-    c1.metric("Trenes en circulación",len(df_act))
-    c2.metric("Vía 1 (→ Limache)",len(dv1a))
-    c3.metric("Vía 2 (← Puerto)",len(dv2a))
+    dv1a=df_act[df_act['Via']==1]; dv2a=df_act[df_act['Via']==2]
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Trenes en circulación", len(df_act))
+    c2.metric("Vía 1 (→ Limache)",     len(dv1a))
+    c3.metric("Vía 2 (← Puerto)",      len(dv2a))
+    c4.metric("🚈 Doble tracción",      int(df_act['doble'].sum()))
 
     if not df_act.empty:
         with st.expander("📋 Detalle de trenes activos"):
-            dt2=df_act[['_id','Via','dir','km_pos','vel_inst','Unidad','t_ini','t_fin']].copy()
-            dt2.columns=['Viaje/Tren','Vía','Dirección','Posición km','Vel. inst. km/h','Unidad','Salida (min)','Llegada (min)']
+            dt2=df_act[['_id','Via','dir','doble','km_pos','vel_inst','Unidad','t_ini','t_fin']].copy()
+            dt2['doble']=dt2['doble'].map({True:'🚈 Doble',False:'🚃 Simple'})
+            dt2.columns=['Viaje/Tren','Vía','Dirección','Tracción','Posición km','Vel. inst. km/h','Unidad','Salida (min)','Llegada (min)']
             dt2['Salida']=dt2['Salida (min)'].apply(format_hm_short)
             dt2['Llegada']=dt2['Llegada (min)'].apply(format_hm_short)
             dt2=dt2.drop(columns=['Salida (min)','Llegada (min)'])
@@ -991,28 +1047,31 @@ with tabs[9]:
         st.caption("Trayectoria real usando perfil de velocidades. Azul→Limache · Naranja→Puerto.")
         fig_mr=go.Figure()
         cvia={1:'#005195',2:'#E85500'}
-        N_PUNTOS=60  # resolución de la curva
+        N_PUNTOS=60
 
         for _,row in df_dia.iterrows():
             if pd.isna(row['t_ini']) or pd.isna(row['t_fin']): continue
+            es_doble = str(row.get('Unidad','')).strip() == 'M'
             ts=np.linspace(row['t_ini'],row['t_fin'],N_PUNTOS)
             kms=[km_en_tiempo_real(row['t_ini'],row['t_fin'],t,row['Via'],use_rm) for t in ts]
             fig_mr.add_trace(go.Scatter(
-                x=list(ts),y=kms,mode='lines',
-                line=dict(color=cvia[row['Via']],width=1.5),showlegend=False,
-                hovertemplate=(f"<b>{row['_id']}</b><br>"
+                x=list(ts), y=kms, mode='lines',
+                line=dict(color=cvia[row['Via']], width=3.5 if es_doble else 1.5,
+                          dash='solid' if es_doble else 'dot'),
+                showlegend=False,
+                hovertemplate=(f"<b>{row['_id']}</b>"
+                               f"{'  🚈 DOBLE' if es_doble else ''}<br>"
                                f"Salida:{format_hm_short(row['t_ini'])}<br>"
                                f"Llegada:{format_hm_short(row['t_fin'])}<extra></extra>")))
 
         fig_mr.add_vline(x=hora_m,line_dash="dash",line_color="green",
                           annotation_text=hora_s,annotation_position="top right")
-        # Líneas de estaciones
-        for est,km_est in zip(ESTACIONES_CORTO,KM_ACUM):
+        for km_est in KM_ACUM:
             fig_mr.add_hline(y=km_est,line_width=0.5,line_color='#ccc')
         fig_mr.update_layout(
             xaxis=dict(title="Hora",tickmode='array',tickvals=list(range(0,1440,60)),
                        ticktext=[f"{h:02d}:00" for h in range(24)]),
             yaxis=dict(title="km desde Puerto",tickmode='array',tickvals=KM_ACUM,ticktext=ESTACIONES_CORTO),
-            height=520,title=f"Diagrama Marey — {fecha_m} ({'RM' if use_rm else 'vel. normal'})",
+            height=520,title=f"Diagrama Marey — {fecha_m} ({'RM' if use_rm else 'vel. normal'})  |  línea gruesa = doble tracción",
             plot_bgcolor='#f8f8f8')
         st.plotly_chart(fig_mr,use_container_width=True)
