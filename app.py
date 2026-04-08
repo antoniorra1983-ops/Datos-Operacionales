@@ -817,42 +817,6 @@ def render_via_thdr(df_via, label):
 with tabs[7]:
     st.header("📋 Análisis THDR")
 
-    # --- DEBUG: qué ve la app en disco ---
-    with st.expander("🔧 Diagnóstico de disco", expanded=True):
-        st.caption(f"Directorio de trabajo: `{os.getcwd()}`")
-        for _key, _carpeta in DATA_DIRS.items():
-            _ruta_abs = os.path.abspath(_carpeta)
-            _existe = os.path.isdir(_ruta_abs)
-            _archivos = listar_archivos(_carpeta) if _existe else []
-            st.markdown(f"**{_key}** → `{_ruta_abs}`")
-            if not _existe:
-                st.error("❌ Carpeta NO existe")
-            elif not _archivos:
-                st.warning("⚠️ Carpeta vacía")
-            else:
-                for _a in _archivos:
-                    st.success(f"✅ {os.path.basename(_a)}")
-        st.divider()
-        st.caption(f"Archivos Vía 1 detectados: {[f.name for f in f_v1_all]}")
-        st.caption(f"Archivos Vía 2 detectados: {[f.name for f in f_v2_all]}")
-        st.caption(f"¿Hay archivos?: {_hay_archivos} | ¿Recalculando?: {_recalcular} | Caché guardada: {'df_ops' in st.session_state}")
-
-    # --- Panel de Diagnóstico ---
-    diags = st.session_state.get('diag_thdr', [])
-    if diags:
-        with st.expander("🔍 Diagnóstico de archivos cargados",
-                         expanded=(df_thdr_v1.empty and df_thdr_v2.empty)):
-            for d in diags:
-                ok = d['error'] is None
-                st.markdown(f"**{'✅' if ok else '❌'} {d['archivo']}**")
-                cols_d = st.columns(3)
-                cols_d[0].caption("Fecha parseada"); cols_d[0].code(d['fecha_parseada'] or '—')
-                cols_d[1].caption("¿En rango?");     cols_d[1].code(d['en_rango'] or '—')
-                cols_d[2].caption("Estado")
-                if ok: cols_d[2].success(f"{d['filas']} filas cargadas")
-                else:   cols_d[2].error(d['error'])
-                st.divider()
-
     # --- Sub-pestañas V1 / V2 ---
     t_v1, t_v2 = st.tabs(["🔵 Vía 1 (Puerto → Limache)", "🟠 Vía 2 (Limache → Puerto)"])
     with t_v1:
