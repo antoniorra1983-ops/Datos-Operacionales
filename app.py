@@ -1114,16 +1114,29 @@ def _puntos_tren(row, estaciones, suf):
     return sorted(pts, key=lambda x: x[1])
 
 def _pos_en_t(pts_sal, pts_lle, t):
-    """Posición interpolada (float) del tren en tiempo t. None si no activo."""
-    todos = sorted(pts_sal + pts_lle, key=lambda x: x[1])
-    if not todos: return None
-    if t < todos[0][1] or t > todos[-1][1]: return None
-    for k in range(len(todos)-1):
-        p0, t0 = todos[k]
-        p1, t1 = todos[k+1]
+    """
+    Posición interpolada (float) del tren en tiempo t. None si no activo.
+    Usa solo salidas para el movimiento entre estaciones, y llegadas
+    para saber cuándo el tren está detenido en la última estación.
+    """
+    if not pts_sal: return None
+
+    t_inicio = pts_sal[0][1]
+    # El tren termina cuando llega a la última estación
+    t_fin = pts_lle[-1][1] if pts_lle else pts_sal[-1][1]
+
+    if t < t_inicio or t > t_fin: return None
+
+    # Entre salidas consecutivas → movimiento entre estaciones
+    for k in range(len(pts_sal) - 1):
+        p0, t0 = pts_sal[k]
+        p1, t1 = pts_sal[k + 1]
         if t0 <= t <= t1:
-            return p0 if t1==t0 else p0 + (p1-p0)*(t-t0)/(t1-t0)
-    return None
+            if t1 == t0: return float(p0)
+            return p0 + (p1 - p0) * (t - t0) / (t1 - t0)
+
+    # Después de la última salida → tren en la última estación (detenido)
+    return float(pts_sal[-1][0])
 
 @st.cache_data(show_spinner="Calculando simulación…")
 def _precalcular(v1_json, v2_json, e_json, franjas):
