@@ -181,29 +181,120 @@ def procesar_thdr_eficiente(file, start_date, end_date):
         diag["error"] = str(e)
         return pd.DataFrame(), diag
 
-# --- 4. INICIALIZACIÓN ---
+# --- 4. PERSISTENCIA EN DISCO ---
+import os
+
+DATA_DIRS = {
+    "v1":   "data/thdr_v1",
+    "v2":   "data/thdr_v2",
+    "umr":  "data/umr",
+    "seat": "data/seat",
+    "bill": "data/facturacion",
+}
+for _d in DATA_DIRS.values():
+    os.makedirs(_d, exist_ok=True)
+
+def guardar_archivo(uploaded_file, carpeta):
+    dest = os.path.join(carpeta, uploaded_file.name)
+    with open(dest, "wb") as out:
+        out.write(uploaded_file.getbuffer())
+
+def listar_archivos(carpeta):
+    exts = ('.xls', '.xlsx', '.xlsm')
+    try:
+        return sorted([os.path.join(carpeta, f) for f in os.listdir(carpeta) if f.lower().endswith(exts)])
+    except:
+        return []
+
+class _ArchivoEnDisco:
+    """Wrapper de archivo en disco compatible con pd.read_excel y getattr(f, 'name')."""
+    def __init__(self, path):
+        self.name = os.path.basename(path)
+        self._path = path
+    def read(self):
+        with open(self._path, 'rb') as f: return f.read()
+    def getbuffer(self):
+        with open(self._path, 'rb') as f: return f.read()
+    def __str__(self): return self._path
+
+def combinar_fuentes(uploaded_list, carpeta):
+    nombres_subidos = {uf.name for uf in (uploaded_list or [])}
+    desde_disco = [_ArchivoEnDisco(p) for p in listar_archivos(carpeta)
+                   if os.path.basename(p) not in nombres_subidos]
+    return list(uploaded_list or []) + desde_disco
+
+# --- 5. INICIALIZACIÓN ---
 df_ops = pd.DataFrame()
 df_thdr_v1 = pd.DataFrame()
 df_thdr_v2 = pd.DataFrame()
 all_ops, all_tr, all_seat, all_fact_full, all_prmte_full = [], [], [], [], []
 
-# --- 5. SIDEBAR ---
+# --- 6. SIDEBAR ---
 with st.sidebar:
     st.header("📅 Filtro Global")
     dr = st.date_input("Rango", value=(date(2026, 1, 1), date(2026, 1, 31)))
     start_date, end_date = (dr[0], dr[1]) if isinstance(dr, tuple) and len(dr) == 2 else (dr, dr)
     st.divider()
-    f_v1 = st.file_uploader("1. THDR Vía 1", accept_multiple_files=True)
-    f_v2 = st.file_uploader("2. THDR Vía 2", accept_multiple_files=True)
-    f_umr = st.file_uploader("3. UMR / Odómetros", accept_multiple_files=True)
-    f_seat_files = st.file_uploader("4. Energía SEAT", accept_multiple_files=True)
-    f_bill_files = st.file_uploader("5. Facturación y PRMTE", accept_multiple_files=True)
 
-# --- 6. PROCESAMIENTO TOTAL ---
-if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
+    def _badge(carpeta):
+        n = len(listar_archivos(carpeta))
+        return f" ({n} guardados)" if n else ""
+
+    f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True)
+    f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True)
+    f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True)
+    f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True)
+    f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True)
+
+    # Guardar al disco archivos recién subidos
+    for _uploaded_list, _carpeta in [
+        (f_v1, DATA_DIRS["v1"]), (f_v2, DATA_DIRS["v2"]),
+        (f_umr, DATA_DIRS["umr"]), (f_seat_files, DATA_DIRS["seat"]),
+        (f_bill_files, DATA_DIRS["bill"]),
+    ]:
+        for uf in (_uploaded_list or []):
+            dest = os.path.join(_carpeta, uf.name)
+            if not os.path.exists(dest):
+                guardar_archivo(uf, _carpeta)
+
+    st.divider()
+    with st.expander("🗂️ Archivos guardados"):
+        _labels = {"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación"}
+        for _key, _carpeta in DATA_DIRS.items():
+            _archivos = listar_archivos(_carpeta)
+            if _archivos:
+                st.markdown(f"**{_labels[_key]}** — {len(_archivos)} archivo(s)")
+                for _a in _archivos:
+                    _ca, _cb = st.columns([5, 1])
+                    _ca.caption(os.path.basename(_a))
+                    if _cb.button("🗑️", key=f"del_{_a}"):
+                        os.remove(_a)
+                        st.rerun()
+            else:
+                st.caption(f"{_labels[_key]}: sin archivos")
+
+# Combinar subidos ahora + guardados en disco
+f_v1_all        = combinar_fuentes(f_v1,         DATA_DIRS["v1"])
+f_v2_all        = combinar_fuentes(f_v2,         DATA_DIRS["v2"])
+f_umr_all       = combinar_fuentes(f_umr,        DATA_DIRS["umr"])
+f_seat_all      = combinar_fuentes(f_seat_files, DATA_DIRS["seat"])
+f_bill_all      = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
+
+# Clave de caché: recalcular solo si cambian archivos o rango
+_cache_key = (
+    str(start_date), str(end_date),
+    tuple(sorted(f.name for f in f_v1_all)),
+    tuple(sorted(f.name for f in f_v2_all)),
+    tuple(sorted(f.name for f in f_umr_all)),
+    tuple(sorted(f.name for f in f_seat_all)),
+    tuple(sorted(f.name for f in f_bill_all)),
+)
+_recalcular = st.session_state.get('_cache_key') != _cache_key
+
+if any([f_v1_all, f_v2_all, f_umr_all, f_seat_all, f_bill_all]) and _recalcular:
     # UMR / TRENES
-    if f_umr:
-        for f in f_umr:
+    if f_umr_all:
+        for f in f_umr_all:
             try:
                 xl = pd.ExcelFile(f)
                 for sn in xl.sheet_names:
@@ -243,8 +334,8 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                 pass
 
     # SEAT
-    if f_seat_files:
-        for f in f_seat_files:
+    if f_seat_all:
+        for f in f_seat_all:
             try:
                 df_s = pd.read_excel(f, header=None)
                 for i in range(len(df_s)):
@@ -262,8 +353,8 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
                 pass
 
     # FACTURA / PRMTE
-    if f_bill_files:
-        for f in f_bill_files:
+    if f_bill_all:
+        for f in f_bill_all:
             try:
                 xl = pd.ExcelFile(f)
                 for sn in xl.sheet_names:
@@ -349,18 +440,38 @@ if any([f_v1, f_v2, f_umr, f_seat_files, f_bill_files]):
         )
 
     diagnosticos_thdr = []
-    if f_v1:
-        resultados_v1 = [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v1]
+    if f_v1_all:
+        resultados_v1 = [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v1_all]
         diagnosticos_thdr += [r[1] for r in resultados_v1]
         partes_v1 = [r[0] for r in resultados_v1 if not r[0].empty]
         df_thdr_v1 = pd.concat(partes_v1, ignore_index=True) if partes_v1 else pd.DataFrame()
-    if f_v2:
-        resultados_v2 = [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v2]
+    if f_v2_all:
+        resultados_v2 = [procesar_thdr_eficiente(f, start_date, end_date) for f in f_v2_all]
         diagnosticos_thdr += [r[1] for r in resultados_v2]
         partes_v2 = [r[0] for r in resultados_v2 if not r[0].empty]
         df_thdr_v2 = pd.concat(partes_v2, ignore_index=True) if partes_v2 else pd.DataFrame()
     if diagnosticos_thdr:
         st.session_state['diag_thdr'] = diagnosticos_thdr
+
+    # Guardar resultados en session_state y marcar caché
+    st.session_state['df_ops']     = df_ops
+    st.session_state['df_thdr_v1'] = df_thdr_v1
+    st.session_state['df_thdr_v2'] = df_thdr_v2
+    st.session_state['all_tr']        = all_tr
+    st.session_state['all_seat']      = all_seat
+    st.session_state['all_fact_full'] = all_fact_full
+    st.session_state['all_prmte_full']= all_prmte_full
+    st.session_state['_cache_key']    = _cache_key
+
+elif not _recalcular and '_cache_key' in st.session_state:
+    # Recuperar desde caché de sesión sin reprocesar
+    df_ops          = st.session_state.get('df_ops',     pd.DataFrame())
+    df_thdr_v1      = st.session_state.get('df_thdr_v1', pd.DataFrame())
+    df_thdr_v2      = st.session_state.get('df_thdr_v2', pd.DataFrame())
+    all_tr          = st.session_state.get('all_tr',        [])
+    all_seat        = st.session_state.get('all_seat',      [])
+    all_fact_full   = st.session_state.get('all_fact_full', [])
+    all_prmte_full  = st.session_state.get('all_prmte_full',[])
 
 # --- 7. TABS ---
 tabs = st.tabs([
