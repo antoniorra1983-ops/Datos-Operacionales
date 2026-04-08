@@ -888,17 +888,18 @@ with tabs[9]:
     with cc1:
         fecha_m=st.selectbox("📅 Fecha",fechas_m,key="mapa_fecha")
     with cc2:
-        franjas=[f"{h:02d}:{m:02d}" for h in range(24) for m in range(0,60,15)]
-        idx_f=st.select_slider("🕐 Franja horaria",options=list(range(len(franjas))),
-                                value=24,format_func=lambda i: franjas[i],key="mapa_franja")
+        hora_m=st.slider("🕐 Hora",min_value=0,max_value=1439,value=360,step=1,
+                          format_func=lambda m: f"{m//60:02d}:{m%60:02d}",key="mapa_minuto")
     with cc3:
         use_rm=st.checkbox("Vel. RM",value=False,help="Usar velocidades de Restricción de Marcha")
 
-    hora_s=franjas[idx_f]; hora_m=int(hora_s[:2])*60+int(hora_s[3:])
+    hora_s=f"{hora_m//60:02d}:{hora_m%60:02d}"
 
-    cp1,cp2,_=st.columns([1,1,4])
-    if cp1.button("⏮ −15 min",key="btn_p"): st.session_state['mapa_franja']=max(0,idx_f-1); st.rerun()
-    if cp2.button("⏭ +15 min",key="btn_n"): st.session_state['mapa_franja']=min(len(franjas)-1,idx_f+1); st.rerun()
+    cp1,cp2,cp3,cp4,_=st.columns([1,1,1,1,2])
+    if cp1.button("−1 min", key="btn_m1"):  st.session_state['mapa_minuto']=max(0,hora_m-1);   st.rerun()
+    if cp2.button("+1 min", key="btn_p1"):  st.session_state['mapa_minuto']=min(1439,hora_m+1); st.rerun()
+    if cp3.button("−15 min",key="btn_m15"): st.session_state['mapa_minuto']=max(0,hora_m-15);  st.rerun()
+    if cp4.button("+15 min",key="btn_p15"): st.session_state['mapa_minuto']=min(1439,hora_m+15);st.rerun()
     st.caption(f"Trenes a las **{hora_s}** · **{fecha_m}** · Velocidades: {'RM' if use_rm else 'Normales'}")
 
     # ── Calcular posiciones usando perfil real ────────────────────────────────
