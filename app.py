@@ -1,4 +1,5 @@
 import streamlit as st
+import time
 import pandas as pd
 import numpy as np
 import re
@@ -544,7 +545,8 @@ tabs = st.tabs([
     "📈 Regresión",
     "🚨 Atípicos",
     "📋 THDR",
-    "🔬 Servicios vs Energía"
+    "🔬 Servicios vs Energía",
+    "🚆 Simulador"
 ])
 
 # TAB 0: RESUMEN
@@ -1080,3 +1082,325 @@ with tabs[8]:
             use_container_width=True,
             height=300
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 9: SIMULADOR
+# ─────────────────────────────────────────────────────────────────────────────
+# Estaciones en orden V1 (Puerto → Limache)
+ESTACIONES = [
+    'Puerto','Bellavista','Francia','Baron','Portales','Recreo','Miramar',
+    'Vina del mar','Hospital','Chorrillos','El Salto','Quilpue','El Sol',
+    'El Belloto','Americas','La Concepcion','Villa Alemana','Sargento Aldea',
+    'Penablanca','Limache'
+]
+N_EST = len(ESTACIONES)
+
+def _norm_est(nombre):
+    """Normaliza nombre de estación para comparar con columnas THDR."""
+    return (str(nombre).upper().strip()
+            .replace('Á','A').replace('É','E').replace('Í','I')
+            .replace('Ó','O').replace('Ú','U').replace('Ñ','N')
+            .replace(' DEL ',' ').replace(' DE ',' '))
+
+def extraer_tiempos_tren(row, estaciones, sufijo='Hora Salida_min'):
+    """
+    Para una fila de THDR devuelve lista de (idx_estacion, minutos).
+    Usa columnas del tipo 'Estacion_Hora Salida_min'.
+    """
+    puntos = []
+    for i, est in enumerate(estaciones):
+        # Buscar columna que contenga el nombre de la estación + sufijo
+        col = next((c for c in row.index
+                    if _norm_est(est) in _norm_est(c) and sufijo in c), None)
+        if col and pd.notna(row[col]):
+            puntos.append((i, float(row[col])))
+    return puntos
+
+def posicion_en_tiempo(puntos_salida, puntos_llegada, t_min):
+    """
+    Interpola posición del tren (0..N_EST-1) en el instante t_min.
+    Devuelve float posición o None si el tren no está activo.
+    """
+    if not puntos_salida:
+        return None
+    # Combinar llegadas y salidas ordenadas por tiempo
+    eventos = sorted(puntos_salida + puntos_llegada, key=lambda x: x[1])
+    if not eventos:
+        return None
+    t_inicio = eventos[0][1]
+    t_fin    = eventos[-1][1]
+    if t_min < t_inicio or t_min > t_fin:
+        return None
+    # Buscar entre qué dos eventos está t_min
+    for k in range(len(eventos)-1):
+        t0, t1 = eventos[k][1], eventos[k+1][1]
+        p0, p1 = eventos[k][0],  eventos[k+1][0]
+        if t0 <= t_min <= t1:
+            if t1 == t0:
+                return float(p0)
+            frac = (t_min - t0) / (t1 - t0)
+            return p0 + frac * (p1 - p0)
+    return None
+
+
+with tabs[9]:
+    st.header("🚆 Simulador de Carrusel")
+
+    _tiene_v1  = not df_thdr_v1.empty
+    _tiene_v2  = not df_thdr_v2.empty
+    _tiene_e   = len(all_prmte_full) > 0
+
+    if not _tiene_v1 and not _tiene_v2:
+        st.info("📂 Sube archivos THDR (Vía 1 y/o Vía 2) para usar el simulador.")
+        st.stop()
+
+    # ── Selector de fecha ─────────────────────────────────────────────────────
+    fechas_sim = set()
+    if _tiene_v1: fechas_sim |= set(df_thdr_v1['Fecha_Op'].dt.strftime('%Y-%m-%d').unique())
+    if _tiene_v2: fechas_sim |= set(df_thdr_v2['Fecha_Op'].dt.strftime('%Y-%m-%d').unique())
+    fechas_sim = sorted(fechas_sim)
+
+    col_fd, col_sp = st.columns([3, 1])
+    fecha_sim = col_fd.selectbox("Fecha", fechas_sim, key="sim_fecha")
+
+    # Filtrar THDR por fecha seleccionada
+    def filtrar_fecha(df, fecha_str):
+        if df.empty: return pd.DataFrame()
+        return df[df['Fecha_Op'].dt.strftime('%Y-%m-%d') == fecha_str].reset_index(drop=True)
+
+    df_v1_sim = filtrar_fecha(df_thdr_v1, fecha_sim)
+    df_v2_sim = filtrar_fecha(df_thdr_v2, fecha_sim)
+
+    # Rango de tiempo del día
+    mins_todo = []
+    for df_via in [df_v1_sim, df_v2_sim]:
+        if df_via.empty: continue
+        col_ref = next((c for c in df_via.columns if 'Ref' in c or
+                        (('PUERTO' in c.upper() or 'LIMACHE' in c.upper()) and '_min' in c)), None)
+        if col_ref:
+            mins_todo += df_via[col_ref].dropna().tolist()
+
+    t_min_global = int(min(mins_todo)) if mins_todo else 360
+    t_max_global = int(max(mins_todo)) + 90 if mins_todo else 1320
+    t_min_global = max(0, t_min_global - 15)
+
+    # ── Session state para animación ─────────────────────────────────────────
+    if 'sim_t'       not in st.session_state: st.session_state['sim_t']       = t_min_global
+    if 'sim_play'    not in st.session_state: st.session_state['sim_play']    = False
+    if 'sim_fecha_p' not in st.session_state: st.session_state['sim_fecha_p'] = fecha_sim
+
+    # Resetear si cambia la fecha
+    if st.session_state['sim_fecha_p'] != fecha_sim:
+        st.session_state['sim_t']       = t_min_global
+        st.session_state['sim_play']    = False
+        st.session_state['sim_fecha_p'] = fecha_sim
+
+    # ── Controles ─────────────────────────────────────────────────────────────
+    col_p, col_s, col_v = st.columns([1, 1, 4])
+    if col_p.button("▶ Play",  disabled=st.session_state['sim_play']):
+        st.session_state['sim_play'] = True
+    if col_s.button("⏸ Pausa", disabled=not st.session_state['sim_play']):
+        st.session_state['sim_play'] = False
+
+    t_actual = st.slider(
+        "⏱ Hora",
+        min_value=t_min_global,
+        max_value=t_max_global,
+        value=st.session_state['sim_t'],
+        step=15,
+        format="%d min",
+        key="sim_slider"
+    )
+    # Sincronizar slider ↔ session_state
+    if t_actual != st.session_state['sim_t']:
+        st.session_state['sim_t'] = t_actual
+
+    h_act = st.session_state['sim_t'] // 60
+    m_act = st.session_state['sim_t'] % 60
+    st.markdown(f"### 🕐 {h_act:02d}:{m_act:02d}")
+
+    # ── Calcular posiciones de trenes ─────────────────────────────────────────
+    def trenes_activos(df_via, estaciones, t_min, color, label):
+        trenes = []
+        if df_via.empty: return trenes
+        for _, row in df_via.iterrows():
+            pts_sal = extraer_tiempos_tren(row, estaciones, 'Hora Salida_min')
+            pts_lle = extraer_tiempos_tren(row, estaciones, 'Hora Llegada_min')
+            pos = posicion_en_tiempo(pts_sal, pts_lle, t_min)
+            if pos is not None:
+                tren_id = str(row.get('Tren', '?'))
+                unidad  = str(row.get('Unidad', 'S')).strip()
+                trenes.append({
+                    'pos': pos, 'id': tren_id,
+                    'unidad': unidad, 'label': label,
+                    'color': color
+                })
+        return trenes
+
+    t = st.session_state['sim_t']
+    trenes_v1 = trenes_activos(df_v1_sim, ESTACIONES,             t, '#005195', 'V1')
+    trenes_v2 = trenes_activos(df_v2_sim, list(reversed(ESTACIONES)), t, '#E85500', 'V2')
+    # Convertir posición V2 (reversed) a posición en escala V1
+    for tr in trenes_v2:
+        tr['pos'] = (N_EST - 1) - tr['pos']
+
+    # ── Figura principal: pistas ───────────────────────────────────────────────
+    fig_sim = go.Figure()
+
+    # Línea de pista V1
+    fig_sim.add_trace(go.Scatter(
+        x=list(range(N_EST)), y=[1.0]*N_EST,
+        mode='lines+markers+text',
+        line=dict(color='#CCCCCC', width=3),
+        marker=dict(size=12, color='#005195', symbol='square'),
+        text=ESTACIONES, textposition='top center',
+        textfont=dict(size=9),
+        name='Estaciones V1', hoverinfo='text',
+        hovertext=ESTACIONES
+    ))
+
+    # Línea de pista V2
+    fig_sim.add_trace(go.Scatter(
+        x=list(range(N_EST)), y=[0.0]*N_EST,
+        mode='lines+markers+text',
+        line=dict(color='#CCCCCC', width=3),
+        marker=dict(size=12, color='#E85500', symbol='square'),
+        text=ESTACIONES, textposition='bottom center',
+        textfont=dict(size=9),
+        name='Estaciones V2', hoverinfo='text',
+        hovertext=ESTACIONES
+    ))
+
+    # Trenes V1
+    if trenes_v1:
+        fig_sim.add_trace(go.Scatter(
+            x=[tr['pos'] for tr in trenes_v1],
+            y=[1.0]*len(trenes_v1),
+            mode='markers+text',
+            marker=dict(size=22, color=['#FFD700' if tr['unidad']=='M' else '#00AAFF'
+                                        for tr in trenes_v1],
+                        symbol='arrow-right', line=dict(color='#003366', width=2)),
+            text=[tr['id'] for tr in trenes_v1],
+            textposition='middle center',
+            textfont=dict(size=8, color='black'),
+            name='Trenes V1 →',
+            hovertemplate='<b>Tren %{text}</b><br>V1 Puerto→Limache<extra></extra>'
+        ))
+
+    # Trenes V2
+    if trenes_v2:
+        fig_sim.add_trace(go.Scatter(
+            x=[tr['pos'] for tr in trenes_v2],
+            y=[0.0]*len(trenes_v2),
+            mode='markers+text',
+            marker=dict(size=22, color=['#FFD700' if tr['unidad']=='M' else '#FF8844'
+                                        for tr in trenes_v2],
+                        symbol='arrow-left', line=dict(color='#8B0000', width=2)),
+            text=[tr['id'] for tr in trenes_v2],
+            textposition='middle center',
+            textfont=dict(size=8, color='black'),
+            name='Trenes V2 ←',
+            hovertemplate='<b>Tren %{text}</b><br>V2 Limache→Puerto<extra></extra>'
+        ))
+
+    fig_sim.update_layout(
+        height=320,
+        xaxis=dict(tickvals=list(range(N_EST)), ticktext=ESTACIONES,
+                   tickangle=-40, tickfont=dict(size=8)),
+        yaxis=dict(range=[-0.5, 1.8], showticklabels=False, showgrid=False),
+        plot_bgcolor='#F8F9FA',
+        legend=dict(orientation='h', y=1.12),
+        margin=dict(t=20, b=80, l=20, r=20),
+        hovermode='closest'
+    )
+
+    # Anotaciones de vía
+    fig_sim.add_annotation(x=-0.5, y=1.0, text="<b>V1 →</b>", showarrow=False,
+                           font=dict(color='#005195', size=11))
+    fig_sim.add_annotation(x=-0.5, y=0.0, text="<b>← V2</b>", showarrow=False,
+                           font=dict(color='#E85500', size=11))
+
+    st.plotly_chart(fig_sim, use_container_width=True)
+
+    # ── Métricas de trenes activos ────────────────────────────────────────────
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Trenes V1 activos", len(trenes_v1))
+    col_m2.metric("Trenes V2 activos", len(trenes_v2))
+    col_m3.metric("Total en servicio", len(trenes_v1) + len(trenes_v2))
+    trenes_M = sum(1 for tr in trenes_v1+trenes_v2 if tr['unidad']=='M')
+    col_m4.metric("Doble tracción (M)", trenes_M,
+                  help="Trenes con dos motrices — mayor consumo")
+
+    # ── Energía PRMTE del intervalo actual ───────────────────────────────────
+    if _tiene_e:
+        st.divider()
+        franja_act = f"{h_act:02d}:{(m_act//15)*15:02d}"
+        fecha_str_act = fecha_sim
+
+        df_e_sim = pd.DataFrame(all_prmte_full)
+        df_e_sim['Fecha_Str'] = df_e_sim['Fecha'].dt.strftime('%Y-%m-%d')
+        df_e_sim_dia = df_e_sim[df_e_sim['Fecha_Str'] == fecha_str_act]
+
+        kwh_actual = df_e_sim_dia[df_e_sim_dia['15min'] == franja_act]['Consumo'].sum()
+        kwh_prom   = df_e_sim_dia.groupby('15min')['Consumo'].sum().mean()
+        kwh_max    = df_e_sim_dia.groupby('15min')['Consumo'].sum().max()
+
+        col_e1, col_e2, col_e3 = st.columns(3)
+        delta_vs_prom = f"{kwh_actual - kwh_prom:+,.0f} vs promedio"
+        col_e1.metric(f"⚡ kWh franja {franja_act}", f"{kwh_actual:,.0f}",
+                      delta_vs_prom)
+        col_e2.metric("Promedio día (15 min)", f"{kwh_prom:,.0f}")
+        col_e3.metric("Pico del día", f"{kwh_max:,.0f}")
+
+        # Mini gráfico del día con marcador en instante actual
+        df_e_chart = (df_e_sim_dia.groupby('15min')['Consumo'].sum()
+                      .reset_index().rename(columns={'15min':'Franja','Consumo':'kWh'})
+                      .sort_values('Franja'))
+
+        fig_e = go.Figure()
+        fig_e.add_trace(go.Bar(
+            x=df_e_chart['Franja'], y=df_e_chart['kWh'],
+            marker_color=['#E85500' if f == franja_act else 'rgba(0,81,149,0.5)'
+                          for f in df_e_chart['Franja']],
+            name='kWh 15 min'
+        ))
+        # Línea de trenes activos sobre el eje secundario
+        srv_por_franja = []
+        for _, row_t in df_e_chart.iterrows():
+            fr = row_t['Franja']
+            h_f = int(fr[:2]); m_f = int(fr[3:])
+            t_f = h_f*60 + m_f
+            n_v1 = len(trenes_activos(df_v1_sim, ESTACIONES, t_f, '', ''))
+            n_v2 = len(trenes_activos(df_v2_sim, list(reversed(ESTACIONES)), t_f, '', ''))
+            srv_por_franja.append(n_v1 + n_v2)
+
+        fig_e.add_trace(go.Scatter(
+            x=df_e_chart['Franja'], y=srv_por_franja,
+            mode='lines', name='Trenes activos',
+            line=dict(color='#FFD700', width=2),
+            yaxis='y2'
+        ))
+        fig_e.update_layout(
+            title=f"Energía vs Trenes activos — {fecha_sim}",
+            height=280,
+            xaxis=dict(tickangle=-45, tickmode='array',
+                       tickvals=df_e_chart['Franja'][::4].tolist()),
+            yaxis =dict(title='kWh',    side='left'),
+            yaxis2=dict(title='Trenes', side='right', overlaying='y', showgrid=False),
+            legend=dict(orientation='h', y=1.1),
+            margin=dict(t=40, b=60),
+            hovermode='x unified'
+        )
+        st.plotly_chart(fig_e, use_container_width=True)
+
+    # ── Leyenda ───────────────────────────────────────────────────────────────
+    st.caption("🟦 Tren simple (S)  |  🟡 Tren doble tracción (M)  |  → V1 Puerto→Limache  |  ← V2 Limache→Puerto")
+
+    # ── Avance automático (Play) ──────────────────────────────────────────────
+    if st.session_state['sim_play']:
+        if st.session_state['sim_t'] < t_max_global:
+            time.sleep(0.6)
+            st.session_state['sim_t'] += 15
+            st.rerun()
+        else:
+            st.session_state['sim_play'] = False
