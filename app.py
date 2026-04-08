@@ -29,7 +29,25 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. FUNCIONES DE APOYO ---
+# --- 2. CONSTANTES DE RED (estaciones, distancias) ---
+ESTACIONES = [
+    'Puerto','Bellavista','Francia','Baron','Portales','Recreo','Miramar',
+    'Viña del Mar','Hospital','Chorrillos','El Salto','Valencia','Quilpue',
+    'El Sol','El Belloto','Las Americas','La Concepcion','Villa Alemana',
+    'Sargento Aldea','Peñablanca','Limache'
+]
+ESTACIONES_CORTO = [
+    'PU','BE','FR','BA','PO','RE','MI','VM','HO','CH',
+    'ES','VAL','QU','SO','EB','AM','CO','VL','SA','PE','LI'
+]
+# Distancias en km entre estaciones consecutivas (Puerto→Limache)
+KM_TRAMO = [0.7,0.7,0.8,1.7,2.1,1.4,0.9,0.9,1.0,1.5,7.4,2.3,1.9,2.0,1.1,1.2,0.9,0.6,1.3,12.73]
+KM_ACUM  = [0.0]
+for _k in KM_TRAMO: KM_ACUM.append(round(KM_ACUM[-1]+_k, 2))
+KM_TOTAL = KM_ACUM[-1]  # 43.13 km total
+N_EST    = len(ESTACIONES)
+
+# --- 2b. FUNCIONES DE APOYO ---
 def parse_latam_number(val):
     if pd.isna(val): return 0.0
     if isinstance(val, (int, float)): return float(val)
@@ -924,7 +942,20 @@ with tabs[8]:
         df_all_thdr['t_fin'] = df_all_thdr.apply(_ultima_llegada, axis=1)
         df_all_thdr = df_all_thdr.dropna(subset=['t_ini', 't_fin'])
 
-        # Para cada franja de 15 min del día, contar trenes activos
+        # Calcular km recorridos por cada tren en su viaje
+        # Velocidad = KM_TOTAL / duración_viaje → km recorridos en los min activos de la franja
+        def _km_en_franja(t_ini, t_fin, t_f, unidad):
+            """Km recorridos por un tren en la franja [t_f, t_f+15)."""
+            duracion = t_fin - t_ini
+            if duracion <= 0: return 0.0
+            dist_total = KM_TOTAL * (2 if str(unidad).strip() == 'M' else 1)
+            vel = dist_total / duracion          # km/min
+            t_activo_ini = max(t_ini, t_f)
+            t_activo_fin = min(t_fin, t_f + 15)
+            mins_activos = max(0.0, t_activo_fin - t_activo_ini)
+            return round(vel * mins_activos, 3)
+
+        # Para cada franja de 15 min del día, contar trenes activos y km
         todas_franjas = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0,60,15)]
         filas_srv = []
         for fecha_g, grp in df_all_thdr.groupby('Fecha_str'):
@@ -934,14 +965,21 @@ with tabs[8]:
                 # Tren activo si t_ini <= t_franja < t_fin
                 mask = (grp['t_ini'] <= t_f) & (grp['t_fin'] > t_f)
                 n_total = mask.sum()
-                n_M     = (mask & (grp['Unidad'].astype(str).str.strip() == 'M')).sum()
-                if n_total > 0:
-                    filas_srv.append({
-                        'Fecha':       fecha_g,
-                        'Franja':      franja,
-                        'Servicios':   int(n_total),
-                        'Servicios_M': int(n_M)
-                    })
+                if n_total == 0:
+                    continue
+                grp_act = grp[mask]
+                n_M = (grp_act['Unidad'].astype(str).str.strip() == 'M').sum()
+                km_franja = sum(
+                    _km_en_franja(row['t_ini'], row['t_fin'], t_f, row['Unidad'])
+                    for _, row in grp_act.iterrows()
+                )
+                filas_srv.append({
+                    'Fecha':       fecha_g,
+                    'Franja':      franja,
+                    'Servicios':   int(n_total),
+                    'Servicios_M': int(n_M),
+                    'Tren_Km':     km_franja
+                })
 
         if filas_srv:
             df_servicios = pd.DataFrame(filas_srv)
@@ -967,9 +1005,12 @@ with tabs[8]:
         df_merge = df_energia.copy()
         df_merge['Servicios'] = 0
         df_merge['Servicios_M'] = 0
+        df_merge['Tren_Km'] = 0.0
     else:
         df_merge = df_servicios.copy()
         df_merge['kWh'] = 0
+    if 'Tren_Km' not in df_merge.columns:
+        df_merge['Tren_Km'] = 0.0
 
     df_merge['_ord'] = df_merge['Franja'].apply(str_franja_a_minutos)
     df_merge = df_merge.sort_values(['Fecha', '_ord']).drop(columns='_ord')
@@ -992,7 +1033,8 @@ with tabs[8]:
             df_plot = df_merge.groupby('Franja').agg(
                 kWh=('kWh','mean'),
                 Servicios=('Servicios','mean'),
-                Servicios_M=('Servicios_M','mean')
+                Servicios_M=('Servicios_M','mean'),
+                Tren_Km=('Tren_Km','mean')
             ).reset_index()
             df_plot['_ord'] = df_plot['Franja'].apply(str_franja_a_minutos)
             df_plot = df_plot.sort_values('_ord').drop(columns='_ord')
@@ -1005,12 +1047,14 @@ with tabs[8]:
     # ── Métricas rápidas ─────────────────────────────────────────────────────
     if not df_plot.empty:
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total kWh",        f"{df_plot['kWh'].sum():,.0f}")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Total kWh",         f"{df_plot['kWh'].sum():,.0f}")
         m2.metric("Pico kWh (franja)", f"{df_plot['kWh'].max():,.0f}",
                   df_plot.loc[df_plot['kWh'].idxmax(), 'Franja'])
         m3.metric("Total servicios",   f"{df_plot[col_srv].sum():.0f}")
         m4.metric("Pico servicios",    f"{df_plot[col_srv].max():.0f}",
                   df_plot.loc[df_plot[col_srv].idxmax(), 'Franja'] if df_plot[col_srv].max() > 0 else "—")
+        m5.metric("Tren-Km período",   f"{df_plot['Tren_Km'].sum():,.1f} km")
 
     st.divider()
 
@@ -1032,6 +1076,14 @@ with tabs[8]:
             marker=dict(size=5),
             yaxis='y2'
         ))
+        if 'Tren_Km' in df_plot.columns and df_plot['Tren_Km'].sum() > 0:
+            fig_dual.add_trace(go.Scatter(
+                x=df_plot['Franja'], y=df_plot['Tren_Km'],
+                name='Tren-Km recorridos',
+                mode='lines',
+                line=dict(color='#00AA44', width=2, dash='dot'),
+                yaxis='y3'
+            ))
 
         titulo = (f"Energía vs Servicios — {fecha_sel}"
                   if modo == "Por día"
@@ -1044,6 +1096,8 @@ with tabs[8]:
                        tickvals=df_plot['Franja'][::4].tolist()),
             yaxis =dict(title="kWh",       side='left',  showgrid=True),
             yaxis2=dict(title="Servicios", side='right', overlaying='y', showgrid=False),
+            yaxis3=dict(title="Tren-Km",   side='right', overlaying='y', showgrid=False,
+                        anchor='free', position=1.0, showticklabels=False),
             legend=dict(orientation='h', y=1.08),
             hovermode='x unified',
             height=450,
@@ -1094,13 +1148,14 @@ with tabs[8]:
 
     # ── Tabla detalle ─────────────────────────────────────────────────────────
     with st.expander("📋 Ver tabla de datos"):
-        cols_show = ['Franja', 'kWh', 'Servicios', 'Servicios_M']
+        cols_show = ['Franja', 'kWh', 'Servicios', 'Servicios_M', 'Tren_Km']
         cols_show = [c for c in cols_show if c in df_plot.columns]
         st.dataframe(
             df_plot[cols_show].style.format({
                 'kWh': '{:,.1f}',
                 'Servicios': '{:.1f}',
-                'Servicios_M': '{:.1f}'
+                'Servicios_M': '{:.1f}',
+                'Tren_Km': '{:.2f}'
             }),
             use_container_width=True,
             height=300
