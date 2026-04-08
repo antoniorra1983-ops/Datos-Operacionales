@@ -899,28 +899,52 @@ with tabs[8]:
             return 0
 
     # ── Construir series de SERVICIOS por franja 15 min ──────────────────────
+    # Lógica: un tren cuenta en una franja si está circulando en ese intervalo,
+    # es decir t_salida_origen <= franja < t_llegada_destino.
+    # Esto refleja que un viaje dura ~1hr y ocupa ~4 franjas de 15 min.
     df_servicios = pd.DataFrame()
     if _tiene_thdr:
         partes = [df for df in [df_thdr_v1, df_thdr_v2] if not df.empty]
         df_all_thdr = pd.concat(partes, ignore_index=True)
         df_all_thdr['Fecha_str'] = df_all_thdr['Fecha_Op'].dt.strftime('%Y-%m-%d')
 
-        # Usar Hora_Ref_Min si existe, sino buscar cualquier columna _min de salida
-        if 'Hora_Ref_Min' not in df_all_thdr.columns:
-            col_min_ref = next((c for c in df_all_thdr.columns
-                                if '_min' in c and 'Salida' in c), None)
-            if col_min_ref:
-                df_all_thdr['Hora_Ref_Min'] = df_all_thdr[col_min_ref]
+        # t_inicio: primera salida del viaje (salida desde origen)
+        # t_fin:    última llegada del viaje (llegada a destino)
+        def _primera_salida(row):
+            cols_sal = [c for c in row.index if 'Salida' in c and '_min' in c]
+            vals = [row[c] for c in cols_sal if pd.notna(row[c])]
+            return min(vals) if vals else np.nan
 
-        if 'Hora_Ref_Min' in df_all_thdr.columns:
-            df_all_thdr['Franja'] = df_all_thdr['Hora_Ref_Min'].apply(minutos_a_franja15)
-            df_servicios = (df_all_thdr
-                .dropna(subset=['Franja'])
-                .groupby(['Fecha_str', 'Franja'])
-                .agg(Servicios=('Unidad', 'count'),
-                     Servicios_M=('Unidad', lambda x: (x.astype(str).str.strip()=='M').sum()))
-                .reset_index()
-                .rename(columns={'Fecha_str': 'Fecha'}))
+        def _ultima_llegada(row):
+            cols_lle = [c for c in row.index if 'Llegada' in c and '_min' in c]
+            vals = [row[c] for c in row.index if 'Llegada' in c and '_min' in c and pd.notna(row[c])]
+            return max(vals) if vals else np.nan
+
+        df_all_thdr['t_ini'] = df_all_thdr.apply(_primera_salida, axis=1)
+        df_all_thdr['t_fin'] = df_all_thdr.apply(_ultima_llegada, axis=1)
+        df_all_thdr = df_all_thdr.dropna(subset=['t_ini', 't_fin'])
+
+        # Para cada franja de 15 min del día, contar trenes activos
+        todas_franjas = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0,60,15)]
+        filas_srv = []
+        for fecha_g, grp in df_all_thdr.groupby('Fecha_str'):
+            for franja in todas_franjas:
+                h_f, m_f = int(franja[:2]), int(franja[3:])
+                t_f = h_f * 60 + m_f
+                # Tren activo si t_ini <= t_franja < t_fin
+                mask = (grp['t_ini'] <= t_f) & (grp['t_fin'] > t_f)
+                n_total = mask.sum()
+                n_M     = (mask & (grp['Unidad'].astype(str).str.strip() == 'M')).sum()
+                if n_total > 0:
+                    filas_srv.append({
+                        'Fecha':       fecha_g,
+                        'Franja':      franja,
+                        'Servicios':   int(n_total),
+                        'Servicios_M': int(n_M)
+                    })
+
+        if filas_srv:
+            df_servicios = pd.DataFrame(filas_srv)
 
     # ── Construir series de ENERGÍA por franja 15 min ────────────────────────
     df_energia = pd.DataFrame()
