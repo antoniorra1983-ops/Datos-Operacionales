@@ -283,7 +283,7 @@ f_umr_all       = combinar_fuentes(f_umr,        DATA_DIRS["umr"])
 f_seat_all      = combinar_fuentes(f_seat_files, DATA_DIRS["seat"])
 f_bill_all      = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
 
-# Clave de caché: recalcular solo si cambian archivos o rango
+# Clave de caché: tuple con rango + nombres de archivos
 _cache_key = (
     str(start_date), str(end_date),
     tuple(sorted(f.name for f in f_v1_all)),
@@ -292,9 +292,20 @@ _cache_key = (
     tuple(sorted(f.name for f in f_seat_all)),
     tuple(sorted(f.name for f in f_bill_all)),
 )
-_recalcular = st.session_state.get('_cache_key') != _cache_key
+_hay_archivos = any([f_v1_all, f_v2_all, f_umr_all, f_seat_all, f_bill_all])
+_recalcular   = st.session_state.get('_cache_key') != _cache_key
 
-if any([f_v1_all, f_v2_all, f_umr_all, f_seat_all, f_bill_all]) and _recalcular:
+# Recuperar caché si existe y no cambió nada
+if _hay_archivos and not _recalcular and 'df_ops' in st.session_state:
+    df_ops         = st.session_state['df_ops']
+    df_thdr_v1     = st.session_state['df_thdr_v1']
+    df_thdr_v2     = st.session_state['df_thdr_v2']
+    all_tr         = st.session_state['all_tr']
+    all_seat       = st.session_state['all_seat']
+    all_fact_full  = st.session_state['all_fact_full']
+    all_prmte_full = st.session_state['all_prmte_full']
+
+if _hay_archivos and _recalcular:
     # UMR / TRENES
     if f_umr_all:
         for f in f_umr_all:
@@ -464,17 +475,15 @@ if any([f_v1_all, f_v2_all, f_umr_all, f_seat_all, f_bill_all]) and _recalcular:
     st.session_state['all_seat']      = all_seat
     st.session_state['all_fact_full'] = all_fact_full
     st.session_state['all_prmte_full']= all_prmte_full
+    # Guardar en session_state
+    st.session_state['df_ops']        = df_ops
+    st.session_state['df_thdr_v1']    = df_thdr_v1
+    st.session_state['df_thdr_v2']    = df_thdr_v2
+    st.session_state['all_tr']        = all_tr
+    st.session_state['all_seat']      = all_seat
+    st.session_state['all_fact_full'] = all_fact_full
+    st.session_state['all_prmte_full']= all_prmte_full
     st.session_state['_cache_key']    = _cache_key
-
-elif not _recalcular and '_cache_key' in st.session_state:
-    # Recuperar desde caché de sesión sin reprocesar
-    df_ops          = st.session_state.get('df_ops',     pd.DataFrame())
-    df_thdr_v1      = st.session_state.get('df_thdr_v1', pd.DataFrame())
-    df_thdr_v2      = st.session_state.get('df_thdr_v2', pd.DataFrame())
-    all_tr          = st.session_state.get('all_tr',        [])
-    all_seat        = st.session_state.get('all_seat',      [])
-    all_fact_full   = st.session_state.get('all_fact_full', [])
-    all_prmte_full  = st.session_state.get('all_prmte_full',[])
 
 # --- 7. TABS ---
 tabs = st.tabs([
@@ -746,6 +755,26 @@ def render_via_thdr(df_via, label):
 
 with tabs[7]:
     st.header("📋 Análisis THDR")
+
+    # --- DEBUG: qué ve la app en disco ---
+    with st.expander("🔧 Diagnóstico de disco", expanded=True):
+        st.caption(f"Directorio de trabajo: `{os.getcwd()}`")
+        for _key, _carpeta in DATA_DIRS.items():
+            _ruta_abs = os.path.abspath(_carpeta)
+            _existe = os.path.isdir(_ruta_abs)
+            _archivos = listar_archivos(_carpeta) if _existe else []
+            st.markdown(f"**{_key}** → `{_ruta_abs}`")
+            if not _existe:
+                st.error("❌ Carpeta NO existe")
+            elif not _archivos:
+                st.warning("⚠️ Carpeta vacía")
+            else:
+                for _a in _archivos:
+                    st.success(f"✅ {os.path.basename(_a)}")
+        st.divider()
+        st.caption(f"Archivos Vía 1 detectados: {[f.name for f in f_v1_all]}")
+        st.caption(f"Archivos Vía 2 detectados: {[f.name for f in f_v2_all]}")
+        st.caption(f"¿Hay archivos?: {_hay_archivos} | ¿Recalculando?: {_recalcular} | Caché guardada: {'df_ops' in st.session_state}")
 
     # --- Panel de Diagnóstico ---
     diags = st.session_state.get('diag_thdr', [])
