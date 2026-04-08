@@ -214,11 +214,13 @@ class _ArchivoEnDisco:
         self._path = path
         with open(path, 'rb') as f:
             self._bio = BytesIO(f.read())
-    def read(self, *a, **kw):   return self._bio.read(*a, **kw)
-    def seek(self, *a, **kw):   return self._bio.seek(*a, **kw)
-    def tell(self, *a, **kw):   return self._bio.tell(*a, **kw)
-    def getbuffer(self):        return self._bio.getvalue()
-    def __str__(self):          return self._path
+    def read(self, *a, **kw):     return self._bio.read(*a, **kw)
+    def seek(self, *a, **kw):     return self._bio.seek(*a, **kw)
+    def tell(self, *a, **kw):     return self._bio.tell(*a, **kw)
+    def seekable(self):           return True
+    def readable(self):           return True
+    def getbuffer(self):          return self._bio.getvalue()
+    def __str__(self):            return self._path
 
 def combinar_fuentes(uploaded_list, carpeta):
     nombres_subidos = {uf.name for uf in (uploaded_list or [])}
