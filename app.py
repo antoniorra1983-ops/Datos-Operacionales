@@ -615,8 +615,8 @@ with tabs[0]:
 
             st.divider() # Línea separadora para mantener orden visual
             
-            # --- NUEVA ESTRUCTURA: KILOMETRAJE Y RENDIMIENTO (UMR) ---
-            st.markdown("### 🛤️ KILOMETRAJE Y DESEMPEÑO")
+            # --- SEGUNDA ESTRUCTURA: KILOMETRAJE Y RENDIMIENTO (UMR) ---
+            # Se eliminó el subtítulo a petición para mantener todo bajo DATOS OPERACIONALES
             c_chart_k, c_card_k, c_chart_u, c_card_u = st.columns([2.5, 1, 2.5, 1]) 
             
             with c_chart_k:
@@ -657,6 +657,48 @@ with tabs[0]:
                 umr_global = (tot_tren_km / tot_odometro * 100) if tot_odometro > 0 else 0
                 
                 st.metric("Tasa UMR Global", f"{umr_global:.1f} %")
+                
+            st.divider() # Línea separadora
+            
+            # --- TERCERA ESTRUCTURA: ENERGÍA E IDE ---
+            c_chart_e, c_card_e, c_chart_i, c_card_i = st.columns([2.5, 1, 2.5, 1]) 
+            
+            # Renombramos las columnas temporalmente para que la leyenda en Plotly salga perfecta en Español
+            df_plot_ener = df_resumen.rename(columns={'E_Tr': 'Tracción', 'E_12': 'Baja Tensión'})
+            
+            with c_chart_e:
+                fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], 
+                                  barmode='stack', text_auto='.3s',
+                                  color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
+                                  hover_data=hover_config, title="Consumo Energético (kWh)")
+                
+                fig_ener.update_traces(textposition='inside') # En gráficos apilados el texto va adentro
+                fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), 
+                                     title=dict(font=dict(size=15), automargin=True),
+                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'})
+                
+            with c_card_e:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.metric("Total Tracción", f"{df_plot_ener['Tracción'].sum():,.0f} kWh")
+                st.metric("Total Baja Tensión", f"{df_plot_ener['Baja Tensión'].sum():,.0f} kWh")
+
+            with c_chart_i:
+                fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
+                                  text_auto='.3f', # 3 decimales para ver variaciones sutiles en la eficiencia
+                                  color_discrete_sequence=["#E85500"], 
+                                  hover_data=hover_config, title="Desempeño Energético (IDE)")
+                fig_ide_bar.update_traces(textposition='outside')
+                fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
+                st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'})
+                
+            with c_card_i:
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                # Cálculo matemáticamente correcto del IDE Global
+                tot_traccion_real = df_resumen['E_Tr'].sum()
+                ide_global = (tot_traccion_real / tot_odometro) if tot_odometro > 0 else 0
+                
+                st.metric("IDE Global", f"{ide_global:.3f} kWh/km")
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
