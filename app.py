@@ -329,7 +329,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v9_feriados"
+_CACHE_VERSION = "v10_fechas_es"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -567,10 +567,17 @@ with tabs[0]:
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
             
-            # Programación Defensiva: Validar y configurar las columnas para el tooltip en español
-            hover_config = {'Fecha': False, 'Fecha (ES)': True}
+            # Programación Defensiva Estricta: NADA se asume. Todo se valida.
+            hover_config = {}
+            if 'Fecha (ES)' in df_resumen.columns:
+                hover_config['Fecha'] = False       # Oculta la fecha original cruda
+                hover_config['Fecha (ES)'] = True   # Muestra la fecha en español
+            else:
+                hover_config['Fecha'] = True        # Fallback de seguridad
+                
             for col in ['Tipo Día', 'Nombre Feriado']:
-                if col in df_resumen.columns: hover_config[col] = True
+                if col in df_resumen.columns: 
+                    hover_config[col] = True
             
             # --- NUEVA ESTRUCTURA: SERVICIOS Y PAX LADO A LADO ---
             # Se aumentó ligeramente la proporción del gráfico para evitar compresión de títulos
