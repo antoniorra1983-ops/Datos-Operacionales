@@ -96,9 +96,15 @@ def parse_latam_number(val):
     except ValueError: return 0.0
 
 def get_tipo_dia(fch):
+    if fch is None: return "N/A"
     if fch in chile_holidays or fch.weekday() == 6: return "D/F"
     if fch.weekday() == 5: return "S"
     return "L"
+
+def obtener_nombre_feriado(fch):
+    if fch is None: return "No aplica"
+    # El método .get() de la librería holidays devuelve el nombre del feriado
+    return chile_holidays.get(fch, "No es feriado")
 
 # --- 4. PERSISTENCIA EN DISCO ---
 DATA_DIRS = {
@@ -439,7 +445,7 @@ elif _hay_archivos and _recalcular:
 
     # 4. Consolidación de Operaciones
     if all_ops:
-        df_ops=pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum","Tren-Km [km]":"sum","Tipo Día":"first"}).reset_index()
+        df_ops=pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum","Tren-Km [km]":"sum"}).reset_index()
         df_f_d=(pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha","E_Fact"]))
         df_p_d=(pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha","E_Prmte"]))
         df_s_d=(pd.DataFrame(all_seat).groupby("Fecha").agg({"E_Total":"sum","E_Tr":"sum","E_12":"sum"}).reset_index().rename(columns={"E_Total":"E_Seat_T","E_Tr":"E_Seat_Tr","E_12":"E_Seat_12"}) if all_seat else pd.DataFrame(columns=["Fecha","E_Seat_T","E_Seat_Tr","E_Seat_12"]))
@@ -447,6 +453,10 @@ elif _hay_archivos and _recalcular:
         for dff in [df_ops,df_f_d,df_p_d,df_s_d]: dff['Fecha']=pd.to_datetime(dff['Fecha']).dt.normalize()
         df_ops=(df_ops.merge(df_f_d,on="Fecha",how="left").merge(df_p_d,on="Fecha",how="left").merge(df_s_d,on="Fecha",how="left").fillna(0))
         
+        # ---> RECALCULAMOS TIPO DÍA DIRECTO EN EL MAESTRO Y OBTENEMOS EL NOMBRE DEL FERIADO <---
+        df_ops['Tipo Día'] = df_ops['Fecha'].apply(lambda x: get_tipo_dia(x.date() if pd.notna(x) else None))
+        df_ops['Nombre Feriado'] = df_ops['Fecha'].apply(lambda x: obtener_nombre_feriado(x.date() if pd.notna(x) else None))
+
         def jerarquia(row):
             if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
             elif row['E_Prmte']>0:  tot,src=row['E_Prmte'],"PRMTE"
@@ -545,10 +555,15 @@ with tabs[0]:
             c4.metric("Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
             c5.metric("PAX", f"{int(df_resumen['PAX'].sum()):,}")
             
-            st.plotly_chart(go.Figure(go.Bar(x=df_resumen['Fecha'],y=df_resumen['Odómetro [km]'],marker_color="#005195"))
-                            .update_layout(title="Odómetro Diario",xaxis_title="Fecha",yaxis_title="km"),use_container_width=True)
-            st.plotly_chart(go.Figure(go.Scatter(x=df_resumen['Fecha'],y=df_resumen['IDE (kWh/km)'],mode='lines+markers',line=dict(color="#E85500")))
-                            .update_layout(title="IDE Diario (kWh/km)",xaxis_title="Fecha",yaxis_title="kWh/km"),use_container_width=True)
+            # Usar Plotly Express para incluir fácilmente el Tipo de Día y Nombre del Feriado al pasar el mouse
+            fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
+                             hover_data=['Tipo Día', 'Nombre Feriado'], title="Odómetro Diario")
+            st.plotly_chart(fig_odo, use_container_width=True)
+            
+            fig_ide = px.line(df_resumen, x='Fecha', y='IDE (kWh/km)', markers=True, color_discrete_sequence=["#E85500"],
+                              hover_data=['Tipo Día', 'Nombre Feriado'], title="IDE Diario (kWh/km)")
+            st.plotly_chart(fig_ide, use_container_width=True)
+            
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 with tabs[1]:
