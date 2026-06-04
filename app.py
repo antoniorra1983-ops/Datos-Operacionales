@@ -548,15 +548,36 @@ with tabs[0]:
         if df_resumen.empty:
             st.warning("No hay datos operacionales para los filtros seleccionados.")
         else:
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
-            c2.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
-            c3.metric("IDE Promedio",  f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
-            c4.metric("Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
-            c5.metric("PAX", f"{int(df_resumen['PAX'].sum()):,}")
+            st.markdown("### 🚄 DATOS OPERACIONALES")
             
             # Programación Defensiva: Validar que las columnas existen antes de pasarlas a Plotly
             hover_cols = [col for col in ['Tipo Día', 'Nombre Feriado'] if col in df_resumen.columns]
+            
+            # --- NUEVA ESTRUCTURA: GRÁFICO + TARJETA AL LADO ---
+            c_chart, c_card = st.columns([3, 1]) # Proporción 75% gráfico, 25% tarjeta
+            
+            with c_chart:
+                fig_serv = px.bar(df_resumen, x='Fecha', y='Servicios', 
+                                  text_auto=True, # Muestra el valor automáticamente en cada barra
+                                  color_discrete_sequence=["#005195"],
+                                  hover_data=hover_cols, title="Servicios Diarios Programados")
+                fig_serv.update_traces(textposition='outside') # Coloca el texto fuera de la barra si es posible
+                fig_serv.update_layout(margin=dict(t=40, b=0, l=0, r=0)) # Ajuste de márgenes
+                st.plotly_chart(fig_serv, use_container_width=True)
+                
+            with c_card:
+                st.markdown("<br><br>", unsafe_allow_html=True) # Espaciado vertical para centrar la tarjeta con el gráfico
+                st.metric("Total Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
+
+            st.divider() # Línea separadora para mantener orden visual
+            
+            # --- RESTO DE LAS MÉTRICAS ---
+            st.markdown("#### Otras Métricas Globales")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
+            c2.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
+            c3.metric("IDE Promedio",  f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
+            c4.metric("PAX Total", f"{int(df_resumen['PAX'].sum()):,}")
             
             # Usar Plotly Express para incluir fácilmente el Tipo de Día y Nombre del Feriado al pasar el mouse
             fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
