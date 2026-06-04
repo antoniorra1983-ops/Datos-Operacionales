@@ -313,7 +313,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v8_pax_servicios"
+_CACHE_VERSION = "v9_feriados"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -555,13 +555,16 @@ with tabs[0]:
             c4.metric("Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
             c5.metric("PAX", f"{int(df_resumen['PAX'].sum()):,}")
             
+            # Programación Defensiva: Validar que las columnas existen antes de pasarlas a Plotly
+            hover_cols = [col for col in ['Tipo Día', 'Nombre Feriado'] if col in df_resumen.columns]
+            
             # Usar Plotly Express para incluir fácilmente el Tipo de Día y Nombre del Feriado al pasar el mouse
             fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
-                             hover_data=['Tipo Día', 'Nombre Feriado'], title="Odómetro Diario")
+                             hover_data=hover_cols, title="Odómetro Diario")
             st.plotly_chart(fig_odo, use_container_width=True)
             
             fig_ide = px.line(df_resumen, x='Fecha', y='IDE (kWh/km)', markers=True, color_discrete_sequence=["#E85500"],
-                              hover_data=['Tipo Día', 'Nombre Feriado'], title="IDE Diario (kWh/km)")
+                              hover_data=hover_cols, title="IDE Diario (kWh/km)")
             st.plotly_chart(fig_ide, use_container_width=True)
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
