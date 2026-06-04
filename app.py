@@ -651,9 +651,12 @@ with tabs[0]:
                 
             with c_card_u:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                # Programación defensiva para el promedio: evitar NaN si el dataframe está vacío
-                promedio_umr = df_resumen['UMR (%)'].mean() if not df_resumen.empty else 0
-                st.metric("UMR Promedio", f"{promedio_umr:.1f} %")
+                # Programación defensiva y corrección matemática: Promedio ponderado real
+                tot_tren_km = df_resumen['Tren-Km [km]'].sum()
+                tot_odometro = df_resumen['Odómetro [km]'].sum()
+                umr_global = (tot_tren_km / tot_odometro * 100) if tot_odometro > 0 else 0
+                
+                st.metric("Tasa UMR Global", f"{umr_global:.1f} %")
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
