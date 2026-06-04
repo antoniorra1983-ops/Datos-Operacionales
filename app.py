@@ -307,7 +307,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v7_optimizado"
+_CACHE_VERSION = "v8_pax_servicios"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -484,6 +484,31 @@ elif _hay_archivos and _recalcular:
         p_cv2 = [d for d in p_cv2 if not d.empty]
         df_carga_v2 = pd.concat(p_cv2, ignore_index=True) if p_cv2 else pd.DataFrame()
 
+    # --- AGREGAR SERVICIOS Y PAX AL DATAFRAME PRINCIPAL DE OPERACIONES ---
+    if not df_ops.empty:
+        # Sumarizar Servicios
+        if not df_thdr_v1.empty or not df_thdr_v2.empty:
+            s1 = df_thdr_v1.groupby('Fecha_Op').size().reset_index(name='V1_S') if not df_thdr_v1.empty else pd.DataFrame(columns=['Fecha_Op', 'V1_S'])
+            s2 = df_thdr_v2.groupby('Fecha_Op').size().reset_index(name='V2_S') if not df_thdr_v2.empty else pd.DataFrame(columns=['Fecha_Op', 'V2_S'])
+            df_servicios = pd.merge(s1, s2, on='Fecha_Op', how='outer').fillna(0)
+            df_servicios['Servicios'] = df_servicios['V1_S'] + df_servicios['V2_S']
+            df_servicios = df_servicios.rename(columns={'Fecha_Op': 'Fecha'})
+            df_servicios['Fecha'] = pd.to_datetime(df_servicios['Fecha']).dt.normalize()
+            df_ops = df_ops.merge(df_servicios[['Fecha', 'Servicios']], on='Fecha', how='left').fillna({'Servicios': 0})
+        else:
+            df_ops['Servicios'] = 0
+
+        # Sumarizar Pasajeros
+        if not df_carga_v1.empty or not df_carga_v2.empty:
+            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V1') if not df_carga_v1.empty else pd.DataFrame(columns=['Fecha', 'PAX_V1'])
+            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V2') if not df_carga_v2.empty else pd.DataFrame(columns=['Fecha', 'PAX_V2'])
+            df_pax = pd.merge(p1, p2, on='Fecha', how='outer').fillna(0)
+            df_pax['PAX'] = df_pax['PAX_V1'] + df_pax['PAX_V2']
+            df_pax['Fecha'] = pd.to_datetime(df_pax['Fecha']).dt.normalize()
+            df_ops = df_ops.merge(df_pax[['Fecha', 'PAX']], on='Fecha', how='left').fillna({'PAX': 0})
+        else:
+            df_ops['PAX'] = 0
+
     # Guardado en sesión
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
@@ -513,10 +538,12 @@ with tabs[0]:
         if df_resumen.empty:
             st.warning("No hay datos operacionales para los filtros seleccionados.")
         else:
-            c1,c2,c3=st.columns(3)
-            c1.metric("Odómetro Total",f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
             c2.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
             c3.metric("IDE Promedio",  f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
+            c4.metric("Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
+            c5.metric("PAX", f"{int(df_resumen['PAX'].sum()):,}")
             
             st.plotly_chart(go.Figure(go.Bar(x=df_resumen['Fecha'],y=df_resumen['Odómetro [km]'],marker_color="#005195"))
                             .update_layout(title="Odómetro Diario",xaxis_title="Fecha",yaxis_title="km"),use_container_width=True)
