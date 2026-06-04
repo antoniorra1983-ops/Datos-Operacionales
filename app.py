@@ -329,7 +329,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v10_fechas_es"
+_CACHE_VERSION = "v11_umr_calc"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -485,6 +485,9 @@ elif _hay_archivos and _recalcular:
             
         df_ops[['E_Total','E_Tr','E_12','% Tracción','% 12 kV','Fuente']]=df_ops.apply(jerarquia,axis=1,result_type='expand')
         df_ops['IDE (kWh/km)']=df_ops.apply(lambda r: r['E_Tr']/r['Odómetro [km]'] if r['Odómetro [km]']>0 else 0,axis=1)
+        
+        # ---> NUEVO CÁLCULO: Tasa UMR (Tren-Km / Odómetro) protegida contra división por cero <---
+        df_ops['UMR (%)'] = df_ops.apply(lambda r: (r['Tren-Km [km]'] / r['Odómetro [km]']) * 100 if r['Odómetro [km]'] > 0 else 0, axis=1)
 
     # 5. Procesamiento THDR
     diag_thdr=[]
@@ -637,18 +640,20 @@ with tabs[0]:
                 st.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
 
             with c_chart_u:
-                # Gráfico de Desempeño Energético (UMR)
-                fig_ide = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
-                                  text_auto='.2f', # 2 decimales para precisión en eficiencia
+                # Gráfico del Porcentaje UMR
+                fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', 
+                                  text_auto='.1f', # 1 decimal para precisión sin ensuciar la barra
                                   color_discrete_sequence=["#E85500"], 
-                                  hover_data=hover_config, title="Desempeño Energético (IDE UMR)")
-                fig_ide.update_traces(textposition='outside')
-                fig_ide.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
-                st.plotly_chart(fig_ide, use_container_width=True, config={'locale': 'es'})
+                                  hover_data=hover_config, title="Tasa Acoplamiento (UMR %)")
+                fig_umr.update_traces(textposition='outside', texttemplate='%{y:.1f}%')
+                fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
+                st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'})
                 
             with c_card_u:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("IDE Promedio", f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
+                # Programación defensiva para el promedio: evitar NaN si el dataframe está vacío
+                promedio_umr = df_resumen['UMR (%)'].mean() if not df_resumen.empty else 0
+                st.metric("UMR Promedio", f"{promedio_umr:.1f} %")
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
