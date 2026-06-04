@@ -15,6 +15,15 @@ chile_holidays = holidays.Chile()
 st.markdown("""<style>
 .stMetric{background-color:#ffffff;padding:20px;border-radius:10px;
 border-left:5px solid #005195;box-shadow:0 2px 4px rgba(0,0,0,0.05);}
+/* Evitar que los títulos de las tarjetas (Métricas) se corten: Responsive wrapping */
+div[data-testid="stMetricLabel"] > label {
+    white-space: normal !important; 
+    word-wrap: break-word !important; 
+    min-height: 2.5rem;
+    font-size: 0.95rem;
+}
+/* Forzar scroll horizontal SOLO en tablas gigantes, no en el layout principal */
+.stDataFrame { overflow-x: auto; }
 </style>""", unsafe_allow_html=True)
 
 # --- 2. CONSTANTES DE RED Y CONFIGURACIONES ---
@@ -105,6 +114,13 @@ def obtener_nombre_feriado(fch):
     if fch is None: return "No aplica"
     # El método .get() de la librería holidays devuelve el nombre del feriado
     return chile_holidays.get(fch, "No es feriado")
+
+def obtener_fecha_es(fecha):
+    """Convierte un objeto fecha a un string amigable en Español"""
+    if pd.isna(fecha): return ""
+    meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    dias = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+    return f"{dias[fecha.weekday()]} {fecha.day} {meses[fecha.month - 1]} {fecha.year}"
 
 # --- 4. PERSISTENCIA EN DISCO ---
 DATA_DIRS = {
@@ -456,6 +472,7 @@ elif _hay_archivos and _recalcular:
         # ---> RECALCULAMOS TIPO DÍA DIRECTO EN EL MAESTRO Y OBTENEMOS EL NOMBRE DEL FERIADO <---
         df_ops['Tipo Día'] = df_ops['Fecha'].apply(lambda x: get_tipo_dia(x.date() if pd.notna(x) else None))
         df_ops['Nombre Feriado'] = df_ops['Fecha'].apply(lambda x: obtener_nombre_feriado(x.date() if pd.notna(x) else None))
+        df_ops['Fecha (ES)'] = df_ops['Fecha'].apply(obtener_fecha_es)
 
         def jerarquia(row):
             if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
@@ -550,20 +567,24 @@ with tabs[0]:
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
             
-            # Programación Defensiva: Validar que las columnas existen antes de pasarlas a Plotly
-            hover_cols = [col for col in ['Tipo Día', 'Nombre Feriado'] if col in df_resumen.columns]
+            # Programación Defensiva: Validar y configurar las columnas para el tooltip en español
+            hover_config = {'Fecha': False, 'Fecha (ES)': True}
+            for col in ['Tipo Día', 'Nombre Feriado']:
+                if col in df_resumen.columns: hover_config[col] = True
             
             # --- NUEVA ESTRUCTURA: SERVICIOS Y PAX LADO A LADO ---
-            c_chart_s, c_card_s, c_chart_p, c_card_p = st.columns([3, 1, 3, 1]) 
+            # Se aumentó ligeramente la proporción del gráfico para evitar compresión de títulos
+            c_chart_s, c_card_s, c_chart_p, c_card_p = st.columns([2.5, 1, 2.5, 1]) 
             
             with c_chart_s:
                 fig_serv = px.bar(df_resumen, x='Fecha', y='Servicios', 
                                   text_auto=True, # Muestra el valor automáticamente en cada barra
                                   color_discrete_sequence=["#005195"],
-                                  hover_data=hover_cols, title="Servicios Programados")
+                                  hover_data=hover_config, title="Servicios Programados")
                 fig_serv.update_traces(textposition='outside')
-                fig_serv.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_serv, use_container_width=True)
+                # automargin previene que se corten los títulos
+                fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
+                st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'})
                 
             with c_card_s:
                 st.markdown("<br><br>", unsafe_allow_html=True)
@@ -573,10 +594,10 @@ with tabs[0]:
                 fig_pax = px.bar(df_resumen, x='Fecha', y='PAX', 
                                   text_auto='.2s', # Formato 's' para miles (ej. 10k, 12k) evita saturar la barra
                                   color_discrete_sequence=["#E85500"], # Naranja para contrastar Demanda vs Oferta
-                                  hover_data=hover_cols, title="Pasajeros Transportados (PAX)")
+                                  hover_data=hover_config, title="Pasajeros Transportados (PAX)")
                 fig_pax.update_traces(textposition='outside')
-                fig_pax.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_pax, use_container_width=True)
+                fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
+                st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'})
                 
             with c_card_p:
                 st.markdown("<br><br>", unsafe_allow_html=True)
@@ -593,12 +614,14 @@ with tabs[0]:
             
             # Usar Plotly Express para incluir fácilmente el Tipo de Día y Nombre del Feriado al pasar el mouse
             fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
-                             hover_data=hover_cols, title="Odómetro Diario")
-            st.plotly_chart(fig_odo, use_container_width=True)
+                             hover_data=hover_config, title="Odómetro Diario")
+            fig_odo.update_layout(title=dict(font=dict(size=15), automargin=True))
+            st.plotly_chart(fig_odo, use_container_width=True, config={'locale': 'es'})
             
             fig_ide = px.line(df_resumen, x='Fecha', y='IDE (kWh/km)', markers=True, color_discrete_sequence=["#E85500"],
-                              hover_data=hover_cols, title="IDE Diario (kWh/km)")
-            st.plotly_chart(fig_ide, use_container_width=True)
+                              hover_data=hover_config, title="IDE Diario (kWh/km)")
+            fig_ide.update_layout(title=dict(font=dict(size=15), automargin=True))
+            st.plotly_chart(fig_ide, use_container_width=True, config={'locale': 'es'})
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
