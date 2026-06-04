@@ -407,7 +407,8 @@ def procesar_thdr_eficiente(file, start_date, end_date):
 # --- 4. PERSISTENCIA EN DISCO ---
 import os
 DATA_DIRS = {"v1":"data/thdr_v1","v2":"data/thdr_v2","umr":"data/umr",
-             "seat":"data/seat","bill":"data/facturacion"}
+             "seat":"data/seat","bill":"data/facturacion",
+             "carga_v1":"data/carga_v1", "carga_v2":"data/carga_v2"}
 for _d in DATA_DIRS.values(): os.makedirs(_d, exist_ok=True)
 
 def guardar_archivo(uf, carpeta):
@@ -436,6 +437,7 @@ def combinar_fuentes(ul, carpeta):
 
 # --- 5. INICIALIZACIÓN ---
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
+df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame()
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 
 # --- 6. SIDEBAR ---
@@ -450,14 +452,18 @@ with st.sidebar:
     f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True)
     f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True)
     f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True)
+    f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True)
+    f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True)
+    
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
-                    (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"])]:
+                    (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
+                    (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"])]:
         for uf in (_ul or []):
             dest=os.path.join(_ca,uf.name)
             if not os.path.exists(dest): guardar_archivo(uf,_ca)
     st.divider()
     with st.expander("🗂️ Archivos guardados"):
-        _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación"}
+        _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación", "carga_v1":"Pasajeros V1", "carga_v2":"Pasajeros V2"}
         for _key,_carpeta in DATA_DIRS.items():
             _arch=listar_archivos(_carpeta)
             if _arch:
@@ -472,13 +478,16 @@ f_v2_all   = combinar_fuentes(f_v2,         DATA_DIRS["v2"])
 f_umr_all  = combinar_fuentes(f_umr,        DATA_DIRS["umr"])
 f_seat_all = combinar_fuentes(f_seat_files, DATA_DIRS["seat"])
 f_bill_all = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
+f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
+f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
-_CACHE_VERSION = "v5_perfil_vel"
+_CACHE_VERSION = "v6_pasajeros"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
-              tuple(sorted(f.name for f in f_bill_all)))
-_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all])
+              tuple(sorted(f.name for f in f_bill_all)),
+              tuple(sorted(f.name for f in f_carga_v1_all)), tuple(sorted(f.name for f in f_carga_v2_all)))
+_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all])
 _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
 if _hay_archivos and not _recalcular and 'df_ops' in st.session_state:
@@ -486,6 +495,8 @@ if _hay_archivos and not _recalcular and 'df_ops' in st.session_state:
     df_thdr_v2=st.session_state['df_thdr_v2']; all_tr=st.session_state['all_tr']
     all_seat=st.session_state['all_seat']; all_fact_full=st.session_state['all_fact_full']
     all_prmte_full=st.session_state['all_prmte_full']
+    df_carga_v1=st.session_state.get('df_carga_v1', pd.DataFrame())
+    df_carga_v2=st.session_state.get('df_carga_v2', pd.DataFrame())
 
 _errores_proc={}
 
@@ -621,13 +632,60 @@ if _hay_archivos and _recalcular:
         p2=[r[0] for r in r2 if not r[0].empty]
         df_thdr_v2=pd.concat(p2,ignore_index=True) if p2 else pd.DataFrame()
     if diag_thdr: st.session_state['diag_thdr']=diag_thdr
+    
+    def procesar_carga_pasajeros(f):
+        try:
+            is_csv = f.name.lower().endswith('.csv')
+            if is_csv:
+                try: df = pd.read_csv(f, header=None, encoding='utf-8')
+                except: 
+                    f.seek(0)
+                    df = pd.read_csv(f, header=None, encoding='latin-1')
+            else:
+                eu = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                df = pd.read_excel(f, engine=eu, header=None)
+            
+            # Buscar dónde empiezan los encabezados
+            h_idx = next((i for i in range(min(30, len(df))) if 'N° THDR' in str(df.iloc[i].values).upper() or 'N° VIAJE' in str(df.iloc[i].values).upper()), None)
+            if h_idx is not None:
+                f.seek(0)
+                if is_csv:
+                    try: df = pd.read_csv(f, header=h_idx, encoding='utf-8')
+                    except:
+                        f.seek(0)
+                        df = pd.read_csv(f, header=h_idx, encoding='latin-1')
+                else:
+                    df = pd.read_excel(f, engine=eu, header=h_idx)
+                    
+                df.columns = [str(c).strip() for c in df.columns]
+                if 'Fecha' in df.columns:
+                    df['Fecha'] = pd.to_datetime(df['Fecha'], format='%d-%m-%Y', errors='coerce').dt.normalize()
+                    df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
+                if 'Total a Bordo' in df.columns:
+                    df['Total a Bordo'] = pd.to_numeric(df['Total a Bordo'], errors='coerce').fillna(0)
+                return df
+            return pd.DataFrame()
+        except Exception as e:
+            return pd.DataFrame()
+
+    if f_carga_v1_all:
+        p_cv1 = [procesar_carga_pasajeros(f) for f in f_carga_v1_all]
+        p_cv1 = [d for d in p_cv1 if not d.empty]
+        df_carga_v1 = pd.concat(p_cv1, ignore_index=True) if p_cv1 else pd.DataFrame()
+
+    if f_carga_v2_all:
+        p_cv2 = [procesar_carga_pasajeros(f) for f in f_carga_v2_all]
+        p_cv2 = [d for d in p_cv2 if not d.empty]
+        df_carga_v2 = pd.concat(p_cv2, ignore_index=True) if p_cv2 else pd.DataFrame()
+
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
-                              'all_prmte_full':all_prmte_full,'_cache_key':_cache_key})
+                              'all_prmte_full':all_prmte_full,'_cache_key':_cache_key,
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2})
 
 # --- 7. TABS ---
 tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Comparación hr",
-              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía"])
+              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros"])
 
 # TAB 0: Resumen
 with tabs[0]:
@@ -794,3 +852,55 @@ with tabs[8]:
             st.info("No hay solapamiento de fechas entre los archivos THDR y los datos de Energía.")
     else:
         st.info("Carga archivos THDR (Vía 1 y Vía 2) junto con Facturación/PRMTE/SEAT para ver este cruce.")
+
+# TAB 9: Pasajeros
+with tabs[9]:
+    st.write("### Flujo y Carga de Pasajeros")
+    if not df_carga_v1.empty or not df_carga_v2.empty:
+        c_p1, c_p2 = st.columns(2)
+        
+        with c_p1:
+            st.write("#### Total de Pasajeros por Día")
+            df_c1_agg = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index() if not df_carga_v1.empty else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
+            df_c2_agg = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index() if not df_carga_v2.empty else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
+            
+            fig_pas = go.Figure()
+            if not df_c1_agg.empty:
+                fig_pas.add_trace(go.Bar(x=df_c1_agg['Fecha'], y=df_c1_agg['Total a Bordo'], name='Vía 1 (Puerto->Limache)', marker_color='#005195'))
+            if not df_c2_agg.empty:
+                fig_pas.add_trace(go.Bar(x=df_c2_agg['Fecha'], y=df_c2_agg['Total a Bordo'], name='Vía 2 (Limache->Puerto)', marker_color='#E85500'))
+            
+            fig_pas.update_layout(barmode='group', xaxis_title="Fecha", yaxis_title="Total Pasajeros", margin=dict(t=30))
+            st.plotly_chart(fig_pas, use_container_width=True)
+
+        with c_p2:
+            st.write("#### Estaciones con Carga Máxima (Frecuencia)")
+            est_v1 = df_carga_v1['Estación Máxima'].value_counts().reset_index() if not df_carga_v1.empty else pd.DataFrame(columns=['Estación Máxima', 'count'])
+            est_v2 = df_carga_v2['Estación Máxima'].value_counts().reset_index() if not df_carga_v2.empty else pd.DataFrame(columns=['Estación Máxima', 'count'])
+            
+            if not est_v1.empty: est_v1.columns = ['Estación', 'Frecuencia']; est_v1['Vía'] = 'Vía 1'
+            if not est_v2.empty: est_v2.columns = ['Estación', 'Frecuencia']; est_v2['Vía'] = 'Vía 2'
+            
+            df_est = pd.concat([est_v1, est_v2]).sort_values('Frecuencia', ascending=True).tail(15)
+            
+            if not df_est.empty:
+                fig_est = px.bar(df_est, x='Frecuencia', y='Estación', color='Vía', orientation='h',
+                                 color_discrete_map={'Vía 1': '#005195', 'Vía 2': '#E85500'})
+                fig_est.update_layout(xaxis_title="Frecuencia (N° de Viajes)", yaxis_title="Estación", margin=dict(t=30))
+                st.plotly_chart(fig_est, use_container_width=True)
+
+        st.write("#### Detalle de Viajes (Muestra)")
+        if not df_carga_v1.empty:
+            st.caption("Vía 1 (Puerto -> Limache)")
+            dv_c1 = df_carga_v1.copy()
+            dv_c1['Fecha'] = dv_c1['Fecha'].dt.strftime('%Y-%m-%d')
+            st.dataframe(make_columns_unique(dv_c1.head(100)), use_container_width=True)
+            
+        if not df_carga_v2.empty:
+            st.caption("Vía 2 (Limache -> Puerto)")
+            dv_c2 = df_carga_v2.copy()
+            dv_c2['Fecha'] = dv_c2['Fecha'].dt.strftime('%Y-%m-%d')
+            st.dataframe(make_columns_unique(dv_c2.head(100)), use_container_width=True)
+            
+    else:
+        st.info("No se han procesado datos de carga de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
