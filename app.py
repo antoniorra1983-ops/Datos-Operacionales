@@ -500,15 +500,28 @@ with tabs[0]:
         with st.expander(f"⚠️ {len(_ep)} archivo(s) con error",expanded=True):
             for _n,_m in _ep.items(): st.error(f"**{_n}**: {_m}")
     if not df_ops.empty:
-        c1,c2,c3=st.columns(3)
-        c1.metric("Odómetro Total",f"{df_ops['Odómetro [km]'].sum():,.1f} km")
-        c2.metric("Tren-Km Total", f"{df_ops['Tren-Km [km]'].sum():,.1f} km")
-        c3.metric("IDE Promedio",  f"{df_ops['IDE (kWh/km)'].mean():.4f} kWh/km")
+        st.markdown("### 🎛️ Filtros de Resumen")
+        filtro_dia = st.multiselect(
+            "Tipo de Jornada:",
+            options=["L", "S", "D/F"],
+            default=["L", "S", "D/F"],
+            format_func=lambda x: {"L": "Laboral (L)", "S": "Sábado (S)", "D/F": "Domingo y Festivo (D/F)"}.get(x, x)
+        )
         
-        st.plotly_chart(go.Figure(go.Bar(x=df_ops['Fecha'],y=df_ops['Odómetro [km]'],marker_color="#005195"))
-                        .update_layout(title="Odómetro Diario",xaxis_title="Fecha",yaxis_title="km"),use_container_width=True)
-        st.plotly_chart(go.Figure(go.Scatter(x=df_ops['Fecha'],y=df_ops['IDE (kWh/km)'],mode='lines+markers',line=dict(color="#E85500")))
-                        .update_layout(title="IDE Diario (kWh/km)",xaxis_title="Fecha",yaxis_title="kWh/km"),use_container_width=True)
+        df_resumen = df_ops[df_ops['Tipo Día'].isin(filtro_dia)]
+        
+        if df_resumen.empty:
+            st.warning("No hay datos operacionales para los filtros seleccionados.")
+        else:
+            c1,c2,c3=st.columns(3)
+            c1.metric("Odómetro Total",f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
+            c2.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
+            c3.metric("IDE Promedio",  f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
+            
+            st.plotly_chart(go.Figure(go.Bar(x=df_resumen['Fecha'],y=df_resumen['Odómetro [km]'],marker_color="#005195"))
+                            .update_layout(title="Odómetro Diario",xaxis_title="Fecha",yaxis_title="km"),use_container_width=True)
+            st.plotly_chart(go.Figure(go.Scatter(x=df_resumen['Fecha'],y=df_resumen['IDE (kWh/km)'],mode='lines+markers',line=dict(color="#E85500")))
+                            .update_layout(title="IDE Diario (kWh/km)",xaxis_title="Fecha",yaxis_title="kWh/km"),use_container_width=True)
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 with tabs[1]:
