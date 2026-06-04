@@ -764,9 +764,39 @@ with tabs[4]:
 with tabs[5]:
     if not df_ops.empty and df_ops['E_Tr'].sum() > 0:
         st.write("### Relación entre Kilometraje y Consumo de Tracción")
-        fig_reg = px.scatter(df_ops, x="Odómetro [km]", y="E_Tr", trendline="ols", hover_data=["Fecha"],
+        
+        # Filtrar registros válidos
+        df_reg = df_ops.dropna(subset=["Odómetro [km]", "E_Tr"])
+        df_reg = df_reg[(df_reg["Odómetro [km]"] > 0) & (df_reg["E_Tr"] > 0)].sort_values("Odómetro [km]")
+        
+        fig_reg = px.scatter(df_reg, x="Odómetro [km]", y="E_Tr", hover_data=["Fecha"],
                              title="Regresión: Odómetro vs Energía de Tracción",
                              color_discrete_sequence=["#005195"])
+        
+        if len(df_reg) > 1:
+            # Calcular regresión lineal usando Numpy para evitar la dependencia de statsmodels
+            x_vals = df_reg["Odómetro [km]"].values
+            y_vals = df_reg["E_Tr"].values
+            slope, intercept = np.polyfit(x_vals, y_vals, 1)
+            y_pred = slope * x_vals + intercept
+            
+            # Calcular R^2
+            corr_matrix = np.corrcoef(x_vals, y_vals)
+            r_val = corr_matrix[0, 1]
+            r_squared = r_val ** 2
+            
+            # Agregar línea de tendencia calculada de forma manual
+            fig_reg.add_trace(go.Scatter(
+                x=x_vals, y=y_pred,
+                mode='lines',
+                name=f'Ajuste Lineal (R²={r_squared:.4f})',
+                line=dict(color='#E85500', width=2.5)
+            ))
+            
+            # Desplegar métrica con la fórmula del modelo matemático
+            st.metric("Fórmula de Ajuste Matemático", f"y = {slope:.4f} * x + {intercept:.2f}", 
+                      help="Ecuación lineal de regresión por mínimos cuadrados. y = Tracción (kWh), x = Distancia (km)")
+        
         fig_reg.update_layout(xaxis_title="Odómetro Total (km)", yaxis_title="Energía de Tracción (kWh)")
         st.plotly_chart(fig_reg, use_container_width=True)
     else:
