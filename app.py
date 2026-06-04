@@ -6,6 +6,7 @@ import holidays
 from io import BytesIO
 from datetime import datetime, date, time
 import plotly.graph_objects as go
+import plotly.express as px
 
 # --- 0. SEGURIDAD DE COLUMNAS ---
 def make_columns_unique(df):
@@ -431,7 +432,7 @@ class _ArchivoEnDisco:
 def combinar_fuentes(ul, carpeta):
     nombres = {uf.name for uf in (ul or [])}
     return list(ul or []) + [_ArchivoEnDisco(p) for p in listar_archivos(carpeta)
-                              if os.path.basename(p) not in nombres]
+                             if os.path.basename(p) not in nombres]
 
 # --- 5. INICIALIZACIÓN ---
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
@@ -598,7 +599,7 @@ if _hay_archivos and _recalcular:
         df_ops=(df_ops.merge(df_f_d,on="Fecha",how="left").merge(df_p_d,on="Fecha",how="left")
                       .merge(df_s_d,on="Fecha",how="left").fillna(0))
         def jerarquia(row):
-            if row['E_Fact']>0:     tot,src=row['E_Fact'],"Factura"
+            if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
             elif row['E_Prmte']>0:  tot,src=row['E_Prmte'],"PRMTE"
             elif row['E_Seat_T']>0: tot,src=row['E_Seat_T'],"SEAT"
             else: return 0,0,0,0,0,"N/A"
@@ -628,7 +629,7 @@ if _hay_archivos and _recalcular:
 tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Comparación hr",
               "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía"])
 
-# TAB 0
+# TAB 0: Resumen
 with tabs[0]:
     _ep=st.session_state.get('_errores_proc',{})
     if _ep:
@@ -645,251 +646,151 @@ with tabs[0]:
                         .update_layout(title="IDE Diario (kWh/km)",xaxis_title="Fecha",yaxis_title="kWh/km"),use_container_width=True)
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
-# TAB 1
+# TAB 1: Operaciones
 with tabs[1]:
     if not df_ops.empty:
-        dv=df_ops.copy(); dv['Fecha']=dv['Fecha'].dt.strftime('%Y-%m-%d')
-        st.dataframe(make_columns_unique(dv).style.format({'Odómetro [km]':"{:,.1f}",'Tren-Km [km]':"{:,.1f}",
-            'E_Total':"{:,.0f}",'E_Tr':"{:,.0f}",'E_12':"{:,.0f}",'% Tracción':"{:.1f}%",
-            '% 12 kV':"{:.1f}%",'IDE (kWh/km)':"{:.4f}"}),use_container_width=True)
-    else: st.info("📂 Sin datos de operación.")
+        dv=df_ops.copy()
+        dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
+        st.write("### Datos Consolidados de Operaciones y Energía")
+        st.dataframe(make_columns_unique(dv), use_container_width=True)
+    else:
+        st.info("No hay datos de operaciones en el rango seleccionado.")
 
-# TAB 2
+# TAB 2: Trenes
 with tabs[2]:
     if all_tr:
-        df_tr=pd.DataFrame(all_tr); df_tr['Fecha']=df_tr['Fecha'].dt.strftime('%Y-%m-%d')
-        pivot=df_tr.pivot_table(index='Tren',columns='Fecha',values='Valor',aggfunc='sum').fillna(0)
-        st.dataframe(pivot.style.format("{:,.1f}"),use_container_width=True)
-    else: st.info("📂 Sin datos de trenes.")
-
-# TAB 3
-with tabs[3]:
-    e_tabs=st.tabs(["🔹 SEAT","🔹 PRMTE","🔹 Facturación"])
-    with e_tabs[0]:
-        if all_seat:
-            dsv=pd.DataFrame(all_seat); dsv['Fecha']=dsv['Fecha'].dt.strftime('%Y-%m-%d')
-            st.dataframe(dsv.style.format({'E_Total':"{:,.0f}",'E_Tr':"{:,.0f}",'E_12':"{:,.0f}"}),use_container_width=True)
-        else: st.info("📂 Sin datos SEAT.")
-    with e_tabs[1]:
-        if all_prmte_full:
-            dp=pd.DataFrame(all_prmte_full); dp['Fecha_Str']=dp['Fecha'].dt.strftime('%Y-%m-%d')
-            pr=dp.loc[dp['Consumo'].idxmax()]
-            m1,m2,m3=st.columns(3)
-            m1.metric("Total kWh",f"{dp['Consumo'].sum():,.0f}")
-            m2.metric("Días cargados",f"{dp['Fecha_Str'].nunique()}")
-            m3.metric("Pico 15 min",f"{pr['Consumo']:,.0f} kWh",f"{pr['Fecha_Str']} {pr['15min']}")
-            fp=st.selectbox("Fecha",sorted(dp['Fecha_Str'].unique()),key="prmte_fecha")
-            vp=st.radio("Vista",["15 min","Horario","Diario"],horizontal=True,key="prmte_vista")
-            dps=dp[dp['Fecha_Str']==fp]
-            if vp=="15 min":   dsh=dps.groupby("15min")["Consumo"].sum().reset_index().rename(columns={"15min":"Franja","Consumo":"kWh"}).sort_values("Franja")
-            elif vp=="Horario":dsh=dps.groupby("Hora")["Consumo"].sum().reset_index().rename(columns={"Hora":"Franja","Consumo":"kWh"}).sort_values("Franja")
-            else:              dsh=dp.groupby("Fecha_Str")["Consumo"].sum().reset_index().rename(columns={"Fecha_Str":"Franja","Consumo":"kWh"})
-            fig_p=go.Figure(go.Bar(x=dsh['Franja'],y=dsh['kWh'],marker_color='#005195',
-                                    hovertemplate='<b>%{x}</b><br>%{y:,.0f} kWh<extra></extra>'))
-            fig_p.update_layout(title=f"PRMTE — {fp} ({vp})" if vp!="Diario" else "PRMTE — Consumo diario",
-                                xaxis_title="Franja",yaxis_title="kWh",xaxis=dict(tickangle=-45),height=380)
-            st.plotly_chart(fig_p,use_container_width=True)
-        else: st.info("📂 Sin datos PRMTE.")
-    with e_tabs[2]:
-        if all_fact_full:
-            df_f=pd.DataFrame(all_fact_full); df_f['Fecha_Str']=df_f['Fecha'].dt.strftime('%Y-%m-%d')
-            st.dataframe(df_f.groupby("Fecha_Str")["Consumo"].sum().reset_index()
-                         .style.format({'Consumo':"{:,.0f}"}),use_container_width=True)
-        else: st.info("📂 Sin datos de facturación.")
-
-# TAB 4
-with tabs[4]:
-    st.header("⚖️ Comparación Horaria")
-    if all_prmte_full or all_fact_full:
-        fuentes={}
-        if all_prmte_full:
-            dph=pd.DataFrame(all_prmte_full); dph['Hora_int']=dph['Hora'].str[:2].astype(int)
-            fuentes['PRMTE']=dph.groupby('Hora_int')['Consumo'].sum().reset_index()
-        if all_fact_full:
-            dfh=pd.DataFrame(all_fact_full); dfh['Hora_int']=dfh['Hora'].str[:2].astype(int)
-            fuentes['Factura']=dfh.groupby('Hora_int')['Consumo'].sum().reset_index()
-        fig=go.Figure()
-        for nb,dfh2 in fuentes.items():
-            fig.add_trace(go.Bar(x=dfh2['Hora_int'],y=dfh2['Consumo'],name=nb,
-                                  marker_color={'PRMTE':'#005195','Factura':'#E85500'}.get(nb,'#888')))
-        fig.update_layout(title="Consumo Acumulado por Hora",barmode='group',xaxis_title="Hora",yaxis_title="kWh")
-        st.plotly_chart(fig,use_container_width=True)
-    else: st.info("📂 Sube datos de PRMTE o Facturación para comparar.")
-
-# TAB 5
-with tabs[5]:
-    st.header("📈 Regresión IDE vs Odómetro")
-    if not df_ops.empty and df_ops['IDE (kWh/km)'].sum()>0:
-        dr2=df_ops[df_ops['IDE (kWh/km)']>0].copy()
-        cmap={"L":"#005195","S":"#FFA500","D/F":"#E85500"}
-        fig=go.Figure()
-        for tp,grp in dr2.groupby('Tipo Día'):
-            fig.add_trace(go.Scatter(x=grp['Odómetro [km]'],y=grp['IDE (kWh/km)'],mode='markers',
-                                     name=tp,marker=dict(color=cmap.get(tp,'#888'),size=8)))
-        xa,ya=dr2['Odómetro [km]'].values,dr2['IDE (kWh/km)'].values
-        if len(xa)>=2:
-            coef=np.polyfit(xa,ya,1); xl=np.linspace(xa.min(),xa.max(),100)
-            r2=np.corrcoef(xa,ya)[0,1]**2
-            fig.add_trace(go.Scatter(x=xl,y=np.polyval(coef,xl),mode='lines',
-                                     name=f'Tendencia (R²={r2:.3f})',line=dict(color='gray',dash='dash',width=2)))
-        fig.update_layout(title='IDE vs Odómetro por Tipo de Día',xaxis_title='Odómetro [km]',yaxis_title='kWh/km')
-        st.plotly_chart(fig,use_container_width=True)
-    else: st.info("📂 Sin datos suficientes para regresión.")
-
-# TAB 6
-with tabs[6]:
-    st.header("🚨 Detección de Atípicos")
-    if not df_ops.empty and df_ops['IDE (kWh/km)'].sum()>0:
-        dat=df_ops[df_ops['IDE (kWh/km)']>0].copy()
-        media,std=dat['IDE (kWh/km)'].mean(),dat['IDE (kWh/km)'].std()
-        umbral=st.slider("Umbral σ",1.0,3.0,2.0,0.1)
-        dat['Atípico']=(dat['IDE (kWh/km)']-media).abs()>umbral*std
-        c1,c2=st.columns(2); c1.metric("Media IDE",f"{media:.4f}"); c2.metric("Atípicos",int(dat['Atípico'].sum()))
-        fig=go.Figure()
-        fig.add_trace(go.Scatter(x=dat[~dat['Atípico']]['Fecha'],y=dat[~dat['Atípico']]['IDE (kWh/km)'],
-                                  mode='markers',name='Normal',marker=dict(color='#005195')))
-        fig.add_trace(go.Scatter(x=dat[dat['Atípico']]['Fecha'],y=dat[dat['Atípico']]['IDE (kWh/km)'],
-                                  mode='markers',name='Atípico',marker=dict(color='red',size=10,symbol='x')))
-        fig.add_hline(y=media+umbral*std,line_dash="dash",line_color="orange",annotation_text=f"+{umbral}σ")
-        fig.add_hline(y=media-umbral*std,line_dash="dash",line_color="orange",annotation_text=f"-{umbral}σ")
-        fig.update_layout(title="IDE Diario con Atípicos",xaxis_title="Fecha",yaxis_title="kWh/km")
-        st.plotly_chart(fig,use_container_width=True)
-    else: st.info("📂 Sin datos suficientes para detección de atípicos.")
-
-# TAB 7
-def render_via_thdr(df_via, label):
-    if df_via.empty: st.info(f"📂 No hay datos para {label}."); return
-    df=df_via.copy(); df['Fecha']=df['Fecha_Op'].dt.strftime('%Y-%m-%d')
-    c1,c2,c3,c4=st.columns(4)
-    c1.metric("Total viajes",len(df)); c2.metric("Tren-Km",f"{df['Tren-Km'].sum():,.1f}")
-    c3.metric("Días cargados",df['Fecha'].nunique())
-    c4.metric("Viajes doble (M)",(df['Unidad'].astype(str).str.strip()=='M').sum())
-    resumen=df.groupby('Fecha').agg(Viajes=('Unidad','count'),
-                                     Viajes_M=('Unidad',lambda x:(x.astype(str).str.strip()=='M').sum()),
-                                     TrenKm=('Tren-Km','sum')).reset_index()
-    st.dataframe(resumen.style.format({'TrenKm':"{:,.1f}"}),use_container_width=True)
-    fecha_sel=st.selectbox(f"Seleccionar fecha ({label})",sorted(df['Fecha'].unique()),key=f"sel_{label}")
-    df_sel=df[df['Fecha']==fecha_sel].copy()
-    for cm in [c for c in df_sel.columns if '_min' in c]:
-        df_sel[cm.replace('_min','_hms')]=df_sel[cm].apply(format_hm_short)
-    cols_base=['Viaje','Tren','Hora Salida Programada','Motriz 1','Motriz 2','Unidad','Maquinista','Tren-Km']
-    cols_hms=[c for c in df_sel.columns if '_hms' in c]
-    cols_show=[c for c in cols_base+cols_hms if c in df_sel.columns]
-    st.dataframe(make_columns_unique(df_sel[cols_show]).reset_index(drop=True),use_container_width=True)
-    st.caption(f"{len(df_sel)} viajes el {fecha_sel}")
-
-with tabs[7]:
-    st.header("📋 Análisis THDR")
-    tv1,tv2=st.tabs(["🔵 Vía 1 (Puerto → Limache)","🟠 Vía 2 (Limache → Puerto)"])
-    with tv1: render_via_thdr(df_thdr_v1,"Vía 1")
-    with tv2: render_via_thdr(df_thdr_v2,"Vía 2")
-
-# TAB 8
-with tabs[8]:
-    st.header("🔬 Servicios vs Consumo de Energía (15 min)")
-    _tp=len(all_prmte_full)>0; _tt=not df_thdr_v1.empty or not df_thdr_v2.empty
-    if not _tp and not _tt: st.info("📂 Sube PRMTE y THDR para este análisis."); st.stop()
-    col_av,col_at=st.columns(2)
-    col_av.metric("PRMTE","✅" if _tp else "❌"); col_at.metric("THDR","✅" if _tt else "❌")
-    def s2m(s):
-        try: h,m=map(int,s.split(':')); return h*60+m
-        except: return 0
-    df_svc=pd.DataFrame()
-    if _tt:
-        partes=[df for df in [df_thdr_v1,df_thdr_v2] if not df.empty]
-        dta=pd.concat(partes,ignore_index=True); dta['Fecha_str']=dta['Fecha_Op'].dt.strftime('%Y-%m-%d')
-        def _ps(row):
-            vals=[row[c] for c in row.index if 'Salida' in c and '_min' in c and pd.notna(row[c])]; return min(vals) if vals else np.nan
-        def _ul(row):
-            vals=[row[c] for c in row.index if 'Llegada' in c and '_min' in c and pd.notna(row[c])]; return max(vals) if vals else np.nan
-        dta['t_ini']=dta.apply(_ps,axis=1); dta['t_fin']=dta.apply(_ul,axis=1)
-        dta=dta.dropna(subset=['t_ini','t_fin'])
-        def _kf(t_i,t_f,t_fr,un):
-            dur=t_f-t_i
-            if dur<=0: return 0.0
-            dist=KM_TOTAL*(2 if str(un).strip()=='M' else 1)
-            return round((dist/dur)*max(0.0,min(t_f,t_fr+15)-max(t_i,t_fr)),3)
-        tf_all=[f"{h:02d}:{m:02d}" for h in range(24) for m in range(0,60,15)]
-        filas=[]
-        for fg,grp in dta.groupby('Fecha_str'):
-            for fr in tf_all:
-                t_f=s2m(fr); mask=(grp['t_ini']<=t_f)&(grp['t_fin']>t_f)
-                if mask.sum()==0: continue
-                ga=grp[mask]
-                filas.append({'Fecha':fg,'Franja':fr,'Servicios':int(mask.sum()),
-                               'Servicios_M':int((ga['Unidad'].astype(str).str.strip()=='M').sum()),
-                               'Tren_Km':sum(_kf(r['t_ini'],r['t_fin'],t_f,r['Unidad']) for _,r in ga.iterrows())})
-        if filas: df_svc=pd.DataFrame(filas)
-    df_en=pd.DataFrame()
-    if _tp:
-        dpr=pd.DataFrame(all_prmte_full); dpr['Fecha']=dpr['Fecha'].dt.strftime('%Y-%m-%d')
-        df_en=(dpr.groupby(['Fecha','15min'])['Consumo'].sum().reset_index()
-               .rename(columns={'15min':'Franja','Consumo':'kWh'}))
-    if df_svc.empty and df_en.empty: st.warning("Sin datos suficientes."); st.stop()
-    if not df_svc.empty and not df_en.empty:
-        dm=pd.merge(df_en,df_svc,on=['Fecha','Franja'],how='outer').fillna(0)
-    elif not df_en.empty:
-        dm=df_en.copy(); dm['Servicios']=0; dm['Servicios_M']=0; dm['Tren_Km']=0.0
+        st.write("### Detalle por Unidad (Tren)")
+        df_tr = pd.DataFrame(all_tr)
+        df_tr['Fecha'] = pd.to_datetime(df_tr['Fecha']).dt.strftime('%Y-%m-%d')
+        st.dataframe(make_columns_unique(df_tr), use_container_width=True)
     else:
-        dm=df_svc.copy(); dm['kWh']=0
-    if 'Tren_Km' not in dm.columns: dm['Tren_Km']=0.0
-    dm['_o']=dm['Franja'].apply(s2m); dm=dm.sort_values(['Fecha','_o']).drop(columns='_o')
-    fd=sorted(dm['Fecha'].unique())
-    if not fd: st.warning("Sin fechas."); st.stop()
-    st.divider()
-    cf1,cf2,cf3=st.columns([2,2,1])
-    with cf1: modo=st.radio("Vista",["Por día","Promedio del período"],horizontal=True)
-    with cf2:
-        if modo=="Por día":
-            fsel=st.selectbox("Fecha",fd); dp2=dm[dm['Fecha']==fsel].copy()
-        else:
-            dp2=dm.groupby('Franja').agg(kWh=('kWh','mean'),Servicios=('Servicios','mean'),
-                                          Servicios_M=('Servicios_M','mean'),Tren_Km=('Tren_Km','mean')).reset_index()
-            dp2['_o']=dp2['Franja'].apply(s2m); dp2=dp2.sort_values('_o').drop(columns='_o')
-    with cf3: mm=st.checkbox("Solo doble (M)",value=False)
-    cs='Servicios_M' if mm else 'Servicios'; ls='Tracción doble' if mm else 'Servicios totales'
-    if not dp2.empty:
-        m1,m2,m3,m4,m5=st.columns(5)
-        m1.metric("Total kWh",f"{dp2['kWh'].sum():,.0f}")
-        m2.metric("Pico kWh",f"{dp2['kWh'].max():,.0f}",dp2.loc[dp2['kWh'].idxmax(),'Franja'])
-        m3.metric("Total servicios",f"{dp2[cs].sum():.0f}")
-        m4.metric("Pico servicios",f"{dp2[cs].max():.0f}",dp2.loc[dp2[cs].idxmax(),'Franja'] if dp2[cs].max()>0 else "—")
-        m5.metric("Tren-Km",f"{dp2['Tren_Km'].sum():,.1f} km")
-    st.divider()
-    if not dp2.empty:
-        fd2=go.Figure()
-        fd2.add_trace(go.Bar(x=dp2['Franja'],y=dp2['kWh'],name='Energía PRMTE (kWh)',
-                              marker_color='rgba(0,81,149,0.7)',yaxis='y1'))
-        fd2.add_trace(go.Scatter(x=dp2['Franja'],y=dp2[cs],name=ls,mode='lines+markers',
-                                  line=dict(color='#E85500',width=2),marker=dict(size=5),yaxis='y2'))
-        if dp2['Tren_Km'].sum()>0:
-            fd2.add_trace(go.Scatter(x=dp2['Franja'],y=dp2['Tren_Km'],name='Tren-Km',mode='lines',
-                                      line=dict(color='#00AA44',width=2,dash='dot'),yaxis='y3'))
-        fd2.update_layout(
-            title=(f"Energía vs Servicios — {fsel}" if modo=="Por día" else f"Promedio {fd[0]} a {fd[-1]}"),
-            xaxis=dict(title="Franja 15 min",tickangle=-45,tickmode='array',tickvals=dp2['Franja'][::4].tolist()),
-            yaxis=dict(title="kWh",side='left',showgrid=True),
-            yaxis2=dict(title="Servicios",side='right',overlaying='y',showgrid=False),
-            yaxis3=dict(title="Tren-Km",side='right',overlaying='y',showgrid=False,anchor='free',position=1.0,showticklabels=False),
-            legend=dict(orientation='h',y=1.08),hovermode='x unified',height=450)
-        st.plotly_chart(fd2,use_container_width=True)
-    dco=dp2.dropna(subset=['kWh',cs]); dco=dco[(dco['kWh']>0)&(dco[cs]>0)]
-    if len(dco)>=5:
-        st.divider(); corr=np.corrcoef(dco['kWh'].values,dco[cs].values)[0,1]
-        st.subheader(f"📐 Correlación: **{corr:.3f}**")
-        coef=np.polyfit(dco[cs].values,dco['kWh'].values,1)
-        xl=np.linspace(dco[cs].min(),dco[cs].max(),100)
-        fsc=go.Figure()
-        fsc.add_trace(go.Scatter(x=dco[cs],y=dco['kWh'],mode='markers',text=dco['Franja'],
-                                  hovertemplate='<b>%{text}</b><br>Servicios:%{x}<br>kWh:%{y:,.0f}<extra></extra>',
-                                  marker=dict(color='#005195',size=7,opacity=0.7)))
-        fsc.add_trace(go.Scatter(x=xl,y=np.polyval(coef,xl),mode='lines',
-                                  line=dict(color='#E85500',dash='dash'),name=f'R²={corr**2:.3f}'))
-        fsc.update_layout(title='Dispersión Servicios vs kWh',xaxis_title=ls,yaxis_title='kWh',height=380)
-        st.plotly_chart(fsc,use_container_width=True)
-    with st.expander("📋 Ver tabla"):
-        cs2=[c for c in ['Franja','kWh','Servicios','Servicios_M','Tren_Km'] if c in dp2.columns]
-        st.dataframe(dp2[cs2].style.format({'kWh':'{:,.1f}','Servicios':'{:.1f}','Servicios_M':'{:.1f}','Tren_Km':'{:.2f}'}),
-                     use_container_width=True,height=300)
+        st.info("No hay datos detallados de trenes cargados.")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3: Energía
+with tabs[3]:
+    if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
+        st.write("### Consumo de Energía por Tipo")
+        fig_e = go.Figure()
+        fig_e.add_trace(go.Bar(x=df_ops['Fecha'], y=df_ops['E_Tr'], name='Tracción', marker_color='#E85500'))
+        fig_e.add_trace(go.Bar(x=df_ops['Fecha'], y=df_ops['E_12'], name='12 kV', marker_color='#005195'))
+        fig_e.update_layout(barmode='stack', title="Consumo Energético: Tracción vs Servicios Auxiliares (12kV)",
+                            xaxis_title="Fecha", yaxis_title="Consumo (kWh)")
+        st.plotly_chart(fig_e, use_container_width=True)
+        
+        st.write("### Desglose Detallado")
+        dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
+        dv_ener['Fecha'] = dv_ener['Fecha'].dt.strftime('%Y-%m-%d')
+        st.dataframe(make_columns_unique(dv_ener), use_container_width=True)
+    else:
+        st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
+
+# TAB 4: Comparación horaria
+with tabs[4]:
+    if all_fact_full and all_prmte_full:
+        st.write("### Comparación Perfil Horario: Factura vs PRMTE")
+        
+        df_hr_f = pd.DataFrame(all_fact_full).groupby('Hora')['Consumo'].mean().reset_index().rename(columns={'Consumo':'Factura_Promedio'})
+        df_hr_p = pd.DataFrame(all_prmte_full).groupby('Hora')['Consumo'].mean().reset_index().rename(columns={'Consumo':'PRMTE_Promedio'})
+        
+        df_comp = pd.merge(df_hr_f, df_hr_p, on='Hora', how='outer').fillna(0).sort_values('Hora')
+        
+        fig_hr = go.Figure()
+        fig_hr.add_trace(go.Scatter(x=df_comp['Hora'], y=df_comp['Factura_Promedio'], mode='lines+markers', name='Factura (Promedio)', line=dict(color='#005195', width=3)))
+        fig_hr.add_trace(go.Scatter(x=df_comp['Hora'], y=df_comp['PRMTE_Promedio'], mode='lines+markers', name='PRMTE (Promedio)', line=dict(color='#E85500', width=2, dash='dash')))
+        fig_hr.update_layout(title="Perfil de Consumo Horario Promedio", xaxis_title="Hora del Día", yaxis_title="Consumo (kWh)")
+        st.plotly_chart(fig_hr, use_container_width=True)
+    else:
+        st.info("Se necesitan cargar datos de **Facturación** y **PRMTE** simultáneamente para mostrar esta comparación.")
+
+# TAB 5: Regresión
+with tabs[5]:
+    if not df_ops.empty and df_ops['E_Tr'].sum() > 0:
+        st.write("### Relación entre Kilometraje y Consumo de Tracción")
+        fig_reg = px.scatter(df_ops, x="Odómetro [km]", y="E_Tr", trendline="ols", hover_data=["Fecha"],
+                             title="Regresión: Odómetro vs Energía de Tracción",
+                             color_discrete_sequence=["#005195"])
+        fig_reg.update_layout(xaxis_title="Odómetro Total (km)", yaxis_title="Energía de Tracción (kWh)")
+        st.plotly_chart(fig_reg, use_container_width=True)
+    else:
+        st.info("No hay datos cruzados suficientes de kilometraje y consumo energético para calcular la regresión.")
+
+# TAB 6: Atípicos
+with tabs[6]:
+    if not df_ops.empty and df_ops['IDE (kWh/km)'].sum() > 0:
+        st.write("### Detección de Valores Atípicos (IDE)")
+        mean_ide = df_ops['IDE (kWh/km)'].mean()
+        std_ide = df_ops['IDE (kWh/km)'].std()
+        
+        df_ops['Z-Score'] = (df_ops['IDE (kWh/km)'] - mean_ide) / std_ide
+        df_ops['Es_Atípico'] = df_ops['Z-Score'].abs() > 2
+        
+        fig_out = go.Figure()
+        fig_out.add_trace(go.Scatter(x=df_ops['Fecha'], y=df_ops['IDE (kWh/km)'], mode='markers',
+                                     marker=dict(color=df_ops['Es_Atípico'].map({True: 'red', False: '#005195'}),
+                                                 size=8),
+                                     name='IDE'))
+        
+        fig_out.add_hline(y=mean_ide, line_dash="dash", line_color="green", annotation_text="Media")
+        fig_out.add_hline(y=mean_ide + 2*std_ide, line_dash="dot", line_color="orange", annotation_text="+2 Desv. Est.")
+        fig_out.add_hline(y=mean_ide - 2*std_ide, line_dash="dot", line_color="orange", annotation_text="-2 Desv. Est.")
+        
+        fig_out.update_layout(title="IDE Diario (Identificando días más allá de ±2 desviaciones estándar)",
+                              xaxis_title="Fecha", yaxis_title="IDE (kWh/km)")
+        st.plotly_chart(fig_out, use_container_width=True)
+        
+        atipicos = df_ops[df_ops['Es_Atípico']][['Fecha', 'IDE (kWh/km)', 'Odómetro [km]', 'E_Tr']]
+        if not atipicos.empty:
+            st.warning("⚠️ Se han detectado los siguientes días con comportamiento anómalo en el consumo:")
+            atipicos['Fecha'] = atipicos['Fecha'].dt.strftime('%Y-%m-%d')
+            st.dataframe(atipicos, use_container_width=True)
+        else:
+            st.success("✅ No se detectaron valores atípicos significativos (Z-score > 2) en el periodo analizado.")
+    else:
+        st.info("No hay datos de IDE calculados para analizar.")
+
+# TAB 7: THDR
+with tabs[7]:
+    st.write("### Perfil de Velocidades Vía 1 y 2")
+    st.plotly_chart(fig_perfil_velocidades(), use_container_width=True)
+
+    c_v1, c_v2 = st.columns(2)
+    with c_v1:
+        st.write("#### Datos THDR Vía 1")
+        if not df_thdr_v1.empty:
+            st.dataframe(df_thdr_v1.head(50), use_container_width=True)
+            st.caption("Mostrando hasta 50 registros.")
+        else:
+            st.info("No se ha cargado/procesado THDR Vía 1.")
+            
+    with c_v2:
+        st.write("#### Datos THDR Vía 2")
+        if not df_thdr_v2.empty:
+            st.dataframe(df_thdr_v2.head(50), use_container_width=True)
+            st.caption("Mostrando hasta 50 registros.")
+        else:
+            st.info("No se ha cargado/procesado THDR Vía 2.")
+
+# TAB 8: Servicios vs Energía
+with tabs[8]:
+    if not df_thdr_v1.empty and not df_thdr_v2.empty and not df_ops.empty:
+        st.write("### Correlación entre Cantidad de Servicios y Consumo")
+        
+        servicios_v1 = df_thdr_v1.groupby('Fecha_Op').size().reset_index(name='V1_Servicios')
+        servicios_v2 = df_thdr_v2.groupby('Fecha_Op').size().reset_index(name='V2_Servicios')
+        
+        servicios = pd.merge(servicios_v1, servicios_v2, on='Fecha_Op', how='outer').fillna(0)
+        servicios['Servicios Totales'] = servicios['V1_Servicios'] + servicios['V2_Servicios']
+        servicios = servicios.rename(columns={'Fecha_Op': 'Fecha'})
+        servicios['Fecha'] = pd.to_datetime(servicios['Fecha']).dt.normalize()
+        
+        df_mixto = pd.merge(df_ops, servicios, on='Fecha', how='inner')
+        
+        if not df_mixto.empty and df_mixto['E_Total'].sum() > 0:
+            fig_mix = px.scatter(df_mixto, x='Servicios Totales', y='E_Total', size='Odómetro [km]',
+                                 color='Tipo Día', hover_data=['Fecha'],
+                                 title="Servicios Totales Programados vs Consumo Total (kWh)")
+            st.plotly_chart(fig_mix, use_container_width=True)
+        else:
+            st.info("No hay solapamiento de fechas entre los archivos THDR y los datos de Energía.")
+    else:
+        st.info("Carga archivos THDR (Vía 1 y Vía 2) junto con Facturación/PRMTE/SEAT para ver este cruce.")
