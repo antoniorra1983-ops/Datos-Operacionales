@@ -612,23 +612,43 @@ with tabs[0]:
 
             st.divider() # Línea separadora para mantener orden visual
             
-            # --- RESTO DE LAS MÉTRICAS ---
-            st.markdown("#### Otras Métricas Globales")
-            c1, c2, c3 = st.columns(3) # Reducido a 3 columnas ya que PAX y Servicios subieron
-            c1.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
-            c2.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
-            c3.metric("IDE Promedio",  f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
+            # --- NUEVA ESTRUCTURA: KILOMETRAJE Y RENDIMIENTO (UMR) ---
+            st.markdown("### 🛤️ KILOMETRAJE Y DESEMPEÑO")
+            c_chart_k, c_card_k, c_chart_u, c_card_u = st.columns([2.5, 1, 2.5, 1]) 
             
-            # Usar Plotly Express para incluir fácilmente el Tipo de Día y Nombre del Feriado al pasar el mouse
-            fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
-                             hover_data=hover_config, title="Odómetro Diario")
-            fig_odo.update_layout(title=dict(font=dict(size=15), automargin=True))
-            st.plotly_chart(fig_odo, use_container_width=True, config={'locale': 'es'})
-            
-            fig_ide = px.line(df_resumen, x='Fecha', y='IDE (kWh/km)', markers=True, color_discrete_sequence=["#E85500"],
-                              hover_data=hover_config, title="IDE Diario (kWh/km)")
-            fig_ide.update_layout(title=dict(font=dict(size=15), automargin=True))
-            st.plotly_chart(fig_ide, use_container_width=True, config={'locale': 'es'})
+            with c_chart_k:
+                # Gráfico Agrupado (Barmode='group') para comparar Odómetro vs Tren-Km
+                fig_km = px.bar(df_resumen, x='Fecha', y=['Odómetro [km]', 'Tren-Km [km]'], 
+                                barmode='group', text_auto='.3s',
+                                color_discrete_map={'Odómetro [km]': '#005195', 'Tren-Km [km]': '#66A5D9'}, # Tonos de azul
+                                hover_data=hover_config, title="Kilometraje (Odómetro vs Tren-Km)")
+                
+                fig_km.update_traces(textposition='outside')
+                # Configuración de leyenda horizontal para no quitar espacio al gráfico
+                fig_km.update_layout(margin=dict(t=50, b=0, l=0, r=0), 
+                                     title=dict(font=dict(size=15), automargin=True),
+                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_km, use_container_width=True, config={'locale': 'es'})
+                
+            with c_card_k:
+                # Se apilan dos tarjetas para coincidir con las dos barras del gráfico
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
+                st.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
+
+            with c_chart_u:
+                # Gráfico de Desempeño Energético (UMR)
+                fig_ide = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
+                                  text_auto='.2f', # 2 decimales para precisión en eficiencia
+                                  color_discrete_sequence=["#E85500"], 
+                                  hover_data=hover_config, title="Desempeño Energético (IDE UMR)")
+                fig_ide.update_traces(textposition='outside')
+                fig_ide.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
+                st.plotly_chart(fig_ide, use_container_width=True, config={'locale': 'es'})
+                
+            with c_card_u:
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                st.metric("IDE Promedio", f"{df_resumen['IDE (kWh/km)'].mean():.4f} kWh/km")
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
