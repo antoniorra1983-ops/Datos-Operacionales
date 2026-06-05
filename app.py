@@ -1012,223 +1012,148 @@ with tabs[10]:
         if df_reporte.empty:
             st.warning("No hay datos para generar el reporte con los filtros o días seleccionados.")
         else:
-            st.markdown("Este reporte es generado automáticamente aplicando **algoritmos de estadística descriptiva** sobre los datos operativos actuales.")
+            st.markdown("Este reporte es generado automáticamente aplicando **algoritmos de estadística descriptiva**, segmentando la operación por sus distintos perfiles de demanda (Tipos de Jornada).")
             
-            # --- MOTOR DE CÁLCULOS BÁSICOS ---
-            dia_max_ide = df_reporte.loc[df_reporte['IDE (kWh/km)'].idxmax()]
-            dias_validos_ide = df_reporte[df_reporte['IDE (kWh/km)'] > 0]
-            dia_min_ide = dias_validos_ide.loc[dias_validos_ide['IDE (kWh/km)'].idxmin()] if not dias_validos_ide.empty else dia_max_ide
+            # --- KPI GLOBAL DE LA SELECCIÓN ---
+            tot_traccion_global = df_reporte['E_Tr'].sum()
+            tot_pax_global = df_reporte['PAX'].sum()
+            kwh_per_pax_global = (tot_traccion_global / tot_pax_global) if tot_pax_global > 0 else 0
             
-            tot_traccion = df_reporte['E_Tr'].sum()
-            tot_pax = df_reporte['PAX'].sum()
-            kwh_per_pax = (tot_traccion / tot_pax) if tot_pax > 0 else 0
+            st.info(f"🎯 **KPI Global de Sostenibilidad (Estándar UIC):** En toda la selección analizada, la empresa consumió en promedio **{kwh_per_pax_global:.2f} kWh de tracción por cada pasajero transportado**.")
             
-            tot_tren_km = df_reporte['Tren-Km [km]'].sum()
-            tot_odo = df_reporte['Odómetro [km]'].sum()
-            umr_global = (tot_tren_km / tot_odo * 100) if tot_odo > 0 else 0
-            dia_max_pax = df_reporte.loc[df_reporte['PAX'].idxmax()] if df_reporte['PAX'].sum() > 0 else None
-
-            # --- MOTOR DE CÁLCULOS DE ALTA FRECUENCIA (15 MIN / ESTACIONES / THDR) ---
-            fechas_reporte = df_reporte['Fecha'].tolist()
+            # --- ITERACIÓN POR TIPO DE JORNADA ---
+            tipos_ordenados = ["L", "S", "D/F"]
+            nombres_tipos = {"L": "Días Laborales (L)", "S": "Sábados (S)", "D/F": "Domingos y Festivos (D/F)"}
             
-            # 1. Perfil de Consumo Horario (Facturación / PRMTE) y Consumo Nocturno
-            peak_hr_msg = "No se encontraron datos granulares de energía (PRMTE/Facturación) para este periodo."
-            noche_msg = ""
-            datos_hr = all_prmte_full if all_prmte_full else all_fact_full
-            if datos_hr:
-                df_hr = pd.DataFrame(datos_hr)
-                df_hr['Fecha'] = pd.to_datetime(df_hr['Fecha'])
-                df_hr_filt = df_hr[df_hr['Fecha'].isin(fechas_reporte)]
-                if not df_hr_filt.empty:
-                    # Agrupar por hora del día para sacar el promedio (Peak Shaving)
-                    hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
-                    hora_peak = hr_agrupado.idxmax()
-                    consumo_peak = hr_agrupado.max()
-                    peak_hr_msg = f"La mayor exigencia a la red eléctrica ocurrió a las **{hora_peak}**, con un consumo promedio de **{consumo_peak:,.0f} kWh**. Esta es su 'Hora Punta'. Evalúe estrategias de *Peak Shaving* (Afeitado de picos) en esta franja si hay cargos por potencia máxima."
+            for tipo in tipos_ordenados:
+                df_tipo = df_reporte[df_reporte['Tipo Día'] == tipo]
+                if df_tipo.empty: continue
+                
+                with st.expander(f"📌 Análisis de Operación: {nombres_tipos[tipo]}", expanded=True):
                     
-                    # Auditoría de Carga Base (Consumo Nocturno 01:00 a 05:00)
-                    df_noche = df_hr_filt[df_hr_filt['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
-                    if not df_noche.empty:
-                        noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
-                        promedio_noche = noche_diario['Consumo'].mean()
-                        max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
-                        
-                        # Si el día de mayor consumo nocturno supera en un 20% el promedio, levantamos alerta
-                        if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
-                            fch_anomala = max_noche['Fecha'].strftime('%d/%m')
-                            sobrecosto_pct = ((max_noche['Consumo'] / promedio_noche) - 1) * 100
-                            noche_msg = f"🌙 **Alerta de Consumo Parásito:** El promedio de gasto nocturno (sin operación) es de **{promedio_noche:,.0f} kWh**. Sin embargo, la madrugada del **{fch_anomala}** registró un consumo anómalo de **{max_noche['Consumo']:,.0f} kWh (+{sobrecosto_pct:.1f}%)**. Investigar trenes energizados en cocheras o climatización operando al vacío."
-                        else:
-                            noche_msg = f"🌙 **Auditoría Nocturna (Saludable):** El consumo base de madrugada se mantiene estable en **{promedio_noche:,.0f} kWh/noche**, sin detectarse anomalías graves ni equipos mayores encendidos innecesariamente."
-
-            # 2. Análisis de Cuellos de Botella (Carga Tren / Pasajeros)
-            estacion_msg = "No se encontraron datos de carga de pasajeros por estación para este periodo."
-            df_c_filt = pd.DataFrame()
-            if not df_carga_v1.empty or not df_carga_v2.empty:
-                c1 = df_carga_v1[df_carga_v1['Fecha'].isin(fechas_reporte)] if not df_carga_v1.empty else pd.DataFrame()
-                c2 = df_carga_v2[df_carga_v2['Fecha'].isin(fechas_reporte)] if not df_carga_v2.empty else pd.DataFrame()
-                df_c_filt = pd.concat([c1, c2])
-                
-                if not df_c_filt.empty and 'Estación Máxima' in df_c_filt.columns:
-                    estacion_critica = df_c_filt['Estación Máxima'].value_counts().idxmax()
-                    frecuencia_critica = df_c_filt['Estación Máxima'].value_counts().max()
-                    estacion_msg = f"La estación **{estacion_critica}** representó el mayor cuello de botella en la red. En **{frecuencia_critica} viajes**, los trenes alcanzaron su máxima capacidad física al pasar por este punto. Focalice medidas de seguridad de andén y ventilación de trenes en esta zona."
-
-            # 3. Eficiencia Operativa de Despacho (THDR)
-            thdr_msg = "No se encontraron datos de itinerario (THDR) para este periodo."
-            tiempo_msg = "No hay columnas de salida/llegada válidas para calcular tiempos de viaje."
-            df_t_filt = pd.DataFrame()
-            if not df_thdr_v1.empty or not df_thdr_v2.empty:
-                t1 = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_reporte)] if not df_thdr_v1.empty else pd.DataFrame()
-                t2 = df_thdr_v2[df_thdr_v2['Fecha_Op'].isin(fechas_reporte)] if not df_thdr_v2.empty else pd.DataFrame()
-                df_t_filt = pd.concat([t1, t2])
-                
-                if not df_t_filt.empty:
-                    # Ejemplo de métrica avanzada: Porcentaje de uso de tracción motriz
-                    total_viajes = len(df_t_filt)
-                    if 'Unidad' in df_t_filt.columns:
-                        viajes_traccion_doble = len(df_t_filt[df_t_filt['Unidad'].astype(str).str.contains('M', case=False, na=False)])
-                        porcentaje_doble = (viajes_traccion_doble / total_viajes * 100) if total_viajes > 0 else 0
-                        thdr_msg = f"Se despacharon **{total_viajes:,} servicios** comerciales. El **{porcentaje_doble:.1f}% de los itinerarios fueron configurados en Tracción Doble**."
-
-                # 4. Cálculo Analítico de Tiempos de Viaje, Detenciones y Regularidad
-                def formato_hora(h):
-                    if pd.isna(h): return "N/A"
-                    if isinstance(h, (datetime, time)): return h.strftime('%H:%M')
-                    return str(h)[:5]
-
-                msg_parts = []
-                brecha_max = 0
-                
-                # --- Extracción de Extremos Vía 1 (Puerto -> Limache) ---
-                if not t1.empty:
-                    c_serv_v1 = t1.columns[0] # Usualmente la primera columna es el N° de Servicio/Tren
-                    c_p_sal = next((c for c in t1.columns if 'PUERTO' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' not in str(c).lower()), None)
-                    c_p_sal_min = f"{c_p_sal}_min" if c_p_sal else None
-                    c_l_lleg = next((c for c in t1.columns if 'LIMACHE' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' not in str(c).lower()), None)
-                    c_l_lleg_min = f"{c_l_lleg}_min" if c_l_lleg else None
+                    # 1. MOTOR DE CÁLCULOS MACRO PARA EL TIPO DE DÍA
+                    dia_max_ide = df_tipo.loc[df_tipo['IDE (kWh/km)'].idxmax()]
+                    dias_validos_ide = df_tipo[df_tipo['IDE (kWh/km)'] > 0]
+                    dia_min_ide = dias_validos_ide.loc[dias_validos_ide['IDE (kWh/km)'].idxmin()] if not dias_validos_ide.empty else dia_max_ide
                     
-                    if c_p_sal_min and c_l_lleg_min:
-                        t1_v = t1[[c_serv_v1, 'Fecha_Op', c_p_sal, c_p_sal_min, c_l_lleg_min]].dropna(subset=[c_p_sal_min, c_l_lleg_min]).copy()
-                        t1_v['Dur'] = t1_v[c_l_lleg_min] - t1_v[c_p_sal_min]
-                        t1_v['Dur'] = t1_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x) # Ajuste por viajes tras la medianoche
-                        t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)] # Escudo Anti-ruido
-                        
-                        if not t1_v.empty:
-                            t_prom_v1 = t1_v['Dur'].mean()
-                            r_min = t1_v.loc[t1_v['Dur'].idxmin()]
-                            r_max = t1_v.loc[t1_v['Dur'].idxmax()]
-                            fch_min = r_min['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_min['Fecha_Op']) else ''
-                            fch_max = r_max['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_max['Fecha_Op']) else ''
+                    tot_tren_km = df_tipo['Tren-Km [km]'].sum()
+                    tot_odo = df_tipo['Odómetro [km]'].sum()
+                    umr_global = (tot_tren_km / tot_odo * 100) if tot_odo > 0 else 0
+                    dia_max_pax = df_tipo.loc[df_tipo['PAX'].idxmax()] if df_tipo['PAX'].sum() > 0 else None
+
+                    # 2. MOTOR DE CÁLCULOS DE ALTA FRECUENCIA PARA EL TIPO DE DÍA
+                    fechas_tipo = df_tipo['Fecha'].tolist()
+                    
+                    # Perfil Horario y Nocturno
+                    peak_hr_msg = "No hay datos horarios."
+                    noche_msg = ""
+                    datos_hr = all_prmte_full if all_prmte_full else all_fact_full
+                    if datos_hr:
+                        df_hr = pd.DataFrame(datos_hr)
+                        df_hr['Fecha'] = pd.to_datetime(df_hr['Fecha'])
+                        df_hr_filt = df_hr[df_hr['Fecha'].isin(fechas_tipo)]
+                        if not df_hr_filt.empty:
+                            hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
+                            hora_peak = hr_agrupado.idxmax()
+                            consumo_peak = hr_agrupado.max()
+                            peak_hr_msg = f"La 'Hora Punta Eléctrica' ocurre a las **{hora_peak}** ({consumo_peak:,.0f} kWh prom.)."
                             
-                            msg_parts.append(f"**V1 (PU→LI) - Promedio: {t_prom_v1:.1f} min**\n"
-                                             f"🟢 *Más Rápido:* **{r_min['Dur']:.0f} min** (Día {fch_min}, Serv. {r_min[c_serv_v1]}, Salida: {formato_hora(r_min[c_p_sal])})\n"
-                                             f"🔴 *Más Lento:* **{r_max['Dur']:.0f} min** (Día {fch_max}, Serv. {r_max[c_serv_v1]}, Salida: {formato_hora(r_max[c_p_sal])})")
-                            brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
+                            df_noche = df_hr_filt[df_hr_filt['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
+                            if not df_noche.empty:
+                                noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
+                                promedio_noche = noche_diario['Consumo'].mean()
+                                max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
+                                if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
+                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')}."
+                                else:
+                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh/noche)."
 
-                # --- Extracción de Extremos Vía 2 (Limache -> Puerto) ---
-                if not t2.empty:
-                    c_serv_v2 = t2.columns[0]
-                    c_l_sal = next((c for c in t2.columns if 'LIMACHE' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' not in str(c).lower()), None)
-                    c_l_sal_min = f"{c_l_sal}_min" if c_l_sal else None
-                    c_p_lleg = next((c for c in t2.columns if 'PUERTO' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' not in str(c).lower()), None)
-                    c_p_lleg_min = f"{c_p_lleg}_min" if c_p_lleg else None
-                    
-                    if c_l_sal_min and c_p_lleg_min:
-                        t2_v = t2[[c_serv_v2, 'Fecha_Op', c_l_sal, c_l_sal_min, c_p_lleg_min]].dropna(subset=[c_l_sal_min, c_p_lleg_min]).copy()
-                        t2_v['Dur'] = t2_v[c_p_lleg_min] - t2_v[c_l_sal_min]
-                        t2_v['Dur'] = t2_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
-                        t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
+                    # Cuellos de Botella (Estaciones)
+                    estacion_msg = "Sin datos de estaciones."
+                    df_c_filt = pd.DataFrame()
+                    if not df_carga_v1.empty or not df_carga_v2.empty:
+                        c1 = df_carga_v1[df_carga_v1['Fecha'].isin(fechas_tipo)] if not df_carga_v1.empty else pd.DataFrame()
+                        c2 = df_carga_v2[df_carga_v2['Fecha'].isin(fechas_tipo)] if not df_carga_v2.empty else pd.DataFrame()
+                        df_c_filt = pd.concat([c1, c2])
+                        if not df_c_filt.empty and 'Estación Máxima' in df_c_filt.columns:
+                            estacion_critica = df_c_filt['Estación Máxima'].value_counts().idxmax()
+                            frecuencia_critica = df_c_filt['Estación Máxima'].value_counts().max()
+                            estacion_msg = f"**{estacion_critica}** es el cuello de botella físico ({frecuencia_critica} viajes a máxima capacidad)."
+
+                    # Despacho THDR y Velocidades
+                    thdr_msg = "Sin datos de THDR."
+                    tiempo_msg = ""
+                    if not df_thdr_v1.empty or not df_thdr_v2.empty:
+                        t1 = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_tipo)] if not df_thdr_v1.empty else pd.DataFrame()
+                        t2 = df_thdr_v2[df_thdr_v2['Fecha_Op'].isin(fechas_tipo)] if not df_thdr_v2.empty else pd.DataFrame()
+                        df_t_filt = pd.concat([t1, t2])
+                        if not df_t_filt.empty:
+                            total_viajes = len(df_t_filt)
+                            if 'Unidad' in df_t_filt.columns:
+                                v_doble = len(df_t_filt[df_t_filt['Unidad'].astype(str).str.contains('M', case=False, na=False)])
+                                thdr_msg = f"**{total_viajes:,} servicios** en total. Uso de Tracción Doble: **{(v_doble/total_viajes*100) if total_viajes>0 else 0:.1f}%**."
+
+                        # Cálculo de Tiempos
+                        def formato_hora(h):
+                            if pd.isna(h): return "N/A"
+                            if isinstance(h, (datetime, time)): return h.strftime('%H:%M')
+                            return str(h)[:5]
+
+                        msg_parts = []
+                        brecha_max = 0
                         
-                        if not t2_v.empty:
-                            t_prom_v2 = t2_v['Dur'].mean()
-                            r_min = t2_v.loc[t2_v['Dur'].idxmin()]
-                            r_max = t2_v.loc[t2_v['Dur'].idxmax()]
-                            fch_min = r_min['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_min['Fecha_Op']) else ''
-                            fch_max = r_max['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_max['Fecha_Op']) else ''
-                            
-                            msg_parts.append(f"**V2 (LI→PU) - Promedio: {t_prom_v2:.1f} min**\n"
-                                             f"🟢 *Más Rápido:* **{r_min['Dur']:.0f} min** (Día {fch_min}, Serv. {r_min[c_serv_v2]}, Salida: {formato_hora(r_min[c_l_sal])})\n"
-                                             f"🔴 *Más Lento:* **{r_max['Dur']:.0f} min** (Día {fch_max}, Serv. {r_max[c_serv_v2]}, Salida: {formato_hora(r_max[c_l_sal])})")
-                            brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
+                        if not t1.empty:
+                            c_serv_v1 = t1.columns[0]
+                            c_p_sal, c_l_lleg = next((c for c in t1.columns if 'PUERTO' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' not in str(c).lower()), None), next((c for c in t1.columns if 'LIMACHE' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' not in str(c).lower()), None)
+                            if c_p_sal and c_l_lleg:
+                                t1_v = t1[[c_serv_v1, 'Fecha_Op', c_p_sal, f"{c_p_sal}_min", f"{c_l_lleg}_min"]].dropna().copy()
+                                t1_v['Dur'] = t1_v[f"{c_l_lleg}_min"] - t1_v[f"{c_p_sal}_min"]
+                                t1_v['Dur'] = t1_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
+                                t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)]
+                                if not t1_v.empty:
+                                    r_min, r_max = t1_v.loc[t1_v['Dur'].idxmin()], t1_v.loc[t1_v['Dur'].idxmax()]
+                                    msg_parts.append(f"**V1 (PU→LI) Promedio: {t1_v['Dur'].mean():.1f} min**\n- *Rápido:* {r_min['Dur']:.0f} min (Día {r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v1]}, {formato_hora(r_min[c_p_sal])})\n- *Lento:* {r_max['Dur']:.0f} min (Día {r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v1]}, {formato_hora(r_max[c_p_sal])})")
+                                    brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
-                # --- Análisis de Micro-Tiempos (Dwell Time & Running Time) ---
-                dwell_avgs = {}
-                for est in ESTACIONES:
-                    c_l = next((c for c in df_t_filt.columns if est.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
-                    c_s = next((c for c in df_t_filt.columns if est.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
-                    if c_l and c_s:
-                        d = df_t_filt[c_s] - df_t_filt[c_l]
-                        d = d.apply(lambda x: x + 1440 if x < -1000 else x).dropna()
-                        d = d[(d >= 0) & (d < 15)] # Máximo 15 min de detención comercial lógica
-                        if not d.empty:
-                            dwell_avgs[est] = d.mean() * 60 # Convertido a segundos
-                            
-                dwell_msg = ""
-                if dwell_avgs:
-                    est_max_dwell = max(dwell_avgs, key=dwell_avgs.get)
-                    dwell_msg = f"⏱️ **Tiempo de Detención (Dwell Time):** La estación que retiene más tiempo a los trenes es **{est_max_dwell}**, con una pausa promedio de **{dwell_avgs[est_max_dwell]:.0f} segundos**. (Valores >45s indican congestión)."
+                        if not t2.empty:
+                            c_serv_v2 = t2.columns[0]
+                            c_l_sal, c_p_lleg = next((c for c in t2.columns if 'LIMACHE' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' not in str(c).lower()), None), next((c for c in t2.columns if 'PUERTO' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' not in str(c).lower()), None)
+                            if c_l_sal and c_p_lleg:
+                                t2_v = t2[[c_serv_v2, 'Fecha_Op', c_l_sal, f"{c_l_sal}_min", f"{c_p_lleg}_min"]].dropna().copy()
+                                t2_v['Dur'] = t2_v[f"{c_p_lleg}_min"] - t2_v[f"{c_l_sal}_min"]
+                                t2_v['Dur'] = t2_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
+                                t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
+                                if not t2_v.empty:
+                                    r_min, r_max = t2_v.loc[t2_v['Dur'].idxmin()], t2_v.loc[t2_v['Dur'].idxmax()]
+                                    msg_parts.append(f"**V2 (LI→PU) Promedio: {t2_v['Dur'].mean():.1f} min**\n- *Rápido:* {r_min['Dur']:.0f} min (Día {r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v2]}, {formato_hora(r_min[c_l_sal])})\n- *Lento:* {r_max['Dur']:.0f} min (Día {r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v2]}, {formato_hora(r_max[c_l_sal])})")
+                                    brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
-                running_avgs = {}
-                if not t1.empty: # Muestra representativa en Vía 1
-                    for i in range(len(ESTACIONES)-1):
-                        e_A = ESTACIONES[i]
-                        e_B = ESTACIONES[i+1]
-                        c_s = next((c for c in t1.columns if e_A.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
-                        c_l = next((c for c in t1.columns if e_B.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
-                        if c_s and c_l:
-                            d = t1[c_l] - t1[c_s]
-                            d = d.apply(lambda x: x + 1440 if x < -1000 else x).dropna()
-                            d = d[(d > 0) & (d < 30)]
-                            if not d.empty:
-                                running_avgs[f"{e_A} ➔ {e_B}"] = d.mean()
-                                
-                run_msg = ""
-                if running_avgs:
-                    seg_max_run = max(running_avgs, key=running_avgs.get)
-                    run_msg = f"🛤️ **Tiempo entre Estaciones (Running Time):** El segmento más demoroso en la red es **{seg_max_run}**, consumiendo en promedio **{running_avgs[seg_max_run]:.1f} minutos** del itinerario."
+                        if msg_parts:
+                            tiempo_msg = "\n".join(msg_parts)
+                            if brecha_max > 10: tiempo_msg += f"\n\n*⚠️ Alta inestabilidad ({brecha_max:.0f} min de brecha).* Fuerte impacto en consumo."
+                            else: tiempo_msg += f"\n\n*✅ Buena regularidad ({brecha_max:.0f} min de brecha).* Operación estable."
 
-                # --- Consolidación del Mensaje ---
-                if msg_parts:
-                    tiempo_msg = "\n\n".join(msg_parts)
-                    
-                    if brecha_max > 10:
-                        tiempo_msg += f"\n\n*🔍 Insight Operacional:* Existe una inestabilidad máxima de **{brecha_max:.0f} minutos** entre el tren más rápido y el más lento. Esta alta variabilidad fuerza maniobras de freno/aceleración severas para recuperar la malla, lo que penaliza agresivamente el consumo traccional (IDE)."
-                    else:
-                        tiempo_msg += f"\n\n*🔍 Insight Operacional:* La variabilidad máxima es de apenas **{brecha_max:.0f} minutos**. Esto refleja un cumplimiento estricto del itinerario (alta regularidad) favoreciendo la conducción eficiente y predecible."
+                    # --- MAQUETACIÓN DEL SUB-REPORTE POR JORNADA ---
+                    c_rep1, c_rep2 = st.columns(2)
+                    with c_rep1:
+                        st.markdown("##### 📊 Desempeño y Demanda")
+                        st.success(f"🏆 **Mayor Eficiencia:** {dia_min_ide['Fecha (ES)']} (IDE: **{dia_min_ide['IDE (kWh/km)']:.2f} kWh/km**)")
+                        st.warning(f"🚨 **Día Crítico (Ineficiente):** {dia_max_ide['Fecha (ES)']} (IDE: **{dia_max_ide['IDE (kWh/km)']:.2f} kWh/km**)")
+                        if dia_max_pax is not None and dia_max_pax['PAX'] > 0:
+                            st.info(f"👥 **Peak de Demanda:** {dia_max_pax['Fecha (ES)']} con **{int(dia_max_pax['PAX']):,}** personas.")
+                        st.info(f"🚆 **Tasa UMR Promedio:** {umr_global:.1f}%.")
                         
-                    if dwell_msg: tiempo_msg += f"\n\n{dwell_msg}"
-                    if run_msg: tiempo_msg += f"\n\n{run_msg}"
-
-            # --- REDACCIÓN Y MAQUETACIÓN DEL INFORME ---
-            st.info(f"🎯 **KPI de Sostenibilidad (Estándar UIC):** Durante este periodo, la empresa consumió **{kwh_per_pax:.2f} kWh de tracción por cada pasajero transportado**. Este es el indicador medioambiental definitivo que relaciona la oferta (energía) con la demanda real.")
-            
-            c_rep1, c_rep2 = st.columns(2)
-            
-            with c_rep1:
-                st.markdown("#### 📊 Análisis de Macrodiseño")
-                st.success(f"🏆 **Día de Mayor Eficiencia:** El tren operó de forma óptima el **{dia_min_ide['Fecha (ES)']}** registrando un IDE de **{dia_min_ide['IDE (kWh/km)']:.2f} kWh/km**. Se sugiere replicar el esquema de conducción de esta jornada.")
-                st.warning(f"🚨 **Día Crítico de Consumo:** La jornada más ineficiente en tracción fue el **{dia_max_ide['Fecha (ES)']}** alcanzando un IDE de **{dia_max_ide['IDE (kWh/km)']:.2f} kWh/km**. Sugerimos cruzar este día en la pestaña de *Atípicos* para evaluar causas (clima, fallas, peso extra).")
-                
-                if dia_max_pax is not None and dia_max_pax['PAX'] > 0:
-                    st.info(f"👥 **Peak de Demanda:** La mayor presión sobre el servicio ocurrió el **{dia_max_pax['Fecha (ES)']}**, logrando movilizar a **{int(dia_max_pax['PAX']):,} personas** en total.")
-                
-            with c_rep2:
-                st.markdown("#### 🔬 Diagnóstico de Alta Frecuencia")
-                st.info(f"⚡ **Curva de Demanda Diurna:** {peak_hr_msg}")
-                
-                # Inyectamos el mensaje nocturno si existe
-                if noche_msg:
-                    if "Alerta" in noche_msg:
-                        st.error(noche_msg)
-                    else:
-                        st.success(noche_msg)
+                    with c_rep2:
+                        st.markdown("##### 🔬 Diagnóstico Operativo")
+                        st.info(f"⚡ **Red Eléctrica:** {peak_hr_msg}")
+                        if noche_msg:
+                            if "Alerta" in noche_msg: st.error(noche_msg)
+                            else: st.success(noche_msg)
+                        st.error(f"🛑 **Cuello de Botella:** {estacion_msg}")
+                        st.info(f"📋 **Despachos:** {thdr_msg}")
                         
-                st.error(f"🛑 **Cuello de Botella Operativo:** {estacion_msg}")
-                st.info(f"🚆 **Logística de Despachos:** {thdr_msg}")
-                st.warning(f"⏱️ **Análisis de Regularidad y Tiempos de Viaje:** \n\n {tiempo_msg}")
-                    
-            st.divider()
-            st.markdown("💡 *Recomendación gerencial analítica:* Un incremento en la variabilidad de los tiempos de viaje (brechas mayores a 10 min) casi siempre está correlacionado con el 'Cuello de Botella Operativo'. Si los trenes tardan más de lo programado en la estación crítica por exceso de pasajeros, se propaga un retraso en toda la línea que el sistema eléctrico debe compensar.")
+                    if tiempo_msg:
+                        st.markdown("##### ⏱️ Análisis de Tiempos de Viaje")
+                        st.markdown(tiempo_msg)
     else:
         st.info("No hay datos consolidados para generar el análisis.")
