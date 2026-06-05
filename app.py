@@ -1117,12 +1117,39 @@ with tabs[6]:
         fig_out.add_trace(go.Scatter(x=df_ops['Fecha'], y=df_ops['IDE (kWh/km)'], mode='markers',
                                      marker=dict(color=df_ops['Es_Atípico'].map({True: 'red', False: '#005195'}), size=8), name='IDE'))
         
-        with c_v2:
-            st.write("#### Datos THDR Vía 2")
-            if not df_thdr_v2.empty:
-                st.dataframe(df_thdr_v2.head(50), use_container_width=True)
-                st.caption("Mostrando hasta 50 registros.")
-            else: st.info("No se ha cargado/procesado THDR Vía 2.")
+        fig_out.add_hline(y=mean_ide, line_dash="dash", line_color="green", annotation_text="Media")
+        fig_out.add_hline(y=mean_ide + 2*std_ide, line_dash="dot", line_color="orange", annotation_text="+2 Desv. Est.")
+        fig_out.add_hline(y=mean_ide - 2*std_ide, line_dash="dot", line_color="orange", annotation_text="-2 Desv. Est.")
+        
+        fig_out.update_layout(title="IDE Diario (Identificando días más allá de ±2 desviaciones estándar)", xaxis_title="Fecha", yaxis_title="IDE (kWh/km)")
+        st.plotly_chart(fig_out, use_container_width=True)
+        
+        atipicos = df_ops[df_ops['Es_Atípico']][['Fecha', 'IDE (kWh/km)', 'Odómetro [km]', 'E_Tr']]
+        if not atipicos.empty:
+            st.warning("⚠️ Se han detectado los siguientes días con comportamiento anómalo en el consumo:")
+            atipicos['Fecha'] = atipicos['Fecha'].dt.strftime('%Y-%m-%d')
+            st.dataframe(atipicos, use_container_width=True)
+        else: st.success("✅ No se detectaron valores atípicos significativos (Z-score > 2) en el periodo analizado.")
+    else: st.info("No hay datos de IDE calculados para analizar.")
+
+with tabs[7]:
+    st.write("### Perfil de Velocidades Vía 1 y 2")
+    st.plotly_chart(fig_perfil_velocidades(), use_container_width=True)
+
+    c_v1, c_v2 = st.columns(2)
+    with c_v1:
+        st.write("#### Datos THDR Vía 1")
+        if not df_thdr_v1.empty:
+            st.dataframe(df_thdr_v1.head(50), use_container_width=True)
+            st.caption("Mostrando hasta 50 registros.")
+        else: st.info("No se ha cargado/procesado THDR Vía 1.")
+            
+    with c_v2:
+        st.write("#### Datos THDR Vía 2")
+        if not df_thdr_v2.empty:
+            st.dataframe(df_thdr_v2.head(50), use_container_width=True)
+            st.caption("Mostrando hasta 50 registros.")
+        else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
 with tabs[8]:
     st.markdown("### 🔬 Análisis Multivariante: PAX vs Tiempos vs Energía")
