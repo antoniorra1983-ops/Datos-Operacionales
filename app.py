@@ -1097,10 +1097,10 @@ with tabs[8]:
                         
                         c_dw1, c_dw2 = st.columns([2, 1])
                         with c_dw1:
+                            # 🛡️ CORRECCIÓN: Se eliminó trendline="ols" para no depender de statsmodels
                             fig_dwell = px.scatter(df_dwell, x='Dwell_Secs', y='IDE (kWh/km)', color='Tipo Día',
                                                    title=f"Efecto de detención en {estacion_critica} vs Desempeño Energético",
                                                    labels={'Dwell_Secs': 'Tiempo de Detención Promedio (Segundos)'},
-                                                   trendline="ols",
                                                    color_discrete_sequence=["#E85500", "#005195", "#2CA02C"])
                             st.plotly_chart(fig_dwell, use_container_width=True)
                             
