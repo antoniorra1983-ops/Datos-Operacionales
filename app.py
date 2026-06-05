@@ -1342,20 +1342,25 @@ with tabs[10]:
                         df_hr['Fecha'] = pd.to_datetime(df_hr['Fecha'])
                         df_hr_filt = df_hr[df_hr['Fecha'].isin(fechas_tipo)]
                         if not df_hr_filt.empty:
+                            df_hr_filt = df_hr_filt.copy() # Escudo anti-warnings
                             hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
                             hora_peak = hr_agrupado.idxmax()
                             consumo_peak = hr_agrupado.max()
                             peak_hr_msg = f"La 'Hora Punta Eléctrica' ocurre a las **{hora_peak}** ({consumo_peak:,.0f} kWh prom.)."
                             
-                            df_noche = df_hr_filt[df_hr_filt['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
+                            # --- NUEVA LÓGICA DE AUDITORÍA NOCTURNA SEGÚN TIPO ---
+                            df_hr_filt['Hora_n'] = df_hr_filt['Hora'].astype(str).str.slice(0, 2).astype(int)
+                            limite_hora = 6 if tipo == "L" else (7 if tipo == "S" else 8)
+                            
+                            df_noche = df_hr_filt[df_hr_filt['Hora_n'] < limite_hora]
                             if not df_noche.empty:
                                 noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
                                 promedio_noche = noche_diario['Consumo'].mean()
                                 max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
                                 if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
-                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')}."
+                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')} (Límite auditoría: {limite_hora}:00 AM)."
                                 else:
-                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh/noche)."
+                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh hasta las {limite_hora}:00 AM)."
 
                     # Cuellos de Botella (Estaciones)
                     estacion_msg = "Sin datos de estaciones."
