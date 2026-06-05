@@ -597,8 +597,8 @@ with tabs[0]:
                 fig_serv = px.bar(df_resumen, x='Fecha', y='Servicios', 
                                   color_discrete_sequence=["#005195"],
                                   hover_data=hover_config, title="Servicios Programados")
-                # Valor completo sin decimales. Fuente ajustada para evitar superposición.
-                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='outside', textfont_size=11)
+                # Valor dentro de la barra, letra más grande (15)
+                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='auto', insidetextanchor='middle', textfont_size=15)
                 # automargin previene que se corten los títulos
                 fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'})
@@ -612,8 +612,8 @@ with tabs[0]:
                 fig_pax = px.bar(df_resumen, x='Fecha', y='PAX', 
                                   color_discrete_sequence=["#E85500"], # Naranja para contrastar Demanda vs Oferta
                                   hover_data=hover_config, title="Pasajeros Transportados (PAX)")
-                # Valor completo. Al ser de miles/millones, se rota a -90 grados para que quepa en la barra.
-                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='outside', textangle=-90, textfont_size=11)
+                # Valor dentro de la barra, letra más grande (14), rotado para que quepa
+                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='auto', insidetextanchor='middle', textangle=-90, textfont_size=14)
                 fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'})
                 
@@ -625,7 +625,6 @@ with tabs[0]:
             st.divider() # Línea separadora para mantener orden visual
             
             # --- SEGUNDA ESTRUCTURA: KILOMETRAJE Y RENDIMIENTO (UMR) ---
-            # Se eliminó el subtítulo a petición para mantener todo bajo DATOS OPERACIONALES
             c_chart_k, c_card_k, c_chart_u, c_card_u = st.columns([2.5, 1, 2.5, 1]) 
             
             with c_chart_k:
@@ -635,8 +634,8 @@ with tabs[0]:
                                 color_discrete_map={'Odómetro [km]': '#005195', 'Tren-Km [km]': '#66A5D9'}, # Tonos de azul
                                 hover_data=hover_config, title="Kilometraje (Odómetro vs Tren-Km)")
                 
-                # Valores completos, 2 decimales obligatorios. Rotados a -90 grados.
-                fig_km.update_traces(texttemplate='%{y:,.2f}', textposition='outside', textangle=-90, textfont_size=10)
+                # Valores dentro de la barra, letra más grande (13). Es ligeramente menor por ser barras agrupadas.
+                fig_km.update_traces(texttemplate='%{y:,.2f}', textposition='auto', insidetextanchor='middle', textangle=-90, textfont_size=13)
                 # Configuración de leyenda horizontal para no quitar espacio al gráfico
                 fig_km.update_layout(margin=dict(t=50, b=0, l=0, r=0), 
                                      title=dict(font=dict(size=15), automargin=True),
@@ -655,8 +654,8 @@ with tabs[0]:
                 fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', 
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Tasa Acoplamiento (UMR %)")
-                # 2 decimales obligatorios con el símbolo de porcentaje.
-                fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='outside', textangle=-90, textfont_size=11)
+                # Letra más grande (14), dentro de la barra
+                fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='auto', insidetextanchor='middle', textangle=-90, textfont_size=14)
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'})
                 
@@ -684,8 +683,8 @@ with tabs[0]:
                                   color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                                   hover_data=hover_config, title="Consumo Energético (kWh)")
                 
-                # Valores completos, 2 decimales. Rotados a -90 grados y en el interior de los bloques (stack).
-                fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', textangle=-90, textfont_size=10) 
+                # Letra más grande (13), anclado al centro del bloque apilado.
+                fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont_size=13) 
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), 
                                      title=dict(font=dict(size=15), automargin=True),
                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
@@ -701,8 +700,8 @@ with tabs[0]:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Desempeño Energético (IDE)")
-                # IDE con exactamente 2 decimales
-                fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='outside', textfont_size=11)
+                # Letra grande (14), dentro de la barra
+                fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='auto', insidetextanchor='middle', textangle=-90, textfont_size=14)
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'})
                 
