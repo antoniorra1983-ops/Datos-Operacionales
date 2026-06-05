@@ -132,7 +132,6 @@ _METRICAS_ANOM = {
 }
 
 def _robust_z(serie):
-    # z robusto: (x - mediana) / (1.4826 * MAD); si MAD=0 cae a desviación estándar
     s = serie.astype(float)
     med = s.median()
     mad = (s - med).abs().median()
@@ -142,7 +141,6 @@ def _robust_z(serie):
     return (s - med) / esc
 
 def _perfil_horario_diario(all_prmte_full, all_fact_full):
-    # nocturno (01-04h) y pico (kW) por día, desde las listas que ya arma la app
     datos, freq = (all_prmte_full, 15) if all_prmte_full else (all_fact_full, 60)
     if not datos:
         return pd.DataFrame(columns=["Fecha", "Noche_kWh", "Pico_kW"])
@@ -154,7 +152,6 @@ def _perfil_horario_diario(all_prmte_full, all_fact_full):
     return pd.concat([noche, pico], axis=1).reset_index()
 
 def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None, z_alerta=2.5, z_fuerte=3.5):
-    # Devuelve df_ops (solo días con energía) + columnas Nivel / Severidad / Diagnóstico
     if df_ops is None or df_ops.empty:
         return pd.DataFrame()
     d = df_ops[df_ops["E_Total"] > 0].copy().reset_index(drop=True)
@@ -633,9 +630,8 @@ elif _hay_archivos and _recalcular:
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2})
 
 # --- 8. TABS DE VISUALIZACIÓN ---
-# Modificamos el nombre del Tab 4 para reflejar su nueva función analítica
 tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Perfil Horario & Anomalías",
-              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"])
+              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"])
 
 with tabs[0]:
     _ep=st.session_state.get('_errores_proc',{})
@@ -653,12 +649,10 @@ with tabs[0]:
         
         df_resumen = df_ops[df_ops['Tipo Día'].isin(filtro_dia)]
         
-        # --- NUEVA LÓGICA DE DRILL-DOWN (CROSS-FILTERING) ---
         if 'drilldown_date' not in st.session_state:
             st.session_state.drilldown_date = None
             
         if st.session_state.drilldown_date is not None:
-            # Filtrar el dataframe exclusivamente al día seleccionado al hacer click
             df_resumen = df_resumen[df_resumen['Fecha'] == st.session_state.drilldown_date]
         
         if df_resumen.empty:
@@ -666,7 +660,6 @@ with tabs[0]:
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
             
-            # --- ALERTA VISUAL Y SALIDA DE EMERGENCIA DE UX ---
             if st.session_state.drilldown_date is not None:
                 c_info, c_btn = st.columns([4, 1])
                 c_info.info(f"🔍 **Modo Detalle Activo:** Estás viendo los datos exclusivos del día **{st.session_state.drilldown_date.strftime('%d-%m-%Y')}**.")
@@ -674,7 +667,6 @@ with tabs[0]:
                     st.session_state.drilldown_date = None
                     st.rerun()
             
-            # Programación Defensiva Estricta
             hover_config = {}
             if 'Fecha (ES)' in df_resumen.columns:
                 hover_config['Fecha'] = False       
@@ -686,19 +678,15 @@ with tabs[0]:
                 if col in df_resumen.columns: 
                     hover_config[col] = True
             
-            # --- ESTRUCTURA 1: SERVICIOS Y PAX LADO A LADO ---
             c_chart_s, c_card_s, c_chart_p, c_card_p = st.columns([2.5, 1, 2.5, 1]) 
             
             with c_chart_s:
                 fig_serv = px.bar(df_resumen, x='Fecha', y='Servicios', 
                                   color_discrete_sequence=["#005195"],
                                   hover_data=hover_config, title="Servicios Programados")
-                
                 fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                        bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                
-                # SE CAPTURA EL EVENTO ON_SELECT
                 ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
                 
             with c_card_s:
@@ -709,12 +697,9 @@ with tabs[0]:
                 fig_pax = px.bar(df_resumen, x='Fecha', y='PAX', 
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Pasajeros Transportados (PAX)")
-                
                 fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                
-                # SE CAPTURA EL EVENTO ON_SELECT
                 ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
                 
             with c_card_p:
@@ -723,7 +708,6 @@ with tabs[0]:
 
             st.divider()
             
-            # --- ESTRUCTURA 2: KILOMETRAJE Y RENDIMIENTO (UMR) ---
             c_chart_k, c_card_k, c_chart_u, c_card_u = st.columns([2.5, 1, 2.5, 1]) 
             
             with c_chart_k:
@@ -731,13 +715,10 @@ with tabs[0]:
                                 barmode='group',
                                 color_discrete_map={'Odómetro [km]': '#005195', 'Tren-Km [km]': '#66A5D9'}, 
                                 hover_data=hover_config, title="Kilometraje (Odómetro vs Tren-Km)")
-                
                 fig_km.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=11))
                 fig_km.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                      bargap=0.15, uniformtext=dict(minsize=8, mode='hide'))
-                
-                # SE CAPTURA EL EVENTO ON_SELECT
                 ev_km = st.plotly_chart(fig_km, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_km")
                 
             with c_card_k:
@@ -749,12 +730,9 @@ with tabs[0]:
                 fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', 
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Tasa Acoplamiento (UMR %)")
-                
                 fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                
-                # SE CAPTURA EL EVENTO ON_SELECT
                 ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
                 
             with c_card_u:
@@ -766,7 +744,6 @@ with tabs[0]:
                 
             st.divider() 
             
-            # --- ESTRUCTURA 3: ENERGÍA E IDE ---
             c_chart_e, c_card_e, c_chart_i, c_card_i = st.columns([2.5, 1, 2.5, 1]) 
             
             df_plot_ener = df_resumen.rename(columns={'E_Tr': 'Tracción', 'E_12': 'Baja Tensión'})
@@ -776,13 +753,10 @@ with tabs[0]:
                                   barmode='stack',
                                   color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                                   hover_data=hover_config, title="Consumo Energético (kWh)")
-                
                 fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=11)) 
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                      bargap=0.15, uniformtext=dict(minsize=8, mode='hide'))
-                
-                # SE CAPTURA EL EVENTO ON_SELECT
                 ev_ener = st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
                 
             with c_card_e:
@@ -794,12 +768,9 @@ with tabs[0]:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Desempeño Energético (IDE)")
-                
                 fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                           bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                
-                # SE CAPTURA EL EVENTO ON_SELECT
                 ev_ide_bar = st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
                 
             with c_card_i:
@@ -808,25 +779,19 @@ with tabs[0]:
                 ide_global = (tot_traccion_real / tot_odometro) if tot_odometro > 0 else 0
                 st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
 
-            # --- PROCESAMIENTO CENTRAL DE CLICKS EN GRÁFICOS ---
-            # Reunimos todos los eventos devueltos por los gráficos
             chart_events = [ev_serv, ev_pax, ev_km, ev_umr, ev_ener, ev_ide_bar]
             
             for ev in chart_events:
-                # Verificamos que el evento exista y contenga puntos seleccionados
                 if ev and isinstance(ev, dict) and ev.get('selection') and ev['selection'].get('points'):
                     clicked_x = ev['selection']['points'][0].get('x')
                     if clicked_x:
                         try:
-                            # Convertimos la fecha devuelta por Plotly al formato estándar de nuestro DataFrame
                             clicked_dt = pd.to_datetime(clicked_x).normalize()
-                            
-                            # Si es un día distinto al que ya está seleccionado, actualizamos la sesión y reiniciamos
                             if st.session_state.drilldown_date != clicked_dt:
                                 st.session_state.drilldown_date = clicked_dt
                                 st.rerun()
                         except Exception:
-                            pass # Si por algún motivo Plotly devuelve algo que no es fecha, lo ignoramos de forma segura
+                            pass
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
@@ -872,7 +837,6 @@ with tabs[4]:
         # --- 1. AUDITORÍA DE CARGA BASE (CONSUMO NOCTURNO) ---
         st.markdown("#### 🌙 Auditoría de Consumo Nocturno (01:00 - 05:00 hrs)")
         
-        # Filtramos la franja donde se asume que NO hay operación comercial
         df_noche = df_prmte[df_prmte['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
         
         if not df_noche.empty:
@@ -885,7 +849,6 @@ with tabs[4]:
                                     title="Consumo Total Nocturno por Día (kWh)",
                                     color_discrete_sequence=["#1f77b4"])
                 fig_noche.add_hline(y=promedio_noche, line_dash="dash", line_color="red", annotation_text="Promedio Base")
-                # Resaltar puntos que superen el promedio + 20%
                 anomalos_noche = consumo_noche_diario[consumo_noche_diario['Consumo'] > promedio_noche * 1.2]
                 if not anomalos_noche.empty:
                     fig_noche.add_trace(go.Scatter(x=anomalos_noche['Fecha'], y=anomalos_noche['Consumo'],
@@ -905,14 +868,13 @@ with tabs[4]:
         st.markdown("#### 🔥 Mapa de Calor: Consumo cada 15 Minutos")
         st.markdown("Identifica fácilmente a qué hora y qué día se producen los picos de demanda (colores cálidos) o valles (colores fríos).")
         
-        # Agrupamos por Fecha y 15min para la matriz
         matriz_15m = df_prmte.groupby(['Fecha', '15min'])['Consumo'].sum().reset_index()
         
         fig_heat = go.Figure(data=go.Heatmap(
             z=matriz_15m['Consumo'],
             x=matriz_15m['15min'],
             y=matriz_15m['Fecha'],
-            colorscale='Turbo', # Escala que va de azul (frío) a rojo/blanco (caliente)
+            colorscale='Turbo',
             hoverongaps=False,
             hovertemplate='Día: %{y}<br>Hora: %{x}<br>Consumo: %{z:,.1f} kWh<extra></extra>'
         ))
@@ -931,13 +893,12 @@ with tabs[4]:
         st.markdown("#### 📈 Curva de Demanda Promedio y Tolerancia Estadística")
         
         df_hr_stats = df_prmte.groupby('Hora')['Consumo'].agg(['mean', 'std']).reset_index()
-        df_hr_stats['upper_band'] = df_hr_stats['mean'] + (1.5 * df_hr_stats['std']) # Banda de tolerancia de 1.5 desviaciones
+        df_hr_stats['upper_band'] = df_hr_stats['mean'] + (1.5 * df_hr_stats['std'])
         df_hr_stats['lower_band'] = df_hr_stats['mean'] - (1.5 * df_hr_stats['std'])
         df_hr_stats['lower_band'] = df_hr_stats['lower_band'].clip(lower=0)
         
         fig_curva = go.Figure()
         
-        # Sombra de tolerancia (Rango normal)
         fig_curva.add_trace(go.Scatter(
             x=pd.concat([df_hr_stats['Hora'], df_hr_stats['Hora'][::-1]]),
             y=pd.concat([df_hr_stats['upper_band'], df_hr_stats['lower_band'][::-1]]),
@@ -947,7 +908,6 @@ with tabs[4]:
             name='Rango Normal Operativo (±1.5σ)'
         ))
         
-        # Línea Promedio
         fig_curva.add_trace(go.Scatter(
             x=df_hr_stats['Hora'], y=df_hr_stats['mean'],
             line=dict(color='#005195', width=3),
@@ -1036,24 +996,157 @@ with tabs[7]:
         else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
 with tabs[8]:
-    if not df_thdr_v1.empty and not df_thdr_v2.empty and not df_ops.empty:
-        st.write("### Correlación entre Cantidad de Servicios y Consumo")
-        servicios_v1 = df_thdr_v1.groupby('Fecha_Op').size().reset_index(name='V1_Servicios')
-        servicios_v2 = df_thdr_v2.groupby('Fecha_Op').size().reset_index(name='V2_Servicios')
+    st.markdown("### 🔬 Análisis Multivariante: PAX vs Tiempos vs Energía")
+    st.markdown("Este módulo cruza la demanda real (Pasajeros) con la fricción operativa (Tiempos de Viaje/Detenciones) para explicar el gasto de Tracción.")
+    
+    if not df_thdr_v1.empty and not df_thdr_v2.empty and not df_ops.empty and not df_carga_v1.empty:
+        # --- 1. PREPARACIÓN DEL CRUCE DE DATOS ---
+        def extr_tiempos(df_t, sal_str, lleg_str):
+            if df_t.empty: return pd.DataFrame()
+            c_sal = next((c for c in df_t.columns if sal_str in str(c).upper() and '_min' in str(c).lower()), None)
+            c_lleg = next((c for c in df_t.columns if lleg_str in str(c).upper() and '_min' in str(c).lower()), None)
+            if not c_sal or not c_lleg: return pd.DataFrame()
+            
+            t_v = df_t[['Fecha_Op', c_sal, c_lleg]].dropna().copy()
+            t_v['Dur'] = t_v[c_lleg] - t_v[c_sal]
+            t_v['Dur'] = t_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
+            t_v = t_v[(t_v['Dur'] > 30) & (t_v['Dur'] < 120)]
+            
+            return t_v.groupby('Fecha_Op')['Dur'].mean().reset_index()
+
+        tv1 = extr_tiempos(df_thdr_v1, 'PUERTO', 'LIMACHE')
+        tv2 = extr_tiempos(df_thdr_v2, 'LIMACHE', 'PUERTO')
         
-        servicios = pd.merge(servicios_v1, servicios_v2, on='Fecha_Op', how='outer').fillna(0)
-        servicios['Servicios Totales'] = servicios['V1_Servicios'] + servicios['V2_Servicios']
-        servicios = servicios.rename(columns={'Fecha_Op': 'Fecha'})
-        servicios['Fecha'] = pd.to_datetime(servicios['Fecha']).dt.normalize()
+        df_tiempos = pd.DataFrame(columns=['Fecha'])
+        if not tv1.empty:
+            tv1.columns = ['Fecha', 'Tiempo_V1']
+            df_tiempos = pd.merge(df_tiempos, tv1, on='Fecha', how='outer') if not df_tiempos.empty else tv1
+        if not tv2.empty:
+            tv2.columns = ['Fecha', 'Tiempo_V2']
+            df_tiempos = pd.merge(df_tiempos, tv2, on='Fecha', how='outer') if not df_tiempos.empty else tv2
+            
+        df_tiempos['Tiempo_Promedio_Red'] = df_tiempos[['Tiempo_V1', 'Tiempo_V2']].mean(axis=1)
+        df_tiempos['Fecha'] = pd.to_datetime(df_tiempos['Fecha']).dt.normalize()
+
+        df_mixto = pd.merge(df_ops, df_tiempos[['Fecha', 'Tiempo_Promedio_Red']], on='Fecha', how='inner')
+        df_plot = df_mixto.dropna(subset=['Tiempo_Promedio_Red', 'E_Tr', 'PAX']).copy()
         
-        df_mixto = pd.merge(df_ops, servicios, on='Fecha', how='inner')
-        
-        if not df_mixto.empty and df_mixto['E_Total'].sum() > 0:
-            fig_mix = px.scatter(df_mixto, x='Servicios Totales', y='E_Total', size='Odómetro [km]',
-                                 color='Tipo Día', hover_data=['Fecha'], title="Servicios Totales Programados vs Consumo Total (kWh)")
+        if not df_plot.empty and df_plot['E_Tr'].sum() > 0:
+            
+            # --- 2. BUBBLE CHART 4D ---
+            st.markdown("#### 🫧 Ecosistema Operativo Diario")
+            st.caption("Eje X: Lento/Rápido | Eje Y: Consumo Tracción | Tamaño: Volumen de Pasajeros")
+            
+            fig_mix = px.scatter(df_plot, 
+                                 x='Tiempo_Promedio_Red', 
+                                 y='E_Tr', 
+                                 size='PAX',
+                                 color='Tipo Día', 
+                                 hover_data=['Fecha', 'IDE (kWh/km)'],
+                                 labels={'Tiempo_Promedio_Red': 'Tiempo de Viaje Promedio (min)', 'E_Tr': 'Energía de Tracción (kWh)'},
+                                 color_discrete_map={'L': '#005195', 'S': '#E85500', 'D/F': '#2CA02C'})
+            
+            fig_mix.update_layout(margin=dict(t=20, b=0, l=0, r=0), height=450)
             st.plotly_chart(fig_mix, use_container_width=True)
-        else: st.info("No hay solapamiento de fechas entre los archivos THDR y los datos de Energía.")
-    else: st.info("Carga archivos THDR (Vía 1 y Vía 2) junto con Facturación/PRMTE/SEAT para ver este cruce.")
+            
+            # --- 3. ANÁLISIS DE CORRELACIÓN ---
+            corr_tiempo = df_plot['Tiempo_Promedio_Red'].corr(df_plot['E_Tr'])
+            corr_pax = df_plot['PAX'].corr(df_plot['E_Tr'])
+            
+            c_ins1, c_ins2 = st.columns(2)
+            with c_ins1:
+                st.info(f"📈 **Impacto del Tiempo (Fricción):** Correlación de **{corr_tiempo:.2f}**. (Cercano a 1 indica que al subir los tiempos de viaje por detenciones largas, la energía se dispara violentamente).")
+            with c_ins2:
+                st.info(f"👥 **Impacto de la Demanda (Peso):** Correlación de **{corr_pax:.2f}**. (Cercano a 1 indica que el puro peso inercial de la gente obliga a gastar más energía).")
+
+            st.divider()
+
+            # --- 4. EXTRACCIÓN DE DETENCIONES (DWELL TIME) ---
+            st.markdown("#### 🛑 El Costo Energético de las Detenciones (Dwell Time)")
+            
+            estacion_critica = df_carga_v1['Estación Máxima'].mode()[0] if not df_carga_v1.empty else None
+            
+            if estacion_critica and not df_thdr_v1.empty:
+                c_lleg = next((c for c in df_thdr_v1.columns if estacion_critica.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                c_sal = next((c for c in df_thdr_v1.columns if estacion_critica.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                
+                if c_lleg and c_sal:
+                    d_thdr = df_thdr_v1.copy()
+                    d_thdr['Dwell'] = d_thdr[c_sal] - d_thdr[c_lleg]
+                    d_thdr['Dwell'] = d_thdr['Dwell'].apply(lambda x: x + 1440 if x < -1000 else x)
+                    d_thdr = d_thdr[(d_thdr['Dwell'] >= 0) & (d_thdr['Dwell'] < 15)] 
+                    
+                    dwell_diario = d_thdr.groupby('Fecha_Op')['Dwell'].mean().reset_index()
+                    dwell_diario.columns = ['Fecha', 'Dwell_Promedio_Min']
+                    dwell_diario['Fecha'] = pd.to_datetime(dwell_diario['Fecha']).dt.normalize()
+                    
+                    df_dwell = pd.merge(df_plot, dwell_diario, on='Fecha', how='inner')
+                    
+                    if not df_dwell.empty:
+                        df_dwell['Dwell_Secs'] = df_dwell['Dwell_Promedio_Min'] * 60
+                        
+                        c_dw1, c_dw2 = st.columns([2, 1])
+                        with c_dw1:
+                            fig_dwell = px.scatter(df_dwell, x='Dwell_Secs', y='IDE (kWh/km)', color='Tipo Día',
+                                                   title=f"Efecto de detención en {estacion_critica} vs Desempeño Energético",
+                                                   labels={'Dwell_Secs': 'Tiempo de Detención Promedio (Segundos)'},
+                                                   trendline="ols",
+                                                   color_discrete_sequence=["#E85500", "#005195", "#2CA02C"])
+                            st.plotly_chart(fig_dwell, use_container_width=True)
+                            
+                        with c_dw2:
+                            promedio_segundos = df_dwell['Dwell_Secs'].mean()
+                            max_segundos = df_dwell['Dwell_Secs'].max()
+                            st.markdown("<br><br>", unsafe_allow_html=True)
+                            st.metric(f"Dwell Time Prom. en {estacion_critica}", f"{promedio_segundos:.0f} s")
+                            st.metric(f"Dwell Time Máximo Registrado", f"{max_segundos:.0f} s", delta="Cuello de Botella Activo", delta_color="inverse")
+                            st.caption("*Nota:* Valores sostenidos por sobre los 45-50 segundos indican fallas de flujo de pasajeros en andén, obligando al tren a recuperar itinerario con aceleraciones severas (penalizando el IDE).")
+                else:
+                    st.info(f"No se detectaron columnas de tiempos para la estación {estacion_critica} en la Vía 1.")
+            else:
+                st.info("No hay datos de carga suficientes para determinar la estación crítica.")
+
+            st.divider()
+
+            # --- 5. TIEMPO ENTRE ESTACIONES (RUNNING TIME) ---
+            st.markdown("#### 🛤️ Fricción en Vía: Tiempos entre Estaciones (Running Time)")
+            st.markdown("Identificación de los tramos que más retrasan la operación general de la Vía 1, consumiendo valioso tiempo de itinerario.")
+            
+            running_avgs = []
+            for i in range(len(ESTACIONES)-1):
+                e_A = ESTACIONES[i]
+                e_B = ESTACIONES[i+1]
+                c_s = next((c for c in df_thdr_v1.columns if e_A.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                c_l = next((c for c in df_thdr_v1.columns if e_B.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                
+                if c_s and c_l:
+                    d = df_thdr_v1[c_l] - df_thdr_v1[c_s]
+                    d = d.apply(lambda x: x + 1440 if x < -1000 else x).dropna()
+                    d = d[(d > 0) & (d < 30)] 
+                    if not d.empty:
+                        running_avgs.append({'Tramo': f"{e_A[:3]}-{e_B[:3]}", 'Minutos': d.mean()})
+                        
+            if running_avgs:
+                df_run = pd.DataFrame(running_avgs)
+                fig_run = px.line(
+                    df_run,
+                    x='Tramo',
+                    y='Minutos',
+                    markers=True,
+                    title="Tiempo Promedio de Viaje entre Estaciones Consecutivas (V1)",
+                    line_shape="linear"
+                )
+                fig_run.update_traces(line_color="#005195", marker=dict(size=8))
+                fig_run.update_layout(xaxis_title="Tramo", yaxis_title="Minutos de Viaje", margin=dict(t=40, b=0, l=0, r=0))
+                st.plotly_chart(fig_run, use_container_width=True)
+                
+                tramo_critico = df_run.loc[df_run['Minutos'].idxmax()]
+                st.warning(f"⚠️ **Tramo de mayor fricción:** El segmento **{tramo_critico['Tramo']}** consume en promedio **{tramo_critico['Minutos']:.1f} minutos** del itinerario. Este es el punto principal donde se debe velar por no tener interrupciones de velocidad (precauciones), ya que inyectar tracción aquí es lo más costoso para el sistema global.")
+
+        else:
+            st.warning("No hay suficientes datos superpuestos para realizar el análisis multivariante. Revisa las fechas.")
+    else: 
+        st.info("⚠️ Carga archivos de **THDR (Vía 1 y 2), Facturación/PRMTE/SEAT y Carga de Pasajeros** para habilitar el Microscopio Operacional.")
 
 with tabs[9]:
     st.write("### Flujo y Carga de Pasajeros")
