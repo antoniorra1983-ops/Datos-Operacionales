@@ -1117,39 +1117,12 @@ with tabs[6]:
         fig_out.add_trace(go.Scatter(x=df_ops['Fecha'], y=df_ops['IDE (kWh/km)'], mode='markers',
                                      marker=dict(color=df_ops['Es_Atípico'].map({True: 'red', False: '#005195'}), size=8), name='IDE'))
         
-        fig_out.add_hline(y=mean_ide, line_dash="dash", line_color="green", annotation_text="Media")
-        fig_out.add_hline(y=mean_ide + 2*std_ide, line_dash="dot", line_color="orange", annotation_text="+2 Desv. Est.")
-        fig_out.add_hline(y=mean_ide - 2*std_ide, line_dash="dot", line_color="orange", annotation_text="-2 Desv. Est.")
-        
-        fig_out.update_layout(title="IDE Diario (Identificando días más allá de ±2 desviaciones estándar)", xaxis_title="Fecha", yaxis_title="IDE (kWh/km)")
-        st.plotly_chart(fig_out, use_container_width=True)
-        
-        atipicos = df_ops[df_ops['Es_Atípico']][['Fecha', 'IDE (kWh/km)', 'Odómetro [km]', 'E_Tr']]
-        if not atipicos.empty:
-            st.warning("⚠️ Se han detectado los siguientes días con comportamiento anómalo en el consumo:")
-            atipicos['Fecha'] = atipicos['Fecha'].dt.strftime('%Y-%m-%d')
-            st.dataframe(atipicos, use_container_width=True)
-        else: st.success("✅ No se detectaron valores atípicos significativos (Z-score > 2) en el periodo analizado.")
-    else: st.info("No hay datos de IDE calculados para analizar.")
-
-with tabs[7]:
-    st.write("### Perfil de Velocidades Vía 1 y 2")
-    st.plotly_chart(fig_perfil_velocidades(), use_container_width=True)
-
-    c_v1, c_v2 = st.columns(2)
-    with c_v1:
-        st.write("#### Datos THDR Vía 1")
-        if not df_thdr_v1.empty:
-            st.dataframe(df_thdr_v1.head(50), use_container_width=True)
-            st.caption("Mostrando hasta 50 registros.")
-        else: st.info("No se ha cargado/procesado THDR Vía 1.")
-            
-    with c_v2:
-        st.write("#### Datos THDR Vía 2")
-        if not df_thdr_v2.empty:
-            st.dataframe(df_thdr_v2.head(50), use_container_width=True)
-            st.caption("Mostrando hasta 50 registros.")
-        else: st.info("No se ha cargado/procesado THDR Vía 2.")
+        with c_v2:
+            st.write("#### Datos THDR Vía 2")
+            if not df_thdr_v2.empty:
+                st.dataframe(df_thdr_v2.head(50), use_container_width=True)
+                st.caption("Mostrando hasta 50 registros.")
+            else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
 with tabs[8]:
     st.markdown("### 🔬 Análisis Multivariante: PAX vs Tiempos vs Energía")
@@ -1248,16 +1221,23 @@ with tabs[8]:
                         df_c['Hora_Salida'] = pd.to_datetime(df_c[c_hora], format='%H:%M:%S', errors='coerce').dt.hour
                         df_c['Hora_Salida'] = df_c['Hora_Salida'].fillna(pd.to_numeric(df_c[c_hora].astype(str).str[:2], errors='coerce'))
                     else:
-                        # 2. Cruce con THDR para adivinar la hora
+                        # 2. Cruce con THDR para adivinar la hora (PARCHE DE REGEX)
                         c_serv_c = next((c for c in df_c.columns if 'THDR' in str(c).upper() or 'VIAJE' in str(c).upper()), df_c.columns[0])
                         c_serv_t = df_thdr_filt.columns[0] if not df_thdr_filt.empty else None
                         c_sal_t = get_col_thdr(df_thdr_filt, est_origen, 'SALIDA')
+                        
                         if c_sal_t and c_serv_t:
                             t_sub = df_thdr_filt[['Fecha_Op', c_serv_t, c_sal_t]].copy()
                             t_sub['Hora_Salida'] = (extract_series(t_sub, c_sal_t) // 60).astype(float)
-                            df_c[c_serv_c] = df_c[c_serv_c].astype(str).str.strip()
-                            t_sub[c_serv_t] = t_sub[c_serv_t].astype(str).str.strip()
-                            df_c = pd.merge(df_c, t_sub, left_on=['Fecha', c_serv_c], right_on=['Fecha_Op', c_serv_t], how='inner')
+                            
+                            # Limpieza extrema: Quitamos letras para igualar Ej. "M102" con "102"
+                            df_c['_srv_clean'] = df_c[c_serv_c].astype(str).apply(lambda x: re.sub(r'\D', '', x))
+                            t_sub['_srv_clean'] = t_sub[c_serv_t].astype(str).apply(lambda x: re.sub(r'\D', '', x))
+                            
+                            df_c = pd.merge(df_c, t_sub[['Fecha_Op', '_srv_clean', 'Hora_Salida']], 
+                                            left_on=['Fecha', '_srv_clean'], 
+                                            right_on=['Fecha_Op', '_srv_clean'], 
+                                            how='inner')
                     
                     if 'Hora_Salida' not in df_c.columns: return []
                     
@@ -1265,10 +1245,30 @@ with tabs[8]:
                     df_c['Hora_Salida'] = df_c['Hora_Salida'].astype(int)
                     df_c = df_c[(df_c['Hora_Salida'] >= 5) & (df_c['Hora_Salida'] <= 23)]
                     
+                    # Alias de Estaciones para Pasajeros
+                    alias_map_pax = {
+                        "VIÑA DEL MAR": ["VINA", "V. MAR", "V MAR", "VIÑA"],
+                        "EL BELLOTO": ["BELLOTO"], "LAS AMERICAS": ["AMERICAS"],
+                        "LA CONCEPCION": ["CONCEPCION"], "VILLA ALEMANA": ["VILLA", "ALEMANA", "V. ALEMANA"],
+                        "SARGENTO ALDEA": ["SARGENTO", "ALDEA", "S. ALDEA"],
+                        "PEÑABLANCA": ["PENA BLANCA", "PENABLANCA", "PEÑA BLANCA"],
+                        "EL SALTO": ["SALTO"]
+                    }
+                    
                     pax_data = []
                     for est in valid_stations:
-                        # Buscamos la columna de carga de esa estación, excluyendo columnas de totales
-                        c_est = next((c for c in df_c.columns if _norm(est) in _norm(c) and 'MAX' not in _norm(c) and 'MIN' not in _norm(c) and 'TOTAL' not in _norm(c)), None)
+                        est_n = _norm(est)
+                        c_est = None
+                        for c in df_c.columns:
+                            cn = _norm(c)
+                            if 'MAX' in cn or 'MIN' in cn or 'TOTAL' in cn: continue
+                            if est_n in cn: 
+                                c_est = c; break
+                            if est_n in alias_map_pax:
+                                for alias in alias_map_pax[est_n]:
+                                    if alias in cn: c_est = c; break
+                                if c_est: break
+                                
                         if c_est:
                             temp = df_c[['Hora_Salida', c_est]].copy()
                             temp.columns = ['Hora_Salida', 'Pax']
