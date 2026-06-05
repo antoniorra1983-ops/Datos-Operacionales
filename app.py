@@ -1003,8 +1003,9 @@ with tabs[8]:
         # --- 1. PREPARACIÓN DEL CRUCE DE DATOS ---
         def extr_tiempos(df_t, sal_str, lleg_str):
             if df_t.empty: return pd.DataFrame()
-            c_sal = next((c for c in df_t.columns if sal_str in str(c).upper() and '_min' in str(c).lower()), None)
-            c_lleg = next((c for c in df_t.columns if lleg_str in str(c).upper() and '_min' in str(c).lower()), None)
+            # 🛡️ CORRECCIÓN DEFENSIVA: Exigir explícitamente que la columna sea de 'SALIDA' o 'LLEGADA'
+            c_sal = next((c for c in df_t.columns if sal_str in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+            c_lleg = next((c for c in df_t.columns if lleg_str in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
             if not c_sal or not c_lleg: return pd.DataFrame()
             
             t_v = df_t[['Fecha_Op', c_sal, c_lleg]].dropna().copy()
@@ -1036,6 +1037,9 @@ with tabs[8]:
 
         df_mixto = pd.merge(df_ops, df_tiempos[['Fecha', 'Tiempo_Promedio_Red']], on='Fecha', how='inner')
         df_plot = df_mixto.dropna(subset=['Tiempo_Promedio_Red', 'E_Tr', 'PAX']).copy()
+        
+        # 🛡️ CORRECCIÓN DE GRAFICADO: Plotly arrojará error si el tamaño (PAX) es 0
+        df_plot = df_plot[df_plot['PAX'] > 0] 
         
         if not df_plot.empty and df_plot['E_Tr'].sum() > 0:
             
