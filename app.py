@@ -985,51 +985,114 @@ with tabs[10]:
                         porcentaje_doble = (viajes_traccion_doble / total_viajes * 100) if total_viajes > 0 else 0
                         thdr_msg = f"Se despacharon **{total_viajes:,} servicios** comerciales. El **{porcentaje_doble:.1f}% de los itinerarios fueron configurados en Tracción Doble**."
 
-                # 4. Cálculo de Tiempos de Viaje y Regularidad (Puerto <-> Limache)
-                tiempos_v1 = pd.Series(dtype=float)
-                if not t1.empty:
-                    c_p_sal = next((c for c in t1.columns if 'PUERTO' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
-                    c_l_lleg = next((c for c in t1.columns if 'LIMACHE' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
-                    if c_p_sal and c_l_lleg:
-                        diff = t1[c_l_lleg] - t1[c_p_sal]
-                        # Ajuste matemático por si el viaje cruza la medianoche
-                        tiempos_v1 = diff.apply(lambda x: x + 1440 if x < -500 else x).dropna()
-                        tiempos_v1 = tiempos_v1[(tiempos_v1 > 30) & (tiempos_v1 < 120)] # Filtro de valores lógicos
-                
-                tiempos_v2 = pd.Series(dtype=float)
-                if not t2.empty:
-                    c_l_sal = next((c for c in t2.columns if 'LIMACHE' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
-                    c_p_lleg = next((c for c in t2.columns if 'PUERTO' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
-                    if c_l_sal and c_p_lleg:
-                        diff = t2[c_p_lleg] - t2[c_l_sal]
-                        tiempos_v2 = diff.apply(lambda x: x + 1440 if x < -500 else x).dropna()
-                        tiempos_v2 = tiempos_v2[(tiempos_v2 > 30) & (tiempos_v2 < 120)]
-                        
+                # 4. Cálculo Analítico de Tiempos de Viaje, Detenciones y Regularidad
+                def formato_hora(h):
+                    if pd.isna(h): return "N/A"
+                    if isinstance(h, (datetime, time)): return h.strftime('%H:%M')
+                    return str(h)[:5]
+
                 msg_parts = []
                 brecha_max = 0
                 
-                if not tiempos_v1.empty:
-                    t_prom_v1 = tiempos_v1.mean()
-                    t_min_v1 = tiempos_v1.min()
-                    t_max_v1 = tiempos_v1.max()
-                    brecha_v1 = t_max_v1 - t_min_v1
-                    brecha_max = max(brecha_max, brecha_v1)
-                    msg_parts.append(f"**V1 (PU→LI):** Promedio **{t_prom_v1:.1f} min** (Rápido: {t_min_v1:.0f} min | Lento: {t_max_v1:.0f} min).")
+                # --- Extracción de Extremos Vía 1 (Puerto -> Limache) ---
+                if not t1.empty:
+                    c_serv_v1 = t1.columns[0] # Usualmente la primera columna es el N° de Servicio/Tren
+                    c_p_sal = next((c for c in t1.columns if 'PUERTO' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' not in str(c).lower()), None)
+                    c_p_sal_min = f"{c_p_sal}_min" if c_p_sal else None
+                    c_l_lleg = next((c for c in t1.columns if 'LIMACHE' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' not in str(c).lower()), None)
+                    c_l_lleg_min = f"{c_l_lleg}_min" if c_l_lleg else None
                     
-                if not tiempos_v2.empty:
-                    t_prom_v2 = tiempos_v2.mean()
-                    t_min_v2 = tiempos_v2.min()
-                    t_max_v2 = tiempos_v2.max()
-                    brecha_v2 = t_max_v2 - t_min_v2
-                    brecha_max = max(brecha_max, brecha_v2)
-                    msg_parts.append(f"**V2 (LI→PU):** Promedio **{t_prom_v2:.1f} min** (Rápido: {t_min_v2:.0f} min | Lento: {t_max_v2:.0f} min).")
+                    if c_p_sal_min and c_l_lleg_min:
+                        t1_v = t1[[c_serv_v1, 'Fecha_Op', c_p_sal, c_p_sal_min, c_l_lleg_min]].dropna(subset=[c_p_sal_min, c_l_lleg_min]).copy()
+                        t1_v['Dur'] = t1_v[c_l_lleg_min] - t1_v[c_p_sal_min]
+                        t1_v['Dur'] = t1_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x) # Ajuste por viajes tras la medianoche
+                        t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)] # Escudo Anti-ruido
+                        
+                        if not t1_v.empty:
+                            t_prom_v1 = t1_v['Dur'].mean()
+                            r_min = t1_v.loc[t1_v['Dur'].idxmin()]
+                            r_max = t1_v.loc[t1_v['Dur'].idxmax()]
+                            fch_min = r_min['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_min['Fecha_Op']) else ''
+                            fch_max = r_max['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_max['Fecha_Op']) else ''
+                            
+                            msg_parts.append(f"**V1 (PU→LI) - Promedio: {t_prom_v1:.1f} min**\n"
+                                             f"🟢 *Más Rápido:* **{r_min['Dur']:.0f} min** (Día {fch_min}, Serv. {r_min[c_serv_v1]}, Salida: {formato_hora(r_min[c_p_sal])})\n"
+                                             f"🔴 *Más Lento:* **{r_max['Dur']:.0f} min** (Día {fch_max}, Serv. {r_max[c_serv_v1]}, Salida: {formato_hora(r_max[c_p_sal])})")
+                            brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
+
+                # --- Extracción de Extremos Vía 2 (Limache -> Puerto) ---
+                if not t2.empty:
+                    c_serv_v2 = t2.columns[0]
+                    c_l_sal = next((c for c in t2.columns if 'LIMACHE' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' not in str(c).lower()), None)
+                    c_l_sal_min = f"{c_l_sal}_min" if c_l_sal else None
+                    c_p_lleg = next((c for c in t2.columns if 'PUERTO' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' not in str(c).lower()), None)
+                    c_p_lleg_min = f"{c_p_lleg}_min" if c_p_lleg else None
                     
+                    if c_l_sal_min and c_p_lleg_min:
+                        t2_v = t2[[c_serv_v2, 'Fecha_Op', c_l_sal, c_l_sal_min, c_p_lleg_min]].dropna(subset=[c_l_sal_min, c_p_lleg_min]).copy()
+                        t2_v['Dur'] = t2_v[c_p_lleg_min] - t2_v[c_l_sal_min]
+                        t2_v['Dur'] = t2_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
+                        t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
+                        
+                        if not t2_v.empty:
+                            t_prom_v2 = t2_v['Dur'].mean()
+                            r_min = t2_v.loc[t2_v['Dur'].idxmin()]
+                            r_max = t2_v.loc[t2_v['Dur'].idxmax()]
+                            fch_min = r_min['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_min['Fecha_Op']) else ''
+                            fch_max = r_max['Fecha_Op'].strftime('%d/%m') if pd.notnull(r_max['Fecha_Op']) else ''
+                            
+                            msg_parts.append(f"**V2 (LI→PU) - Promedio: {t_prom_v2:.1f} min**\n"
+                                             f"🟢 *Más Rápido:* **{r_min['Dur']:.0f} min** (Día {fch_min}, Serv. {r_min[c_serv_v2]}, Salida: {formato_hora(r_min[c_l_sal])})\n"
+                                             f"🔴 *Más Lento:* **{r_max['Dur']:.0f} min** (Día {fch_max}, Serv. {r_max[c_serv_v2]}, Salida: {formato_hora(r_max[c_l_sal])})")
+                            brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
+
+                # --- Análisis de Micro-Tiempos (Dwell Time & Running Time) ---
+                dwell_avgs = {}
+                for est in ESTACIONES:
+                    c_l = next((c for c in df_t_filt.columns if est.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    c_s = next((c for c in df_t_filt.columns if est.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    if c_l and c_s:
+                        d = df_t_filt[c_s] - df_t_filt[c_l]
+                        d = d.apply(lambda x: x + 1440 if x < -1000 else x).dropna()
+                        d = d[(d >= 0) & (d < 15)] # Máximo 15 min de detención comercial lógica
+                        if not d.empty:
+                            dwell_avgs[est] = d.mean() * 60 # Convertido a segundos
+                            
+                dwell_msg = ""
+                if dwell_avgs:
+                    est_max_dwell = max(dwell_avgs, key=dwell_avgs.get)
+                    dwell_msg = f"⏱️ **Tiempo de Detención (Dwell Time):** La estación que retiene más tiempo a los trenes es **{est_max_dwell}**, con una pausa promedio de **{dwell_avgs[est_max_dwell]:.0f} segundos**. (Valores >45s indican congestión)."
+
+                running_avgs = {}
+                if not t1.empty: # Muestra representativa en Vía 1
+                    for i in range(len(ESTACIONES)-1):
+                        e_A = ESTACIONES[i]
+                        e_B = ESTACIONES[i+1]
+                        c_s = next((c for c in t1.columns if e_A.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                        c_l = next((c for c in t1.columns if e_B.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                        if c_s and c_l:
+                            d = t1[c_l] - t1[c_s]
+                            d = d.apply(lambda x: x + 1440 if x < -1000 else x).dropna()
+                            d = d[(d > 0) & (d < 30)]
+                            if not d.empty:
+                                running_avgs[f"{e_A} ➔ {e_B}"] = d.mean()
+                                
+                run_msg = ""
+                if running_avgs:
+                    seg_max_run = max(running_avgs, key=running_avgs.get)
+                    run_msg = f"🛤️ **Tiempo entre Estaciones (Running Time):** El segmento más demoroso en la red es **{seg_max_run}**, consumiendo en promedio **{running_avgs[seg_max_run]:.1f} minutos** del itinerario."
+
+                # --- Consolidación del Mensaje ---
                 if msg_parts:
                     tiempo_msg = "\n\n".join(msg_parts)
+                    
                     if brecha_max > 10:
-                        tiempo_msg += f"\n\n*🔍 Insight Operacional:* Se detectó una variabilidad máxima de **{brecha_max:.0f} minutos** entre el tren más rápido y el más lento. Esta alta dispersión afecta la regularidad de los intervalos de despacho (Headways) e induce paradas tipo 'Stop-and-Go', lo que penaliza severamente el consumo de tracción."
+                        tiempo_msg += f"\n\n*🔍 Insight Operacional:* Existe una inestabilidad máxima de **{brecha_max:.0f} minutos** entre el tren más rápido y el más lento. Esta alta variabilidad fuerza maniobras de freno/aceleración severas para recuperar la malla, lo que penaliza agresivamente el consumo traccional (IDE)."
                     else:
-                        tiempo_msg += f"\n\n*🔍 Insight Operacional:* La variabilidad máxima es de apenas **{brecha_max:.0f} minutos**, lo que refleja una excelente regularidad, cumplimiento estricto de la malla horaria y favorece la conducción eficiente."
+                        tiempo_msg += f"\n\n*🔍 Insight Operacional:* La variabilidad máxima es de apenas **{brecha_max:.0f} minutos**. Esto refleja un cumplimiento estricto del itinerario (alta regularidad) favoreciendo la conducción eficiente y predecible."
+                        
+                    if dwell_msg: tiempo_msg += f"\n\n{dwell_msg}"
+                    if run_msg: tiempo_msg += f"\n\n{run_msg}"
 
             # --- REDACCIÓN Y MAQUETACIÓN DEL INFORME ---
             st.info(f"🎯 **KPI de Sostenibilidad (Estándar UIC):** Durante este periodo, la empresa consumió **{kwh_per_pax:.2f} kWh de tracción por cada pasajero transportado**. Este es el indicador medioambiental definitivo que relaciona la oferta (energía) con la demanda real.")
