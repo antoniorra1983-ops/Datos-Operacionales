@@ -1099,7 +1099,7 @@ with tabs[10]:
                             if isinstance(h, (datetime, time)): return h.strftime('%H:%M')
                             return str(h)[:5]
 
-                        msg_parts = []
+                        msg_v1, msg_v2, msg_insight = "", "", ""
                         brecha_max = 0
                         
                         if not t1.empty:
@@ -1112,7 +1112,7 @@ with tabs[10]:
                                 t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)]
                                 if not t1_v.empty:
                                     r_min, r_max = t1_v.loc[t1_v['Dur'].idxmin()], t1_v.loc[t1_v['Dur'].idxmax()]
-                                    msg_parts.append(f"**V1 (PU→LI) Promedio: {t1_v['Dur'].mean():.1f} min**\n- *Rápido:* {r_min['Dur']:.0f} min (Día {r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v1]}, {formato_hora(r_min[c_p_sal])})\n- *Lento:* {r_max['Dur']:.0f} min (Día {r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v1]}, {formato_hora(r_max[c_p_sal])})")
+                                    msg_v1 = f"**V1 (PU→LI) Promedio: {t1_v['Dur'].mean():.1f} min**\n\n- 🟢 *Rápido:* {r_min['Dur']:.0f} min ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v1]}, {formato_hora(r_min[c_p_sal])})\n- 🔴 *Lento:* {r_max['Dur']:.0f} min ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v1]}, {formato_hora(r_max[c_p_sal])})"
                                     brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
                         if not t2.empty:
@@ -1125,13 +1125,12 @@ with tabs[10]:
                                 t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
                                 if not t2_v.empty:
                                     r_min, r_max = t2_v.loc[t2_v['Dur'].idxmin()], t2_v.loc[t2_v['Dur'].idxmax()]
-                                    msg_parts.append(f"**V2 (LI→PU) Promedio: {t2_v['Dur'].mean():.1f} min**\n- *Rápido:* {r_min['Dur']:.0f} min (Día {r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v2]}, {formato_hora(r_min[c_l_sal])})\n- *Lento:* {r_max['Dur']:.0f} min (Día {r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v2]}, {formato_hora(r_max[c_l_sal])})")
+                                    msg_v2 = f"**V2 (LI→PU) Promedio: {t2_v['Dur'].mean():.1f} min**\n\n- 🟢 *Rápido:* {r_min['Dur']:.0f} min ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v2]}, {formato_hora(r_min[c_l_sal])})\n- 🔴 *Lento:* {r_max['Dur']:.0f} min ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v2]}, {formato_hora(r_max[c_l_sal])})"
                                     brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
-                        if msg_parts:
-                            tiempo_msg = "\n".join(msg_parts)
-                            if brecha_max > 10: tiempo_msg += f"\n\n*⚠️ Alta inestabilidad ({brecha_max:.0f} min de brecha).* Fuerte impacto en consumo."
-                            else: tiempo_msg += f"\n\n*✅ Buena regularidad ({brecha_max:.0f} min de brecha).* Operación estable."
+                        if msg_v1 or msg_v2:
+                            if brecha_max > 10: msg_insight = f"⚠️ *Alta inestabilidad ({brecha_max:.0f} min de brecha máxima).* Fuerte impacto negativo en consumo de tracción."
+                            else: msg_insight = f"✅ *Buena regularidad ({brecha_max:.0f} min de brecha máxima).* Operación estable que favorece la conducción eficiente."
 
                     # --- MAQUETACIÓN DEL SUB-REPORTE POR JORNADA ---
                     c_rep1, c_rep2 = st.columns(2)
@@ -1152,8 +1151,14 @@ with tabs[10]:
                         st.error(f"🛑 **Cuello de Botella:** {estacion_msg}")
                         st.info(f"📋 **Despachos:** {thdr_msg}")
                         
-                    if tiempo_msg:
+                    if msg_v1 or msg_v2:
                         st.markdown("##### ⏱️ Análisis de Tiempos de Viaje")
-                        st.markdown(tiempo_msg)
+                        c_t1, c_t2 = st.columns(2)
+                        with c_t1:
+                            if msg_v1: st.info(msg_v1)
+                        with c_t2:
+                            if msg_v2: st.info(msg_v2)
+                        if msg_insight:
+                            st.markdown(msg_insight)
     else:
         st.info("No hay datos consolidados para generar el análisis.")
