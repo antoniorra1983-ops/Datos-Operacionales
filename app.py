@@ -911,14 +911,11 @@ with tabs[9]:
 with tabs[10]:
     st.markdown("### 📝 Análisis Ejecutivo Automático")
     if not df_ops.empty:
-        # Extraemos el DataFrame filtrado de la pestaña de resumen (si el usuario aplicó filtros L, S, D/F)
-        # Usamos programación defensiva en caso de que las variables no existan aún en el scope local
         if 'filtro_dia' in locals():
             df_reporte = df_ops[df_ops['Tipo Día'].isin(filtro_dia)]
         else:
             df_reporte = df_ops
             
-        # Si hay un drill-down activo (click en un día), enfocamos el reporte en ese día
         if 'drilldown_date' in st.session_state and st.session_state.drilldown_date is not None:
             df_reporte = df_reporte[df_reporte['Fecha'] == st.session_state.drilldown_date]
         
@@ -927,10 +924,8 @@ with tabs[10]:
         else:
             st.markdown("Este reporte es generado automáticamente aplicando **algoritmos de estadística descriptiva** sobre los datos operativos actuales.")
             
-            # --- MOTOR DE CÁLCULOS ---
+            # --- MOTOR DE CÁLCULOS BÁSICOS ---
             dia_max_ide = df_reporte.loc[df_reporte['IDE (kWh/km)'].idxmax()]
-            
-            # Buscar el mínimo IDE que sea mayor a cero (para evitar errores por días sin datos eléctricos)
             dias_validos_ide = df_reporte[df_reporte['IDE (kWh/km)'] > 0]
             dia_min_ide = dias_validos_ide.loc[dias_validos_ide['IDE (kWh/km)'].idxmin()] if not dias_validos_ide.empty else dia_max_ide
             
@@ -941,8 +936,53 @@ with tabs[10]:
             tot_tren_km = df_reporte['Tren-Km [km]'].sum()
             tot_odo = df_reporte['Odómetro [km]'].sum()
             umr_global = (tot_tren_km / tot_odo * 100) if tot_odo > 0 else 0
-            
             dia_max_pax = df_reporte.loc[df_reporte['PAX'].idxmax()] if df_reporte['PAX'].sum() > 0 else None
+
+            # --- MOTOR DE CÁLCULOS DE ALTA FRECUENCIA (15 MIN / ESTACIONES / THDR) ---
+            fechas_reporte = df_reporte['Fecha'].tolist()
+            
+            # 1. Perfil de Consumo Horario (Facturación / PRMTE)
+            peak_hr_msg = "No se encontraron datos granulares de energía (PRMTE/Facturación) para este periodo."
+            datos_hr = all_prmte_full if all_prmte_full else all_fact_full
+            if datos_hr:
+                df_hr = pd.DataFrame(datos_hr)
+                df_hr['Fecha'] = pd.to_datetime(df_hr['Fecha'])
+                df_hr_filt = df_hr[df_hr['Fecha'].isin(fechas_reporte)]
+                if not df_hr_filt.empty:
+                    # Agrupar por hora del día para sacar el promedio
+                    hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
+                    hora_peak = hr_agrupado.idxmax()
+                    consumo_peak = hr_agrupado.max()
+                    peak_hr_msg = f"La mayor exigencia a la red eléctrica ocurrió a las **{hora_peak}**, con un consumo promedio de **{consumo_peak:,.0f} kWh**. Esta es su 'Hora Punta'. Evalúe estrategias de *Peak Shaving* (Afeitado de picos) en esta franja si hay cargos por potencia máxima."
+
+            # 2. Análisis de Cuellos de Botella (Carga Tren / Pasajeros)
+            estacion_msg = "No se encontraron datos de carga de pasajeros por estación para este periodo."
+            df_c_filt = pd.DataFrame()
+            if not df_carga_v1.empty or not df_carga_v2.empty:
+                c1 = df_carga_v1[df_carga_v1['Fecha'].isin(fechas_reporte)] if not df_carga_v1.empty else pd.DataFrame()
+                c2 = df_carga_v2[df_carga_v2['Fecha'].isin(fechas_reporte)] if not df_carga_v2.empty else pd.DataFrame()
+                df_c_filt = pd.concat([c1, c2])
+                
+                if not df_c_filt.empty and 'Estación Máxima' in df_c_filt.columns:
+                    estacion_critica = df_c_filt['Estación Máxima'].value_counts().idxmax()
+                    frecuencia_critica = df_c_filt['Estación Máxima'].value_counts().max()
+                    estacion_msg = f"La estación **{estacion_critica}** representó el mayor cuello de botella en la red. En **{frecuencia_critica} viajes**, los trenes alcanzaron su máxima capacidad física al pasar por este punto. Focalice medidas de seguridad de andén y ventilación de trenes en esta zona."
+
+            # 3. Eficiencia Operativa de Despacho (THDR)
+            thdr_msg = "No se encontraron datos de itinerario (THDR) para este periodo."
+            df_t_filt = pd.DataFrame()
+            if not df_thdr_v1.empty or not df_thdr_v2.empty:
+                t1 = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_reporte)] if not df_thdr_v1.empty else pd.DataFrame()
+                t2 = df_thdr_v2[df_thdr_v2['Fecha_Op'].isin(fechas_reporte)] if not df_thdr_v2.empty else pd.DataFrame()
+                df_t_filt = pd.concat([t1, t2])
+                
+                if not df_t_filt.empty:
+                    # Ejemplo de métrica avanzada: Porcentaje de uso de tracción motriz (Si aplica según la Unidad)
+                    total_viajes = len(df_t_filt)
+                    if 'Unidad' in df_t_filt.columns:
+                        viajes_traccion_doble = len(df_t_filt[df_t_filt['Unidad'].astype(str).str.contains('M', case=False, na=False)])
+                        porcentaje_doble = (viajes_traccion_doble / total_viajes * 100) if total_viajes > 0 else 0
+                        thdr_msg = f"Se despacharon un total de **{total_viajes:,} servicios** comerciales (THDR). El análisis revela que el **{porcentaje_doble:.1f}% de los itinerarios fueron configurados en Tracción Doble** desde la programación de origen."
 
             # --- REDACCIÓN Y MAQUETACIÓN DEL INFORME ---
             st.info(f"🎯 **KPI de Sostenibilidad (Estándar UIC):** Durante este periodo, la empresa consumió **{kwh_per_pax:.2f} kWh de tracción por cada pasajero transportado**. Este es el indicador medioambiental definitivo que relaciona la oferta (energía) con la demanda real.")
@@ -950,23 +990,20 @@ with tabs[10]:
             c_rep1, c_rep2 = st.columns(2)
             
             with c_rep1:
+                st.markdown("#### 📊 Análisis de Macrodiseño")
                 st.success(f"🏆 **Día de Mayor Eficiencia:** El tren operó de forma óptima el **{dia_min_ide['Fecha (ES)']}** registrando un IDE de **{dia_min_ide['IDE (kWh/km)']:.2f} kWh/km**. Se sugiere replicar el esquema de conducción de esta jornada.")
-                
                 st.warning(f"🚨 **Día Crítico de Consumo:** La jornada más ineficiente en tracción fue el **{dia_max_ide['Fecha (ES)']}** alcanzando un IDE de **{dia_max_ide['IDE (kWh/km)']:.2f} kWh/km**. Sugerimos cruzar este día en la pestaña de *Atípicos* para evaluar causas (clima, fallas, peso extra).")
                 
-            with c_rep2:
                 if dia_max_pax is not None and dia_max_pax['PAX'] > 0:
                     st.info(f"👥 **Peak de Demanda:** La mayor presión sobre el servicio ocurrió el **{dia_max_pax['Fecha (ES)']}**, logrando movilizar a **{int(dia_max_pax['PAX']):,} personas** en total.")
                 
-                # Análisis lógico de la configuración de flota
-                if umr_global > 180:
-                    st.info(f"🚆 **Comportamiento de Flota:** La alta tasa UMR de **{umr_global:.1f}%** confirma una fuerte dominancia operativa en **Tracción Doble** (trenes acoplados). Esto eleva justificadamente el gasto energético base y debe correlacionarse con alta afluencia de pasajeros.")
-                elif umr_global < 120:
-                    st.info(f"🚆 **Comportamiento de Flota:** La tasa UMR de **{umr_global:.1f}%** indica que el servicio operó mayoritariamente en **Tracción Simple**. Esto debería reflejarse en caídas directas del consumo bruto en la factura.")
-                else:
-                    st.info(f"🚆 **Comportamiento de Flota:** La tasa UMR de **{umr_global:.1f}%** señala una operación **Mixta** balanceada entre formaciones simples y dobles.")
+            with c_rep2:
+                st.markdown("#### 🔬 Diagnóstico de Alta Frecuencia")
+                st.info(f"⚡ **Curva de Demanda:** {peak_hr_msg}")
+                st.error(f"🛑 **Cuello de Botella Operativo:** {estacion_msg}")
+                st.info(f"🚆 **Logística de Despachos:** {thdr_msg}")
                     
             st.divider()
-            st.markdown("💡 *Recomendación gerencial analítica:* Dirígete a la pestaña de **Regresión** para auditar el periodo completo. Si la dispersión de puntos se aleja fuertemente de la línea de tendencia (R² bajo), significa que la relación entre los kilómetros recorridos y la energía gastada es errática (posibles ineficiencias de conducción o fallas técnicas en el material rodante).")
+            st.markdown("💡 *Recomendación gerencial analítica:* Al cruzar la Curva de Demanda con el Cuello de Botella Operativo, verifique que los despachos de tracción doble (THDR) estén sincronizados con la hora punta energética. Un desface implica que los trenes grandes operan vacíos aumentando el costo sin absorber demanda.")
     else:
         st.info("No hay datos consolidados para generar el análisis.")
