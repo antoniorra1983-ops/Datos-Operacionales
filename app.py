@@ -15,20 +15,17 @@ chile_holidays = holidays.Chile()
 st.markdown("""<style>
 .stMetric{background-color:#ffffff;padding:20px;border-radius:10px;
 border-left:5px solid #005195;box-shadow:0 2px 4px rgba(0,0,0,0.05);}
-/* Evitar que los títulos de las tarjetas (Métricas) se corten: Responsive wrapping */
 div[data-testid="stMetricLabel"] > label {
     white-space: normal !important; 
     word-wrap: break-word !important; 
     min-height: 2.5rem;
     font-size: 0.95rem;
 }
-/* Garantizar que los valores numéricos grandes siempre se vean completos */
 div[data-testid="stMetricValue"] {
     font-size: 1.6rem !important;
     word-wrap: break-word !important;
     white-space: normal !important;
 }
-/* Forzar scroll horizontal SOLO en tablas gigantes, no en el layout principal */
 .stDataFrame { overflow-x: auto; }
 </style>""", unsafe_allow_html=True)
 
@@ -143,7 +140,6 @@ def _robust_z(serie):
         return pd.Series(0.0, index=s.index)
     return (s - med) / esc
 
-# 🛡️ CORRECCIÓN OPERACIONAL: Cálculo de Consumo Nocturno Dinámico
 def _perfil_horario_diario(all_prmte_full, all_fact_full, df_ops=None):
     datos, freq = (all_prmte_full, 15) if all_prmte_full else (all_fact_full, 60)
     if not datos:
@@ -152,14 +148,12 @@ def _perfil_horario_diario(all_prmte_full, all_fact_full, df_ops=None):
     h["Fecha"] = pd.to_datetime(h["Fecha"]).dt.normalize()
     h["Hora_n"] = h["Hora"].astype(str).str.slice(0, 2).apply(lambda x: int(x) if str(x).isdigit() else -1)
     
-    # Cruzar con Tipo de Día para hacer el horario dinámico
     if df_ops is not None and not df_ops.empty:
         mapa_tipo = df_ops.set_index('Fecha')['Tipo Día'].to_dict()
         h['Tipo Día'] = h['Fecha'].map(mapa_tipo)
     else:
         h['Tipo Día'] = h['Fecha'].apply(lambda x: get_tipo_dia(x.date()))
 
-    # Lógica Dinámica de Carga Base (00:00 a X hrs)
     def _is_noche_dinamico(row):
         limite = 6 if row['Tipo Día'] == 'L' else (7 if row['Tipo Día'] == 'S' else 8)
         return 0 <= row['Hora_n'] < limite
@@ -236,7 +230,6 @@ def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
     if "kWh_por_PAX" not in d.columns:
         d["kWh_por_PAX"] = d["E_Tr"] / d["PAX"].replace(0, np.nan)
         
-    # Enviar df_ops para garantizar que la carga base sea dinámica
     perfil = _perfil_horario_diario(all_prmte_full, all_fact_full, d)
     if not perfil.empty:
         d = d.merge(perfil, on="Fecha", how="left")
@@ -271,7 +264,6 @@ def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
         d[c] = ctx[c].values
     d = d.merge(_thdr_tiempos(df_thdr_v1, df_thdr_v2), on="Fecha", how="left")
 
-    # --- NUEVA LÓGICA DE REDACCIÓN DE DIAGNÓSTICO (STORYTELLING) ---
     niveles, sevs, diags = [], [], []
     for _, r in d.iterrows():
         fired = {c: r[zcols[c]] for c in zcols if pd.notna(r.get(zcols[c])) and abs(r[zcols[c]]) >= z_alerta}
@@ -1110,11 +1102,11 @@ with tabs[7]:
 
 with tabs[8]:
     st.markdown("### 🔬 Análisis Multivariante: PAX vs Tiempos vs Energía")
-    st.markdown("Este módulo cruza la demanda real (Pasajeros) con la fricción operativa (Tiempos de Viaje/Detenciones) para explicar el gasto de Tracción.")
+    st.markdown("Este módulo utiliza **estadística robusta (Medianas)** para cruzar la demanda real con la fricción operativa (Tiempos de Viaje/Detenciones) y explicar el gasto de Tracción.")
     
     if not df_thdr_v1.empty and not df_thdr_v2.empty and not df_ops.empty and not df_carga_v1.empty:
-        # --- 1. PREPARACIÓN DEL CRUCE DE DATOS ---
-        def extr_tiempos(df_t, sal_str, lleg_str):
+        # --- 1. PREPARACIÓN BUBBLE CHART (Macro) ---
+        def extr_tiempos_bubble(df_t, sal_str, lleg_str):
             if df_t.empty: return pd.DataFrame()
             c_sal = next((c for c in df_t.columns if sal_str in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
             c_lleg = next((c for c in df_t.columns if lleg_str in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
@@ -1124,11 +1116,11 @@ with tabs[8]:
             t_v['Dur'] = t_v[c_lleg] - t_v[c_sal]
             t_v['Dur'] = t_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
             t_v = t_v[(t_v['Dur'] > 30) & (t_v['Dur'] < 120)]
-            
-            return t_v.groupby('Fecha_Op')['Dur'].mean().reset_index()
+            # USANDO MEDIANA PARA EVITAR SESGOS POR TRENES CON FALLAS LARGAS
+            return t_v.groupby('Fecha_Op')['Dur'].median().reset_index()
 
-        tv1 = extr_tiempos(df_thdr_v1, 'PUERTO', 'LIMACHE')
-        tv2 = extr_tiempos(df_thdr_v2, 'LIMACHE', 'PUERTO')
+        tv1 = extr_tiempos_bubble(df_thdr_v1, 'PUERTO', 'LIMACHE')
+        tv2 = extr_tiempos_bubble(df_thdr_v2, 'LIMACHE', 'PUERTO')
         
         df_tiempos = pd.DataFrame(columns=['Fecha'])
         if not tv1.empty:
@@ -1138,130 +1130,139 @@ with tabs[8]:
             tv2.columns = ['Fecha', 'Tiempo_V2']
             df_tiempos = pd.merge(df_tiempos, tv2, on='Fecha', how='outer') if not df_tiempos.empty else tv2
             
-        if 'Tiempo_V1' not in df_tiempos.columns:
-            df_tiempos['Tiempo_V1'] = np.nan
-        if 'Tiempo_V2' not in df_tiempos.columns:
-            df_tiempos['Tiempo_V2'] = np.nan
+        if 'Tiempo_V1' not in df_tiempos.columns: df_tiempos['Tiempo_V1'] = np.nan
+        if 'Tiempo_V2' not in df_tiempos.columns: df_tiempos['Tiempo_V2'] = np.nan
             
-        df_tiempos['Tiempo_Promedio_Red'] = df_tiempos[['Tiempo_V1', 'Tiempo_V2']].mean(axis=1)
+        df_tiempos['Tiempo_Mediana_Red'] = df_tiempos[['Tiempo_V1', 'Tiempo_V2']].mean(axis=1) # Promedio de las medianas de las 2 vias
         df_tiempos['Fecha'] = pd.to_datetime(df_tiempos['Fecha']).dt.normalize()
 
-        df_mixto = pd.merge(df_ops, df_tiempos[['Fecha', 'Tiempo_Promedio_Red']], on='Fecha', how='inner')
-        df_plot = df_mixto.dropna(subset=['Tiempo_Promedio_Red', 'E_Tr', 'PAX']).copy()
-        
+        df_mixto = pd.merge(df_ops, df_tiempos[['Fecha', 'Tiempo_Mediana_Red']], on='Fecha', how='inner')
+        df_plot = df_mixto.dropna(subset=['Tiempo_Mediana_Red', 'E_Tr', 'PAX']).copy()
         df_plot = df_plot[df_plot['PAX'] > 0] 
         
         if not df_plot.empty and df_plot['E_Tr'].sum() > 0:
             
             # --- 2. BUBBLE CHART 4D ---
-            st.markdown("#### 🫧 Ecosistema Operativo Diario")
-            st.caption("Eje X: Lento/Rápido | Eje Y: Consumo Tracción | Tamaño: Volumen de Pasajeros")
+            st.markdown("#### 🫧 Ecosistema Operativo Diario (Macro)")
+            st.caption("Eje X: Mediana de Tiempos de Viaje | Eje Y: Consumo Tracción | Tamaño: Volumen de Pasajeros")
             
             fig_mix = px.scatter(df_plot, 
-                                 x='Tiempo_Promedio_Red', 
+                                 x='Tiempo_Mediana_Red', 
                                  y='E_Tr', 
                                  size='PAX',
                                  color='Tipo Día', 
                                  hover_data=['Fecha', 'IDE (kWh/km)'],
-                                 labels={'Tiempo_Promedio_Red': 'Tiempo de Viaje Promedio (min)', 'E_Tr': 'Energía de Tracción (kWh)'},
+                                 labels={'Tiempo_Mediana_Red': 'Tiempo Mediano de Viaje (min)', 'E_Tr': 'Energía de Tracción (kWh)'},
                                  color_discrete_map={'L': '#005195', 'S': '#E85500', 'D/F': '#2CA02C'})
             
-            fig_mix.update_layout(margin=dict(t=20, b=0, l=0, r=0), height=450)
+            fig_mix.update_layout(margin=dict(t=20, b=0, l=0, r=0), height=400)
             st.plotly_chart(fig_mix, use_container_width=True)
             
-            # --- 3. ANÁLISIS DE CORRELACIÓN ---
-            corr_tiempo = df_plot['Tiempo_Promedio_Red'].corr(df_plot['E_Tr'])
-            corr_pax = df_plot['PAX'].corr(df_plot['E_Tr'])
-            
-            c_ins1, c_ins2 = st.columns(2)
-            with c_ins1:
-                st.info(f"📈 **Impacto del Tiempo (Fricción):** Correlación de **{corr_tiempo:.2f}**. (Cercano a 1 indica que al subir los tiempos de viaje por detenciones largas, la energía se dispara violentamente).")
-            with c_ins2:
-                st.info(f"👥 **Impacto de la Demanda (Peso):** Correlación de **{corr_pax:.2f}**. (Cercano a 1 indica que el puro peso inercial de la gente obliga a gastar más energía).")
-
             st.divider()
 
-            # --- 4. EXTRACCIÓN DE DETENCIONES (DWELL TIME) ---
-            st.markdown("#### 🛑 El Costo Energético de las Detenciones (Dwell Time)")
-            
-            estacion_critica = df_carga_v1['Estación Máxima'].mode()[0] if not df_carga_v1.empty else None
-            
-            if estacion_critica and not df_thdr_v1.empty:
-                c_lleg = next((c for c in df_thdr_v1.columns if estacion_critica.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
-                c_sal = next((c for c in df_thdr_v1.columns if estacion_critica.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
-                
-                if c_lleg and c_sal:
-                    d_thdr = df_thdr_v1.copy()
-                    d_thdr['Dwell'] = d_thdr[c_sal] - d_thdr[c_lleg]
-                    d_thdr['Dwell'] = d_thdr['Dwell'].apply(lambda x: x + 1440 if x < -1000 else x)
-                    d_thdr = d_thdr[(d_thdr['Dwell'] >= 0) & (d_thdr['Dwell'] < 15)] 
+            # --- NUEVO: ANÁLISIS TOPOLÓGICO POR HORA DE SALIDA (HEATMAPS) ---
+            st.markdown("#### 🔍 Análisis Topológico por Hora de Salida (Vía 1)")
+            st.markdown("Los promedios diarios ocultan el 'Efecto Hora Punta'. Aquí analizamos el comportamiento de los trenes agrupados por su hora de salida, utilizando la **Mediana** para aislar el flujo normal de eventos atípicos.")
+
+            if not df_thdr_v1.empty:
+                # 3. EXTRAER DWELL TIMES DETALLADOS (POR HORA Y ESTACIÓN)
+                dwell_data = []
+                for est in ESTACIONES:
+                    c_lleg = next((c for c in df_thdr_v1.columns if est.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    c_sal = next((c for c in df_thdr_v1.columns if est.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
                     
-                    dwell_diario = d_thdr.groupby('Fecha_Op')['Dwell'].mean().reset_index()
-                    dwell_diario.columns = ['Fecha', 'Dwell_Promedio_Min']
-                    dwell_diario['Fecha'] = pd.to_datetime(dwell_diario['Fecha']).dt.normalize()
-                    
-                    df_dwell = pd.merge(df_plot, dwell_diario, on='Fecha', how='inner')
-                    
-                    if not df_dwell.empty:
-                        df_dwell['Dwell_Secs'] = df_dwell['Dwell_Promedio_Min'] * 60
+                    if c_lleg and c_sal:
+                        temp = df_thdr_v1[['Fecha_Op', c_lleg, c_sal]].copy()
+                        temp['Dwell'] = temp[c_sal] - temp[c_lleg]
+                        temp['Dwell'] = temp['Dwell'].apply(lambda x: x + 1440 if x < -1000 else x)
+                        temp = temp[(temp['Dwell'] >= 0) & (temp['Dwell'] < 15)].dropna()
                         
-                        c_dw1, c_dw2 = st.columns([2, 1])
-                        with c_dw1:
-                            fig_dwell = px.scatter(df_dwell, x='Dwell_Secs', y='IDE (kWh/km)', color='Tipo Día',
-                                                   title=f"Efecto de detención en {estacion_critica} vs Desempeño Energético",
-                                                   labels={'Dwell_Secs': 'Tiempo de Detención Promedio (Segundos)'},
-                                                   color_discrete_sequence=["#E85500", "#005195", "#2CA02C"])
-                            st.plotly_chart(fig_dwell, use_container_width=True)
-                            
-                        with c_dw2:
-                            promedio_segundos = df_dwell['Dwell_Secs'].mean()
-                            max_segundos = df_dwell['Dwell_Secs'].max()
-                            st.markdown("<br><br>", unsafe_allow_html=True)
-                            st.metric(f"Dwell Time Prom. en {estacion_critica}", f"{promedio_segundos:.0f} s")
-                            st.metric(f"Dwell Time Máximo Registrado", f"{max_segundos:.0f} s", delta="Cuello de Botella Activo", delta_color="inverse")
-                            st.caption("*Nota:* Valores sostenidos por sobre los 45-50 segundos indican fallas de flujo de pasajeros en andén, obligando al tren a recuperar itinerario con aceleraciones severas (penalizando el IDE).")
-                else:
-                    st.info(f"No se detectaron columnas de tiempos para la estación {estacion_critica} en la Vía 1.")
+                        if not temp.empty:
+                            # Extraer la hora de la salida (minutos desde las 00:00 / 60)
+                            temp['Hora_Salida'] = (temp[c_sal] // 60).astype(int)
+                            # Filtrar horas válidas operativas (05 a 23)
+                            temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
+                            temp['Estacion'] = est
+                            dwell_data.append(temp[['Hora_Salida', 'Estacion', 'Dwell']])
+
+                # 4. EXTRAER RUNNING TIMES DETALLADOS (POR HORA Y TRAMO)
+                running_data = []
+                for i in range(len(ESTACIONES)-1):
+                    e_A = ESTACIONES[i]
+                    e_B = ESTACIONES[i+1]
+                    c_s = next((c for c in df_thdr_v1.columns if e_A.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    c_l = next((c for c in df_thdr_v1.columns if e_B.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    
+                    if c_s and c_l:
+                        temp = df_thdr_v1[['Fecha_Op', c_s, c_l]].copy()
+                        temp['RunTime'] = temp[c_l] - temp[c_s]
+                        temp['RunTime'] = temp['RunTime'].apply(lambda x: x + 1440 if x < -1000 else x)
+                        temp = temp[(temp['RunTime'] > 0) & (temp['RunTime'] < 30)].dropna()
+                        
+                        if not temp.empty:
+                            temp['Hora_Salida'] = (temp[c_s] // 60).astype(int)
+                            temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
+                            temp['Tramo'] = f"{e_A[:3]}-{e_B[:3]}"
+                            running_data.append(temp[['Hora_Salida', 'Tramo', 'RunTime']])
+
+                c_h1, c_h2 = st.columns(2)
+
+                # HEATMAP DWELL TIME
+                with c_h1:
+                    st.markdown("##### 🛑 Dwell Time (Mediana por Estación/Hora)")
+                    if dwell_data:
+                        df_dwell_full = pd.concat(dwell_data)
+                        df_dwell_heat = df_dwell_full.groupby(['Estacion', 'Hora_Salida'])['Dwell'].median().reset_index()
+                        df_dwell_heat['Dwell_Secs'] = df_dwell_heat['Dwell'] * 60
+                        
+                        # Pivotar para asegurar el orden correcto de las estaciones en el eje Y
+                        pivot_dwell = df_dwell_heat.pivot(index='Estacion', columns='Hora_Salida', values='Dwell_Secs')
+                        pivot_dwell = pivot_dwell.reindex(ESTACIONES[::-1]) # Invertir para que Puerto quede abajo y Limache arriba
+                        
+                        fig_heat_dw = px.imshow(pivot_dwell, 
+                                                labels=dict(x="Hora de Salida", y="Estación", color="Segundos"),
+                                                x=pivot_dwell.columns,
+                                                y=pivot_dwell.index,
+                                                color_continuous_scale="Reds",
+                                                aspect="auto")
+                        fig_heat_dw.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
+                        st.plotly_chart(fig_heat_dw, use_container_width=True)
+                        
+                        # Insight
+                        est_max = df_dwell_heat.loc[df_dwell_heat['Dwell_Secs'].idxmax()]
+                        st.caption(f"**Insight Dwell:** La peor retención típica ocurre en **{est_max['Estacion']}** a las **{est_max['Hora_Salida']:02d}:00 hrs** ({est_max['Dwell_Secs']:.0f} s).")
+                    else:
+                        st.info("No se encontraron datos de detenciones para Vía 1.")
+
+                # HEATMAP RUNNING TIME
+                with c_h2:
+                    st.markdown("##### 🛤️ Fricción en Vía (Mediana por Tramo/Hora)")
+                    if running_data:
+                        df_run_full = pd.concat(running_data)
+                        df_run_heat = df_run_full.groupby(['Tramo', 'Hora_Salida'])['RunTime'].median().reset_index()
+                        
+                        # Generar lista de tramos en orden
+                        tramos_orden = [f"{ESTACIONES[i][:3]}-{ESTACIONES[i+1][:3]}" for i in range(len(ESTACIONES)-1)]
+                        
+                        pivot_run = df_run_heat.pivot(index='Tramo', columns='Hora_Salida', values='RunTime')
+                        pivot_run = pivot_run.reindex(tramos_orden[::-1]) 
+                        
+                        fig_heat_run = px.imshow(pivot_run, 
+                                                labels=dict(x="Hora de Salida", y="Tramo", color="Minutos"),
+                                                x=pivot_run.columns,
+                                                y=pivot_run.index,
+                                                color_continuous_scale="Blues",
+                                                aspect="auto")
+                        fig_heat_run.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
+                        st.plotly_chart(fig_heat_run, use_container_width=True)
+                        
+                        # Insight
+                        tramo_max = df_run_heat.loc[df_run_heat['RunTime'].idxmax()]
+                        st.caption(f"**Insight Running:** El tramo más lento típicamente es **{tramo_max['Tramo']}** a las **{tramo_max['Hora_Salida']:02d}:00 hrs** ({tramo_max['RunTime']:.1f} min).")
+                    else:
+                        st.info("No se encontraron datos de tramos para Vía 1.")
             else:
-                st.info("No hay datos de carga suficientes para determinar la estación crítica.")
-
-            st.divider()
-
-            # --- 5. TIEMPO ENTRE ESTACIONES (RUNNING TIME) ---
-            st.markdown("#### 🛤️ Fricción en Vía: Tiempos entre Estaciones (Running Time)")
-            st.markdown("Identificación de los tramos que más retrasan la operación general de la Vía 1, consumiendo valioso tiempo de itinerario.")
-            
-            running_avgs = []
-            for i in range(len(ESTACIONES)-1):
-                e_A = ESTACIONES[i]
-                e_B = ESTACIONES[i+1]
-                c_s = next((c for c in df_thdr_v1.columns if e_A.upper() in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
-                c_l = next((c for c in df_thdr_v1.columns if e_B.upper() in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
-                
-                if c_s and c_l:
-                    d = df_thdr_v1[c_l] - df_thdr_v1[c_s]
-                    d = d.apply(lambda x: x + 1440 if x < -1000 else x).dropna()
-                    d = d[(d > 0) & (d < 30)] 
-                    if not d.empty:
-                        running_avgs.append({'Tramo': f"{e_A[:3]}-{e_B[:3]}", 'Minutos': d.mean()})
-                        
-            if running_avgs:
-                df_run = pd.DataFrame(running_avgs)
-                fig_run = px.line(
-                    df_run,
-                    x='Tramo',
-                    y='Minutos',
-                    markers=True,
-                    title="Tiempo Promedio de Viaje entre Estaciones Consecutivas (V1)",
-                    line_shape="linear"
-                )
-                fig_run.update_traces(line_color="#005195", marker=dict(size=8))
-                fig_run.update_layout(xaxis_title="Tramo", yaxis_title="Minutos de Viaje", margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_run, use_container_width=True)
-                
-                tramo_critico = df_run.loc[df_run['Minutos'].idxmax()]
-                st.warning(f"⚠️ **Tramo de mayor fricción:** El segmento **{tramo_critico['Tramo']}** consume en promedio **{tramo_critico['Minutos']:.1f} minutos** del itinerario. Este es el punto principal donde se debe velar por no tener interrupciones de velocidad (precauciones), ya que inyectar tracción aquí es lo más costoso para el sistema global.")
-
+                st.info("Se requiere procesar archivo THDR Vía 1.")
         else:
             st.warning("No hay suficientes datos superpuestos para realizar el análisis multivariante. Revisa las fechas.")
     else: 
