@@ -123,6 +123,111 @@ def obtener_fecha_es(fecha):
     dias = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
     return f"{dias[fecha.weekday()]} {fecha.day} {meses[fecha.month - 1]} {fecha.year}"
 
+# --- 3b. MOTOR DE DIAGNÓSTICO DE ANOMALÍAS (segmentado por tipo de día) ---
+_MAD_K = 1.4826
+_METRICAS_ANOM = {
+    "E_Total": "energía total", "E_Tr": "tracción", "E_12": "auxiliares 12 kV",
+    "IDE (kWh/km)": "eficiencia (kWh/km)", "kWh_por_PAX": "kWh/pasajero",
+    "Noche_kWh": "consumo nocturno", "Pico_kW": "pico de potencia", "Servicios": "servicios",
+}
+
+def _robust_z(serie):
+    # z robusto: (x - mediana) / (1.4826 * MAD); si MAD=0 cae a desviación estándar
+    s = serie.astype(float)
+    med = s.median()
+    mad = (s - med).abs().median()
+    esc = _MAD_K * mad if mad > 0 else s.std(ddof=0)
+    if not esc or np.isnan(esc):
+        return pd.Series(0.0, index=s.index)
+    return (s - med) / esc
+
+def _perfil_horario_diario(all_prmte_full, all_fact_full):
+    # nocturno (01-04h) y pico (kW) por día, desde las listas que ya arma la app
+    datos, freq = (all_prmte_full, 15) if all_prmte_full else (all_fact_full, 60)
+    if not datos:
+        return pd.DataFrame(columns=["Fecha", "Noche_kWh", "Pico_kW"])
+    h = pd.DataFrame(datos)
+    h["Fecha"] = pd.to_datetime(h["Fecha"]).dt.normalize()
+    h["Hora_n"] = h["Hora"].astype(str).str.slice(0, 2).apply(lambda x: int(x) if str(x).isdigit() else -1)
+    noche = h[h["Hora_n"].isin([1, 2, 3, 4])].groupby("Fecha")["Consumo"].sum().rename("Noche_kWh")
+    pico = (h.groupby("Fecha")["Consumo"].max() * (60.0 / freq)).rename("Pico_kW")
+    return pd.concat([noche, pico], axis=1).reset_index()
+
+def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None, z_alerta=2.5, z_fuerte=3.5):
+    # Devuelve df_ops (solo días con energía) + columnas Nivel / Severidad / Diagnóstico
+    if df_ops is None or df_ops.empty:
+        return pd.DataFrame()
+    d = df_ops[df_ops["E_Total"] > 0].copy().reset_index(drop=True)
+    if d.empty:
+        return d
+    if "kWh_por_PAX" not in d.columns:
+        d["kWh_por_PAX"] = d["E_Tr"] / d["PAX"].replace(0, np.nan)
+    perfil = _perfil_horario_diario(all_prmte_full, all_fact_full)
+    if not perfil.empty:
+        d["Fecha"] = pd.to_datetime(d["Fecha"]).dt.normalize()
+        d = d.merge(perfil, on="Fecha", how="left")
+    for c in ["Noche_kWh", "Pico_kW"]:
+        if c not in d.columns:
+            d[c] = np.nan
+
+    zcols = {}
+    for col in _METRICAS_ANOM:
+        if col not in d.columns:
+            continue
+        zc = "z_" + col
+        zcols[col] = zc
+        d[zc] = np.nan
+        for tipo, idx in d.groupby("Tipo Día").groups.items():
+            sub = d.loc[idx, col]
+            valid = sub[(sub.notna()) & (sub != 0)]
+            if len(valid) < 4:
+                continue
+            d.loc[valid.index, zc] = _robust_z(valid)
+
+    niveles, sevs, diags = [], [], []
+    for _, r in d.iterrows():
+        fired = {c: r[zcols[c]] for c in zcols if pd.notna(r.get(zcols[c])) and abs(r[zcols[c]]) >= z_alerta}
+        if not fired:
+            niveles.append("OK"); sevs.append(0.0); diags.append(""); continue
+        sev = max(abs(v) for v in fired.values())
+        niveles.append("ANOMALÍA" if sev >= z_fuerte else "ATENCIÓN")
+        sevs.append(sev)
+        z_en = fired.get("E_Total", fired.get("E_Tr", None))
+        if z_en is not None:
+            cabeza = "SOBRECONSUMO" if z_en > 0 else "BAJA DE CONSUMO"
+        else:
+            cabeza = "DESVIACIÓN"
+        partes = []
+        if z_en is not None and z_en > 0:
+            if fired.get("IDE (kWh/km)", 0) >= z_alerta:
+                partes.append("por EFICIENCIA: más kWh por km (acoplamiento/conducción/clima)")
+            elif fired.get("Servicios", 0) >= z_alerta:
+                partes.append("por VOLUMEN: más servicios/km de lo normal para este tipo de día")
+            else:
+                partes.append("tracción alta sin más servicios -> revisar eficiencia / odómetro")
+        elif z_en is not None and z_en < 0:
+            if fired.get("Servicios", 0) <= -z_alerta:
+                partes.append("por VOLUMEN: menos servicios/km (reducción de oferta?)")
+            elif fired.get("IDE (kWh/km)", 0) <= -z_alerta:
+                partes.append("por mejor EFICIENCIA: menos kWh por km")
+            else:
+                partes.append("energía baja -> confirmar que no falten datos del día")
+        if fired.get("E_12", 0) >= z_alerta and fired.get("Noche_kWh", 0) >= z_alerta:
+            partes.append("CONSUMO PARÁSITO: 12 kV y nocturno altos -> unidades encendidas en cocheras")
+        ya = {"E_Total", "E_Tr"}
+        if "PARÁSITO" in " ".join(partes):
+            ya |= {"E_12", "Noche_kWh"}
+        for m, z in sorted(fired.items(), key=lambda kv: -abs(kv[1])):
+            if m in ya:
+                continue
+            direc = "alto" if z > 0 else "bajo"
+            partes.append(f"{_METRICAS_ANOM.get(m, m)} {direc} (z={z:+.1f})")
+        diags.append(cabeza + " · " + "; ".join(partes) if partes else cabeza)
+    d["Nivel"] = niveles
+    d["Severidad"] = sevs
+    d["Diagnóstico"] = diags
+    return d
+
 # --- 4. PERSISTENCIA EN DISCO ---
 DATA_DIRS = {
     "v1":"data/thdr_v1","v2":"data/thdr_v2","umr":"data/umr",
@@ -530,7 +635,7 @@ elif _hay_archivos and _recalcular:
 # --- 8. TABS DE VISUALIZACIÓN ---
 # Modificamos el nombre del Tab 4 para reflejar su nueva función analítica
 tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Perfil Horario & Anomalías",
-              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros", "📝 Informe Ejecutivo"])
+              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"])
 
 with tabs[0]:
     _ep=st.session_state.get('_errores_proc',{})
@@ -1162,3 +1267,72 @@ with tabs[10]:
                             st.markdown(msg_insight)
     else:
         st.info("No hay datos consolidados para generar el análisis.")
+
+with tabs[11]:
+    st.markdown("### 🩺 Diagnóstico Automático de Anomalías de Consumo")
+    st.markdown("Compara **cada día con los de su mismo tipo** (Laboral / Sábado / Domingo-Festivo) "
+                "con estadística robusta y detecta los que se salen de lo normal, nombrando la causa "
+                "probable: volumen, eficiencia, auxiliares 12 kV, consumo nocturno/parásito o pico de potencia.")
+    if not df_ops.empty:
+        df_diag = diagnosticar_anomalias(df_ops, all_prmte_full, all_fact_full)
+        if df_diag.empty:
+            st.info("No hay días con energía medida en el rango para diagnosticar.")
+        else:
+            usa_odo = ("Odómetro [km]" in df_diag.columns) and (df_diag["Odómetro [km]"] > 0).any()
+            st.caption("IDE calculado con el odómetro real (UMR)." if usa_odo
+                       else "⚠ Sin UMR en el rango: el IDE puede no ser exacto.")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Días analizados", len(df_diag))
+            c2.metric("🔴 Anomalías", int((df_diag["Nivel"] == "ANOMALÍA").sum()))
+            c3.metric("🟠 Atención", int((df_diag["Nivel"] == "ATENCIÓN").sum()))
+
+            st.markdown("#### Línea base por tipo de día (mediana)")
+            filas = []
+            for tipo in ["L", "S", "D/F"]:
+                sub = df_diag[df_diag["Tipo Día"] == tipo]
+                if sub.empty:
+                    continue
+                filas.append({
+                    "Tipo": {"L": "Laboral", "S": "Sábado", "D/F": "Dgo/Festivo"}[tipo],
+                    "Días": len(sub),
+                    "E. Total (kWh)": round(sub["E_Total"].median()),
+                    "Tracción (kWh)": round(sub["E_Tr"].median()),
+                    "12 kV (kWh)": round(sub["E_12"].median()),
+                    "IDE (kWh/km)": round(sub["IDE (kWh/km)"].median(), 2),
+                    "Servicios": int(sub["Servicios"].median()),
+                })
+            st.dataframe(pd.DataFrame(filas), use_container_width=True)
+
+            anom = df_diag[df_diag["Nivel"] != "OK"].sort_values("Severidad", ascending=False)
+            if anom.empty:
+                st.success("✓ Sin desviaciones relevantes dentro de cada tipo de día.")
+            else:
+                st.markdown("#### Días con desviación (ordenados por severidad)")
+                for _, r in anom.iterrows():
+                    icon = "🔴" if r["Nivel"] == "ANOMALÍA" else "🟠"
+                    titulo = f"{icon} {pd.to_datetime(r['Fecha']).strftime('%d-%m-%Y')} ({r['Tipo Día']}) · z={r['Severidad']:.1f} · {r['Nivel']}"
+                    with st.expander(titulo, expanded=(r["Nivel"] == "ANOMALÍA")):
+                        st.markdown(f"**{r['Diagnóstico']}**")
+                        a1, a2, a3, a4 = st.columns(4)
+                        a1.metric("E. Total", f"{r['E_Total']:,.0f} kWh")
+                        a2.metric("Tracción", f"{r['E_Tr']:,.0f} kWh")
+                        a3.metric("12 kV", f"{r['E_12']:,.0f} kWh")
+                        a4.metric("IDE", f"{r['IDE (kWh/km)']:,.2f}")
+                        b1, b2, b3, b4 = st.columns(4)
+                        noche_ok = ("Noche_kWh" in df_diag.columns) and pd.notna(r["Noche_kWh"])
+                        b1.metric("Nocturno", f"{r['Noche_kWh']:,.0f} kWh" if noche_ok else "—")
+                        b2.metric("Servicios", f"{int(r['Servicios']):,}")
+                        b3.metric("PAX", f"{int(r['PAX']):,}" if pd.notna(r["PAX"]) else "—")
+                        odo_ok = ("Odómetro [km]" in df_diag.columns) and pd.notna(r["Odómetro [km]"])
+                        b4.metric("Odómetro", f"{r['Odómetro [km]']:,.0f} km" if odo_ok else "—")
+
+            st.markdown("#### Tabla completa del diagnóstico")
+            cols_show = ["Fecha", "Tipo Día", "E_Total", "E_Tr", "E_12", "Noche_kWh",
+                         "IDE (kWh/km)", "Servicios", "PAX", "Nivel", "Diagnóstico"]
+            cols_show = [c for c in cols_show if c in df_diag.columns]
+            tabla = df_diag[cols_show].copy()
+            tabla["Fecha"] = pd.to_datetime(tabla["Fecha"]).dt.strftime("%Y-%m-%d")
+            st.dataframe(make_columns_unique(tabla), use_container_width=True)
+    else:
+        st.info("📂 Sube archivos desde el panel lateral para generar el diagnóstico.")
