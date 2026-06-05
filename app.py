@@ -22,6 +22,12 @@ div[data-testid="stMetricLabel"] > label {
     min-height: 2.5rem;
     font-size: 0.95rem;
 }
+/* Garantizar que los valores numéricos grandes siempre se vean completos */
+div[data-testid="stMetricValue"] {
+    font-size: 1.6rem !important; /* Ligeramente más pequeño para acomodar números largos */
+    word-wrap: break-word !important;
+    white-space: normal !important;
+}
 /* Forzar scroll horizontal SOLO en tablas gigantes, no en el layout principal */
 .stDataFrame { overflow-x: auto; }
 </style>""", unsafe_allow_html=True)
@@ -329,7 +335,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v11_umr_calc"
+_CACHE_VERSION = "v12_formatos_completos"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -598,6 +604,7 @@ with tabs[0]:
                 
             with c_card_s:
                 st.markdown("<br><br>", unsafe_allow_html=True)
+                # Formateo sin decimales para valores discretos, con separador de miles completo
                 st.metric("Total Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
 
             with c_chart_p:
@@ -611,6 +618,7 @@ with tabs[0]:
                 
             with c_card_p:
                 st.markdown("<br><br>", unsafe_allow_html=True)
+                # Formateo sin decimales para valores discretos, con separador de miles completo
                 st.metric("Total PAX", f"{int(df_resumen['PAX'].sum()):,}")
 
             st.divider() # Línea separadora para mantener orden visual
@@ -636,8 +644,9 @@ with tabs[0]:
             with c_card_k:
                 # Se apilan dos tarjetas para coincidir con las dos barras del gráfico
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.1f} km")
-                st.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.1f} km")
+                # Formateo estandarizado a exactamente 2 decimales para variables continuas
+                st.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.2f} km")
+                st.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.2f} km")
 
             with c_chart_u:
                 # Gráfico del Porcentaje UMR
@@ -656,7 +665,8 @@ with tabs[0]:
                 tot_odometro = df_resumen['Odómetro [km]'].sum()
                 umr_global = (tot_tren_km / tot_odometro * 100) if tot_odometro > 0 else 0
                 
-                st.metric("Tasa UMR Global", f"{umr_global:.1f} %")
+                # Formateo estandarizado a exactamente 2 decimales
+                st.metric("Tasa UMR Global", f"{umr_global:,.2f} %")
                 
             st.divider() # Línea separadora
             
@@ -680,12 +690,13 @@ with tabs[0]:
                 
             with c_card_e:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Total Tracción", f"{df_plot_ener['Tracción'].sum():,.0f} kWh")
-                st.metric("Total Baja Tensión", f"{df_plot_ener['Baja Tensión'].sum():,.0f} kWh")
+                # Formateo estandarizado a exactamente 2 decimales para energía total
+                st.metric("Total Tracción", f"{df_plot_ener['Tracción'].sum():,.2f} kWh")
+                st.metric("Total Baja Tensión", f"{df_plot_ener['Baja Tensión'].sum():,.2f} kWh")
 
             with c_chart_i:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
-                                  text_auto='.3f', # 3 decimales para ver variaciones sutiles en la eficiencia
+                                  text_auto='.3f', # Mantenemos 3 decimales en la gráfica para ver pequeñas variaciones
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Desempeño Energético (IDE)")
                 fig_ide_bar.update_traces(textposition='outside')
@@ -698,7 +709,8 @@ with tabs[0]:
                 tot_traccion_real = df_resumen['E_Tr'].sum()
                 ide_global = (tot_traccion_real / tot_odometro) if tot_odometro > 0 else 0
                 
-                st.metric("IDE Global", f"{ide_global:.3f} kWh/km")
+                # Estandarizado a exactamente 2 decimales para la tarjeta, respetando tu solicitud
+                st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
