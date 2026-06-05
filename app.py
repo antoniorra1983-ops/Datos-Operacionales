@@ -560,6 +560,41 @@ with tabs[0]:
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
             
+            # --- NUEVA SECCIÓN DE EXPORTACIÓN (EXCEL Y PDF) ---
+            c_exp1, c_exp2, c_space = st.columns([2.5, 2.5, 5])
+            
+            with c_exp1:
+                # Solución moderna de UI: Aprovechar el motor de renderizado del navegador para PDF
+                st.markdown(
+                    """
+                    <a href="javascript:window.print()" target="_self" style="text-decoration: none;">
+                        <div style="text-align: center; background-color: #f0f2f6; color: #005195; padding: 0.4rem; border-radius: 0.4rem; border: 1px solid #005195; font-weight: bold; cursor: pointer; transition: 0.3s;">
+                            🖨️ Imprimir / Guardar como PDF
+                        </div>
+                    </a>
+                    """,
+                    unsafe_allow_html=True
+                )
+                
+            with c_exp2:
+                # Mejor práctica de Datos: Exportar el dataframe filtrado a Excel puro
+                buffer = BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    # Limpiamos columnas temporales antes de exportar
+                    df_export = df_resumen.drop(columns=['Fecha (ES)'], errors='ignore').copy()
+                    df_export['Fecha'] = df_export['Fecha'].dt.strftime('%Y-%m-%d')
+                    df_export.to_excel(writer, index=False, sheet_name='Datos_Operacionales')
+                
+                st.download_button(
+                    label="📊 Descargar Datos en Excel",
+                    data=buffer.getvalue(),
+                    file_name=f"Reporte_Operacional_SGE_{start_date}_al_{end_date}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+            st.markdown("<br>", unsafe_allow_html=True) # Espacio visual antes de las tarjetas
+            
             # --- ALERTA VISUAL Y SALIDA DE EMERGENCIA DE UX ---
             if st.session_state.drilldown_date is not None:
                 c_info, c_btn = st.columns([4, 1])
