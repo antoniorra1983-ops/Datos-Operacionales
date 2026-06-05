@@ -529,7 +529,7 @@ elif _hay_archivos and _recalcular:
 
 # --- 8. TABS DE VISUALIZACIÓN ---
 tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Comparación hr",
-              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros"])
+              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros", "📝 Informe Ejecutivo"])
 
 with tabs[0]:
     _ep=st.session_state.get('_errores_proc',{})
@@ -559,32 +559,6 @@ with tabs[0]:
             st.warning("No hay datos operacionales para los filtros seleccionados.")
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
-            
-            # --- SECCIÓN DE EXPORTACIÓN CORREGIDA (EXCEL Y PDF NATIVO) ---
-            c_exp1, c_exp2, c_space = st.columns([3, 2, 4])
-            
-            with c_exp1:
-                # Práctica recomendada de UX en Streamlit para PDFs sin librerías externas
-                st.info("🖨️ **Exportar a PDF:** Presiona `Ctrl + P` (Windows) o `Cmd + P` (Mac). \n\n*Nota: En 'Más ajustes', activa 'Gráficos de fondo' para mantener los colores.*")
-                
-            with c_exp2:
-                # Mejor práctica de Datos: Exportar el dataframe filtrado a Excel puro
-                buffer = BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    # Limpiamos columnas temporales antes de exportar
-                    df_export = df_resumen.drop(columns=['Fecha (ES)'], errors='ignore').copy()
-                    df_export['Fecha'] = df_export['Fecha'].dt.strftime('%Y-%m-%d')
-                    df_export.to_excel(writer, index=False, sheet_name='Datos_Operacionales')
-                
-                st.download_button(
-                    label="📊 Descargar Datos en Excel",
-                    data=buffer.getvalue(),
-                    file_name=f"Reporte_Operacional_SGE_{start_date}_al_{end_date}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-                
-            st.markdown("<br>", unsafe_allow_html=True) # Espacio visual antes de las tarjetas
             
             # --- ALERTA VISUAL Y SALIDA DE EMERGENCIA DE UX ---
             if st.session_state.drilldown_date is not None:
@@ -933,3 +907,66 @@ with tabs[9]:
             st.dataframe(make_columns_unique(dv_c2.head(100)), use_container_width=True)
             
     else: st.info("No se han procesado datos de carga de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
+
+with tabs[10]:
+    st.markdown("### 📝 Análisis Ejecutivo Automático")
+    if not df_ops.empty:
+        # Extraemos el DataFrame filtrado de la pestaña de resumen (si el usuario aplicó filtros L, S, D/F)
+        # Usamos programación defensiva en caso de que las variables no existan aún en el scope local
+        if 'filtro_dia' in locals():
+            df_reporte = df_ops[df_ops['Tipo Día'].isin(filtro_dia)]
+        else:
+            df_reporte = df_ops
+            
+        # Si hay un drill-down activo (click en un día), enfocamos el reporte en ese día
+        if 'drilldown_date' in st.session_state and st.session_state.drilldown_date is not None:
+            df_reporte = df_reporte[df_reporte['Fecha'] == st.session_state.drilldown_date]
+        
+        if df_reporte.empty:
+            st.warning("No hay datos para generar el reporte con los filtros o días seleccionados.")
+        else:
+            st.markdown("Este reporte es generado automáticamente aplicando **algoritmos de estadística descriptiva** sobre los datos operativos actuales.")
+            
+            # --- MOTOR DE CÁLCULOS ---
+            dia_max_ide = df_reporte.loc[df_reporte['IDE (kWh/km)'].idxmax()]
+            
+            # Buscar el mínimo IDE que sea mayor a cero (para evitar errores por días sin datos eléctricos)
+            dias_validos_ide = df_reporte[df_reporte['IDE (kWh/km)'] > 0]
+            dia_min_ide = dias_validos_ide.loc[dias_validos_ide['IDE (kWh/km)'].idxmin()] if not dias_validos_ide.empty else dia_max_ide
+            
+            tot_traccion = df_reporte['E_Tr'].sum()
+            tot_pax = df_reporte['PAX'].sum()
+            kwh_per_pax = (tot_traccion / tot_pax) if tot_pax > 0 else 0
+            
+            tot_tren_km = df_reporte['Tren-Km [km]'].sum()
+            tot_odo = df_reporte['Odómetro [km]'].sum()
+            umr_global = (tot_tren_km / tot_odo * 100) if tot_odo > 0 else 0
+            
+            dia_max_pax = df_reporte.loc[df_reporte['PAX'].idxmax()] if df_reporte['PAX'].sum() > 0 else None
+
+            # --- REDACCIÓN Y MAQUETACIÓN DEL INFORME ---
+            st.info(f"🎯 **KPI de Sostenibilidad (Estándar UIC):** Durante este periodo, la empresa consumió **{kwh_per_pax:.2f} kWh de tracción por cada pasajero transportado**. Este es el indicador medioambiental definitivo que relaciona la oferta (energía) con la demanda real.")
+            
+            c_rep1, c_rep2 = st.columns(2)
+            
+            with c_rep1:
+                st.success(f"🏆 **Día de Mayor Eficiencia:** El tren operó de forma óptima el **{dia_min_ide['Fecha (ES)']}** registrando un IDE de **{dia_min_ide['IDE (kWh/km)']:.2f} kWh/km**. Se sugiere replicar el esquema de conducción de esta jornada.")
+                
+                st.warning(f"🚨 **Día Crítico de Consumo:** La jornada más ineficiente en tracción fue el **{dia_max_ide['Fecha (ES)']}** alcanzando un IDE de **{dia_max_ide['IDE (kWh/km)']:.2f} kWh/km**. Sugerimos cruzar este día en la pestaña de *Atípicos* para evaluar causas (clima, fallas, peso extra).")
+                
+            with c_rep2:
+                if dia_max_pax is not None and dia_max_pax['PAX'] > 0:
+                    st.info(f"👥 **Peak de Demanda:** La mayor presión sobre el servicio ocurrió el **{dia_max_pax['Fecha (ES)']}**, logrando movilizar a **{int(dia_max_pax['PAX']):,} personas** en total.")
+                
+                # Análisis lógico de la configuración de flota
+                if umr_global > 180:
+                    st.info(f"🚆 **Comportamiento de Flota:** La alta tasa UMR de **{umr_global:.1f}%** confirma una fuerte dominancia operativa en **Tracción Doble** (trenes acoplados). Esto eleva justificadamente el gasto energético base y debe correlacionarse con alta afluencia de pasajeros.")
+                elif umr_global < 120:
+                    st.info(f"🚆 **Comportamiento de Flota:** La tasa UMR de **{umr_global:.1f}%** indica que el servicio operó mayoritariamente en **Tracción Simple**. Esto debería reflejarse en caídas directas del consumo bruto en la factura.")
+                else:
+                    st.info(f"🚆 **Comportamiento de Flota:** La tasa UMR de **{umr_global:.1f}%** señala una operación **Mixta** balanceada entre formaciones simples y dobles.")
+                    
+            st.divider()
+            st.markdown("💡 *Recomendación gerencial analítica:* Dirígete a la pestaña de **Regresión** para auditar el periodo completo. Si la dispersión de puntos se aleja fuertemente de la línea de tendencia (R² bajo), significa que la relación entre los kilómetros recorridos y la energía gastada es errática (posibles ineficiencias de conducción o fallas técnicas en el material rodante).")
+    else:
+        st.info("No hay datos consolidados para generar el análisis.")
