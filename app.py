@@ -169,6 +169,13 @@ def get_col_thdr(df, estacion, tipo):
                 if alias in c_n: return c
     return None
 
+def extract_series(df, col_name):
+    """Escudo defensivo: Extrae de forma segura una Serie de Pandas (1D), evitando colapsos por DataFrames duplicados."""
+    s = df[col_name]
+    if isinstance(s, pd.DataFrame):
+        return pd.to_numeric(s.iloc[:, 0], errors='coerce')
+    return pd.to_numeric(s, errors='coerce')
+
 # --- 3b. MOTOR DE DIAGNÓSTICO DE ANOMALÍAS (segmentado por tipo de día) ---
 _MAD_K = 1.4826
 _METRICAS_ANOM = {
@@ -242,11 +249,22 @@ def _contexto_dia(fecha, cc, tt):
 def _dur_via(t, est_sal, est_lleg):
     if t is None or t.empty or "Fecha_Op" not in t.columns:
         return pd.DataFrame(columns=["Fecha", "dur"])
+    def pick(est, tipo):
+        cand = [c for c in t.columns if est in _norm(c) and tipo in _norm(c)
+                and str(c).endswith("_min") and "PROGRAMADA" not in _norm(c)]
+        return cand[0] if cand else None
+    
+    # Adaptación al escudo defensivo
     c_sal = get_col_thdr(t, est_sal, "SALIDA")
     c_lleg = get_col_thdr(t, est_lleg, "LLEGADA")
+    
     if not c_sal or not c_lleg:
         return pd.DataFrame(columns=["Fecha", "dur"])
-    dur = pd.to_numeric(t[c_lleg], errors="coerce") - pd.to_numeric(t[c_sal], errors="coerce")
+        
+    s_sal = extract_series(t, c_sal)
+    s_lleg = extract_series(t, c_lleg)
+    
+    dur = s_lleg - s_sal
     dur = dur.apply(lambda x: x + 1440 if pd.notna(x) and x < -200 else x)
     out = pd.DataFrame({"Fecha": pd.to_datetime(t["Fecha_Op"]).dt.normalize(), "dur": dur})
     return out[(out["dur"] > 30) & (out["dur"] < 120)]
@@ -1147,8 +1165,12 @@ with tabs[8]:
             c_lleg = get_col_thdr(df_t, lleg_str, 'LLEGADA')
             if not c_sal or not c_lleg: return pd.DataFrame()
             
-            t_v = df_t[['Fecha_Op', c_sal, c_lleg]].dropna().copy()
-            t_v['Dur'] = t_v[c_lleg] - t_v[c_sal]
+            # Escudo defensivo activado
+            s_sal = extract_series(df_t, c_sal)
+            s_lleg = extract_series(df_t, c_lleg)
+            
+            t_v = pd.DataFrame({'Fecha_Op': df_t['Fecha_Op'], 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
+            t_v['Dur'] = t_v['Llegada'] - t_v['Salida']
             t_v['Dur'] = t_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
             t_v = t_v[(t_v['Dur'] > 30) & (t_v['Dur'] < 120)]
             # USANDO MEDIANA PARA EVITAR SESGOS POR TRENES CON FALLAS LARGAS
@@ -1209,13 +1231,17 @@ with tabs[8]:
                     c_sal = get_col_thdr(df_thdr_v1, est, 'SALIDA')
                     
                     if c_lleg and c_sal:
-                        temp = df_thdr_v1[['Fecha_Op', c_lleg, c_sal]].copy()
-                        temp['Dwell'] = temp[c_sal] - temp[c_lleg]
-                        temp['Dwell'] = temp['Dwell'].apply(lambda x: x + 1440 if x < -1000 else x)
+                        # Escudo Defensivo
+                        s_lleg = extract_series(df_thdr_v1, c_lleg)
+                        s_sal = extract_series(df_thdr_v1, c_sal)
+                        
+                        temp = pd.DataFrame({'Fecha_Op': df_thdr_v1['Fecha_Op'], 'Llegada': s_lleg, 'Salida': s_sal})
+                        temp['Dwell'] = temp['Salida'] - temp['Llegada']
+                        temp['Dwell'] = temp['Dwell'].apply(lambda x: x + 1440 if pd.notna(x) and x < -1000 else x)
                         temp = temp[(temp['Dwell'] >= 0) & (temp['Dwell'] < 15)].dropna()
                         
                         if not temp.empty:
-                            temp['Hora_Salida'] = (temp[c_sal] // 60).astype(int)
+                            temp['Hora_Salida'] = (temp['Salida'] // 60).astype(int)
                             temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
                             temp['Estacion'] = est
                             dwell_data.append(temp[['Hora_Salida', 'Estacion', 'Dwell']])
@@ -1229,13 +1255,17 @@ with tabs[8]:
                     c_l = get_col_thdr(df_thdr_v1, e_B, 'LLEGADA')
                     
                     if c_s and c_l:
-                        temp = df_thdr_v1[['Fecha_Op', c_s, c_l]].copy()
-                        temp['RunTime'] = temp[c_l] - temp[c_s]
-                        temp['RunTime'] = temp['RunTime'].apply(lambda x: x + 1440 if x < -1000 else x)
+                        # Escudo Defensivo
+                        s_sal = extract_series(df_thdr_v1, c_s)
+                        s_lleg = extract_series(df_thdr_v1, c_l)
+                        
+                        temp = pd.DataFrame({'Fecha_Op': df_thdr_v1['Fecha_Op'], 'Salida': s_sal, 'Llegada': s_lleg})
+                        temp['RunTime'] = temp['Llegada'] - temp['Salida']
+                        temp['RunTime'] = temp['RunTime'].apply(lambda x: x + 1440 if pd.notna(x) and x < -1000 else x)
                         temp = temp[(temp['RunTime'] > 0) & (temp['RunTime'] < 30)].dropna()
                         
                         if not temp.empty:
-                            temp['Hora_Salida'] = (temp[c_s] // 60).astype(int)
+                            temp['Hora_Salida'] = (temp['Salida'] // 60).astype(int)
                             temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
                             temp['Tramo'] = f"{e_A} - {e_B}"
                             running_data.append(temp[['Hora_Salida', 'Tramo', 'RunTime']])
@@ -1460,13 +1490,16 @@ with tabs[10]:
                             c_p_sal = get_col_thdr(t1, 'PUERTO', 'SALIDA')
                             c_l_lleg = get_col_thdr(t1, 'LIMACHE', 'LLEGADA')
                             if c_p_sal and c_l_lleg:
-                                t1_v = t1[[c_serv_v1, 'Fecha_Op', c_p_sal, f"{c_p_sal}_min", f"{c_l_lleg}_min"]].dropna().copy()
-                                t1_v['Dur'] = t1_v[f"{c_l_lleg}_min"] - t1_v[f"{c_p_sal}_min"]
+                                # Escudo Defensivo
+                                s_sal = extract_series(t1, c_p_sal)
+                                s_lleg = extract_series(t1, c_l_lleg)
+                                t1_v = pd.DataFrame({c_serv_v1: t1[c_serv_v1], 'Fecha_Op': t1['Fecha_Op'], 'Salida_raw': t1[c_p_sal].iloc[:,0] if isinstance(t1[c_p_sal], pd.DataFrame) else t1[c_p_sal], 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
+                                t1_v['Dur'] = t1_v['Llegada'] - t1_v['Salida']
                                 t1_v['Dur'] = t1_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
                                 t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)]
                                 if not t1_v.empty:
                                     r_min, r_max = t1_v.loc[t1_v['Dur'].idxmin()], t1_v.loc[t1_v['Dur'].idxmax()]
-                                    msg_v1 = f"**V1 (PU→LI) Promedio: {minutos_a_hhmmss(t1_v['Dur'].mean())}**\n\n- 🟢 *Rápido:* {minutos_a_hhmmss(r_min['Dur'])} ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v1]}, {formato_hora(r_min[c_p_sal])})\n- 🔴 *Lento:* {minutos_a_hhmmss(r_max['Dur'])} ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v1]}, {formato_hora(r_max[c_p_sal])})"
+                                    msg_v1 = f"**V1 (PU→LI) Promedio: {minutos_a_hhmmss(t1_v['Dur'].mean())}**\n\n- 🟢 *Rápido:* {minutos_a_hhmmss(r_min['Dur'])} ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v1]}, {formato_hora(r_min['Salida_raw'])})\n- 🔴 *Lento:* {minutos_a_hhmmss(r_max['Dur'])} ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v1]}, {formato_hora(r_max['Salida_raw'])})"
                                     brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
                         if not t2.empty:
@@ -1474,13 +1507,16 @@ with tabs[10]:
                             c_l_sal = get_col_thdr(t2, 'LIMACHE', 'SALIDA')
                             c_p_lleg = get_col_thdr(t2, 'PUERTO', 'LLEGADA')
                             if c_l_sal and c_p_lleg:
-                                t2_v = t2[[c_serv_v2, 'Fecha_Op', c_l_sal, f"{c_l_sal}_min", f"{c_p_lleg}_min"]].dropna().copy()
-                                t2_v['Dur'] = t2_v[f"{c_p_lleg}_min"] - t2_v[f"{c_l_sal}_min"]
+                                # Escudo Defensivo
+                                s_sal = extract_series(t2, c_l_sal)
+                                s_lleg = extract_series(t2, c_p_lleg)
+                                t2_v = pd.DataFrame({c_serv_v2: t2[c_serv_v2], 'Fecha_Op': t2['Fecha_Op'], 'Salida_raw': t2[c_l_sal].iloc[:,0] if isinstance(t2[c_l_sal], pd.DataFrame) else t2[c_l_sal], 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
+                                t2_v['Dur'] = t2_v['Llegada'] - t2_v['Salida']
                                 t2_v['Dur'] = t2_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
                                 t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
                                 if not t2_v.empty:
                                     r_min, r_max = t2_v.loc[t2_v['Dur'].idxmin()], t2_v.loc[t2_v['Dur'].idxmax()]
-                                    msg_v2 = f"**V2 (LI→PU) Promedio: {minutos_a_hhmmss(t2_v['Dur'].mean())}**\n\n- 🟢 *Rápido:* {minutos_a_hhmmss(r_min['Dur'])} ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v2]}, {formato_hora(r_min[c_l_sal])})\n- 🔴 *Lento:* {minutos_a_hhmmss(r_max['Dur'])} ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v2]}, {formato_hora(r_max[c_l_sal])})"
+                                    msg_v2 = f"**V2 (LI→PU) Promedio: {minutos_a_hhmmss(t2_v['Dur'].mean())}**\n\n- 🟢 *Rápido:* {minutos_a_hhmmss(r_min['Dur'])} ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v2]}, {formato_hora(r_min['Salida_raw'])})\n- 🔴 *Lento:* {minutos_a_hhmmss(r_max['Dur'])} ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v2]}, {formato_hora(r_max['Salida_raw'])})"
                                     brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
                         if msg_v1 or msg_v2:
