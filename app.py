@@ -141,14 +141,17 @@ def _norm(s):
     return str(s).upper().translate(str.maketrans("ÁÉÍÓÚÜÑ", "AEIOUUN"))
 
 def get_col_thdr(df, estacion, tipo):
-    """Busca la columna correcta en THDR usando alias, resolviendo problemas como Peñablanca/Viña"""
+    """Busca la columna correcta en THDR usando alias, resolviendo problemas como Peñablanca/Viña y Escudo Anti-Salto"""
     if df is None or df.empty: return None
     est_n = _norm(estacion)
     for c in df.columns:
         c_n = _norm(c)
         if not c_n.endswith("_MIN"): continue
-        if tipo == 'SALIDA' and 'SAL' not in c_n: continue
-        if tipo == 'LLEGADA' and 'LLEG' not in c_n: continue
+        if 'PROGRAMADA' in c_n: continue
+        
+        # 🛡️ Escudo crítico: Exigir palabra completa SALIDA o LLEGADA para evitar que "EL SALTO" machee con "SAL"
+        if tipo == 'SALIDA' and 'SALIDA' not in c_n: continue
+        if tipo == 'LLEGADA' and 'LLEGADA' not in c_n: continue
         
         # Búsqueda exacta normalizada
         if est_n in c_n: return c
@@ -249,12 +252,7 @@ def _contexto_dia(fecha, cc, tt):
 def _dur_via(t, est_sal, est_lleg):
     if t is None or t.empty or "Fecha_Op" not in t.columns:
         return pd.DataFrame(columns=["Fecha", "dur"])
-    def pick(est, tipo):
-        cand = [c for c in t.columns if est in _norm(c) and tipo in _norm(c)
-                and str(c).endswith("_min") and "PROGRAMADA" not in _norm(c)]
-        return cand[0] if cand else None
     
-    # Adaptación al escudo defensivo
     c_sal = get_col_thdr(t, est_sal, "SALIDA")
     c_lleg = get_col_thdr(t, est_lleg, "LLEGADA")
     
@@ -577,7 +575,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v14_hhmmss_fix"
+_CACHE_VERSION = "v15_full_validation"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -1165,15 +1163,13 @@ with tabs[8]:
             c_lleg = get_col_thdr(df_t, lleg_str, 'LLEGADA')
             if not c_sal or not c_lleg: return pd.DataFrame()
             
-            # Escudo defensivo activado
             s_sal = extract_series(df_t, c_sal)
             s_lleg = extract_series(df_t, c_lleg)
             
             t_v = pd.DataFrame({'Fecha_Op': df_t['Fecha_Op'], 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
             t_v['Dur'] = t_v['Llegada'] - t_v['Salida']
-            t_v['Dur'] = t_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
+            t_v['Dur'] = t_v['Dur'].apply(lambda x: x + 1440 if pd.notna(x) and x < -500 else x)
             t_v = t_v[(t_v['Dur'] > 30) & (t_v['Dur'] < 120)]
-            # USANDO MEDIANA PARA EVITAR SESGOS POR TRENES CON FALLAS LARGAS
             return t_v.groupby('Fecha_Op')['Dur'].median().reset_index()
 
         tv1 = extr_tiempos_bubble(df_thdr_v1, 'PUERTO', 'LIMACHE')
@@ -1190,7 +1186,7 @@ with tabs[8]:
         if 'Tiempo_V1' not in df_tiempos.columns: df_tiempos['Tiempo_V1'] = np.nan
         if 'Tiempo_V2' not in df_tiempos.columns: df_tiempos['Tiempo_V2'] = np.nan
             
-        df_tiempos['Tiempo_Mediana_Red'] = df_tiempos[['Tiempo_V1', 'Tiempo_V2']].mean(axis=1) # Promedio de las medianas de las 2 vias
+        df_tiempos['Tiempo_Mediana_Red'] = df_tiempos[['Tiempo_V1', 'Tiempo_V2']].mean(axis=1)
         df_tiempos['Fecha'] = pd.to_datetime(df_tiempos['Fecha']).dt.normalize()
 
         df_mixto = pd.merge(df_ops, df_tiempos[['Fecha', 'Tiempo_Mediana_Red']], on='Fecha', how='inner')
@@ -1219,19 +1215,24 @@ with tabs[8]:
             
             st.divider()
 
-            # --- NUEVO: ANÁLISIS TOPOLÓGICO POR HORA DE SALIDA (HEATMAPS) ---
+            # --- ANÁLISIS TOPOLÓGICO POR HORA DE SALIDA (HEATMAPS) ---
             st.markdown("#### 🔍 Análisis Topológico por Hora de Salida (Vía 1)")
             st.markdown("Los promedios diarios ocultan el 'Efecto Hora Punta'. Aquí analizamos el comportamiento de los trenes agrupados por su hora de salida, utilizando la **Mediana** para aislar el flujo normal de eventos atípicos.")
 
             if not df_thdr_v1.empty:
-                # 3. EXTRAER DWELL TIMES DETALLADOS (POR HORA Y ESTACIÓN)
-                dwell_data = []
+                # Topología Dinámica: Determinar las estaciones que realmente existen en el archivo
+                valid_stations_v1 = []
                 for est in ESTACIONES:
+                    if get_col_thdr(df_thdr_v1, est, 'LLEGADA') or get_col_thdr(df_thdr_v1, est, 'SALIDA'):
+                        valid_stations_v1.append(est)
+
+                # 3. EXTRAER DWELL TIMES DETALLADOS
+                dwell_data = []
+                for est in valid_stations_v1:
                     c_lleg = get_col_thdr(df_thdr_v1, est, 'LLEGADA')
                     c_sal = get_col_thdr(df_thdr_v1, est, 'SALIDA')
                     
                     if c_lleg and c_sal:
-                        # Escudo Defensivo
                         s_lleg = extract_series(df_thdr_v1, c_lleg)
                         s_sal = extract_series(df_thdr_v1, c_sal)
                         
@@ -1246,16 +1247,15 @@ with tabs[8]:
                             temp['Estacion'] = est
                             dwell_data.append(temp[['Hora_Salida', 'Estacion', 'Dwell']])
 
-                # 4. EXTRAER RUNNING TIMES DETALLADOS (POR HORA Y TRAMO)
+                # 4. EXTRAER RUNNING TIMES DETALLADOS (POR HORA Y TRAMO DINÁMICO)
                 running_data = []
-                for i in range(len(ESTACIONES)-1):
-                    e_A = ESTACIONES[i]
-                    e_B = ESTACIONES[i+1]
+                for i in range(len(valid_stations_v1)-1):
+                    e_A = valid_stations_v1[i]
+                    e_B = valid_stations_v1[i+1]
                     c_s = get_col_thdr(df_thdr_v1, e_A, 'SALIDA')
                     c_l = get_col_thdr(df_thdr_v1, e_B, 'LLEGADA')
                     
                     if c_s and c_l:
-                        # Escudo Defensivo
                         s_sal = extract_series(df_thdr_v1, c_s)
                         s_lleg = extract_series(df_thdr_v1, c_l)
                         
@@ -1267,12 +1267,12 @@ with tabs[8]:
                         if not temp.empty:
                             temp['Hora_Salida'] = (temp['Salida'] // 60).astype(int)
                             temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
+                            # Usamos nombre completo para no causar confusión
                             temp['Tramo'] = f"{e_A} - {e_B}"
                             running_data.append(temp[['Hora_Salida', 'Tramo', 'RunTime']])
 
                 c_h1, c_h2 = st.columns(2)
 
-                # HEATMAP DWELL TIME
                 with c_h1:
                     st.markdown("##### 🛑 Dwell Time (Mediana por Estación/Hora)")
                     if dwell_data:
@@ -1280,7 +1280,7 @@ with tabs[8]:
                         df_dwell_heat = df_dwell_full.groupby(['Estacion', 'Hora_Salida'])['Dwell'].median().reset_index()
                         
                         pivot_dwell = df_dwell_heat.pivot(index='Estacion', columns='Hora_Salida', values='Dwell')
-                        pivot_dwell = pivot_dwell.reindex(ESTACIONES[::-1])
+                        pivot_dwell = pivot_dwell.reindex([e for e in ESTACIONES[::-1] if e in valid_stations_v1])
                         pivot_fmt_dw = pivot_dwell.apply(lambda col: col.apply(minutos_a_hhmmss))
                         
                         fig_heat_dw = px.imshow(pivot_dwell, 
@@ -1298,14 +1298,13 @@ with tabs[8]:
                     else:
                         st.info("No se encontraron datos de detenciones para Vía 1.")
 
-                # HEATMAP RUNNING TIME
                 with c_h2:
                     st.markdown("##### 🛤️ Circulación entre estación (Mediana Tramo/Hora)")
                     if running_data:
                         df_run_full = pd.concat(running_data)
                         df_run_heat = df_run_full.groupby(['Tramo', 'Hora_Salida'])['RunTime'].median().reset_index()
                         
-                        tramos_orden = [f"{ESTACIONES[i]} - {ESTACIONES[i+1]}" for i in range(len(ESTACIONES)-1)]
+                        tramos_orden = [f"{valid_stations_v1[i]} - {valid_stations_v1[i+1]}" for i in range(len(valid_stations_v1)-1)]
                         pivot_run = df_run_heat.pivot(index='Tramo', columns='Hora_Salida', values='RunTime')
                         pivot_run = pivot_run.reindex(tramos_orden[::-1]) 
                         pivot_fmt_run = pivot_run.apply(lambda col: col.apply(minutos_a_hhmmss))
@@ -1395,14 +1394,12 @@ with tabs[10]:
         else:
             st.markdown("Este reporte es generado automáticamente aplicando **algoritmos de estadística descriptiva**, segmentando la operación por sus distintos perfiles de demanda (Tipos de Jornada).")
             
-            # --- KPI GLOBAL DE LA SELECCIÓN ---
             tot_traccion_global = df_reporte['E_Tr'].sum()
             tot_pax_global = df_reporte['PAX'].sum()
             kwh_per_pax_global = (tot_traccion_global / tot_pax_global) if tot_pax_global > 0 else 0
             
             st.info(f"🎯 **KPI Global de Sostenibilidad (Estándar UIC):** En toda la selección analizada, la empresa consumió en promedio **{kwh_per_pax_global:.2f} kWh de tracción por cada pasajero transportado**.")
             
-            # --- ITERACIÓN POR TIPO DE JORNADA ---
             tipos_ordenados = ["L", "S", "D/F"]
             nombres_tipos = {"L": "Días Laborales (L)", "S": "Sábados (S)", "D/F": "Domingos y Festivos (D/F)"}
             
@@ -1412,7 +1409,6 @@ with tabs[10]:
                 
                 with st.expander(f"📌 Análisis de Operación: {nombres_tipos[tipo]}", expanded=True):
                     
-                    # 1. MOTOR DE CÁLCULOS MACRO PARA EL TIPO DE DÍA
                     dia_max_ide = df_tipo.loc[df_tipo['IDE (kWh/km)'].idxmax()]
                     dias_validos_ide = df_tipo[df_tipo['IDE (kWh/km)'] > 0]
                     dia_min_ide = dias_validos_ide.loc[dias_validos_ide['IDE (kWh/km)'].idxmin()] if not dias_validos_ide.empty else dia_max_ide
@@ -1422,10 +1418,8 @@ with tabs[10]:
                     umr_global = (tot_tren_km / tot_odo * 100) if tot_odo > 0 else 0
                     dia_max_pax = df_tipo.loc[df_tipo['PAX'].idxmax()] if df_tipo['PAX'].sum() > 0 else None
 
-                    # 2. MOTOR DE CÁLCULOS DE ALTA FRECUENCIA PARA EL TIPO DE DÍA
                     fechas_tipo = df_tipo['Fecha'].tolist()
                     
-                    # Perfil Horario y Nocturno
                     peak_hr_msg = "No hay datos horarios."
                     noche_msg = ""
                     datos_hr = all_prmte_full if all_prmte_full else all_fact_full
@@ -1434,6 +1428,7 @@ with tabs[10]:
                         df_hr['Fecha'] = pd.to_datetime(df_hr['Fecha'])
                         df_hr_filt = df_hr[df_hr['Fecha'].isin(fechas_tipo)]
                         if not df_hr_filt.empty:
+                            df_hr_filt = df_hr_filt.copy() 
                             hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
                             hora_peak = hr_agrupado.idxmax()
                             consumo_peak = hr_agrupado.max()
@@ -1448,11 +1443,10 @@ with tabs[10]:
                                 promedio_noche = noche_diario['Consumo'].mean()
                                 max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
                                 if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
-                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')}."
+                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')} (Ventana: 00:00 a 0{limite_hora}:00 hrs)."
                                 else:
-                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh/noche)."
+                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh de 00:00 a 0{limite_hora}:00 hrs)."
 
-                    # Cuellos de Botella (Estaciones)
                     estacion_msg = "Sin datos de estaciones."
                     df_c_filt = pd.DataFrame()
                     if not df_carga_v1.empty or not df_carga_v2.empty:
@@ -1464,7 +1458,6 @@ with tabs[10]:
                             frecuencia_critica = df_c_filt['Estación Máxima'].value_counts().max()
                             estacion_msg = f"**{estacion_critica}** es el cuello de botella físico ({frecuencia_critica} viajes a máxima capacidad)."
 
-                    # Despacho THDR y Velocidades
                     thdr_msg = "Sin datos de THDR."
                     tiempo_msg = ""
                     if not df_thdr_v1.empty or not df_thdr_v2.empty:
@@ -1490,10 +1483,10 @@ with tabs[10]:
                             c_p_sal = get_col_thdr(t1, 'PUERTO', 'SALIDA')
                             c_l_lleg = get_col_thdr(t1, 'LIMACHE', 'LLEGADA')
                             if c_p_sal and c_l_lleg:
-                                # Escudo Defensivo
                                 s_sal = extract_series(t1, c_p_sal)
                                 s_lleg = extract_series(t1, c_l_lleg)
-                                t1_v = pd.DataFrame({c_serv_v1: t1[c_serv_v1], 'Fecha_Op': t1['Fecha_Op'], 'Salida_raw': t1[c_p_sal].iloc[:,0] if isinstance(t1[c_p_sal], pd.DataFrame) else t1[c_p_sal], 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
+                                raw_sal = t1[c_p_sal].iloc[:, 0] if isinstance(t1[c_p_sal], pd.DataFrame) else t1[c_p_sal]
+                                t1_v = pd.DataFrame({c_serv_v1: t1[c_serv_v1], 'Fecha_Op': t1['Fecha_Op'], 'Salida_raw': raw_sal, 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
                                 t1_v['Dur'] = t1_v['Llegada'] - t1_v['Salida']
                                 t1_v['Dur'] = t1_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
                                 t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)]
@@ -1507,10 +1500,10 @@ with tabs[10]:
                             c_l_sal = get_col_thdr(t2, 'LIMACHE', 'SALIDA')
                             c_p_lleg = get_col_thdr(t2, 'PUERTO', 'LLEGADA')
                             if c_l_sal and c_p_lleg:
-                                # Escudo Defensivo
                                 s_sal = extract_series(t2, c_l_sal)
                                 s_lleg = extract_series(t2, c_p_lleg)
-                                t2_v = pd.DataFrame({c_serv_v2: t2[c_serv_v2], 'Fecha_Op': t2['Fecha_Op'], 'Salida_raw': t2[c_l_sal].iloc[:,0] if isinstance(t2[c_l_sal], pd.DataFrame) else t2[c_l_sal], 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
+                                raw_sal = t2[c_l_sal].iloc[:, 0] if isinstance(t2[c_l_sal], pd.DataFrame) else t2[c_l_sal]
+                                t2_v = pd.DataFrame({c_serv_v2: t2[c_serv_v2], 'Fecha_Op': t2['Fecha_Op'], 'Salida_raw': raw_sal, 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
                                 t2_v['Dur'] = t2_v['Llegada'] - t2_v['Salida']
                                 t2_v['Dur'] = t2_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
                                 t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
@@ -1520,10 +1513,9 @@ with tabs[10]:
                                     brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
 
                         if msg_v1 or msg_v2:
-                            if brecha_max > 10: msg_insight = f"⚠️ *Alta inestabilidad ({minutos_a_hhmmss(brecha_max)} de brecha).* Fuerte impacto en consumo de tracción."
-                            else: msg_insight = f"✅ *Buena regularidad ({minutos_a_hhmmss(brecha_max)} de brecha).* Operación estable."
+                            if brecha_max > 10: msg_insight = f"⚠️ *Alta inestabilidad ({minutos_a_hhmmss(brecha_max)} de brecha).* Fuerte impacto negativo en consumo de tracción."
+                            else: msg_insight = f"✅ *Buena regularidad ({minutos_a_hhmmss(brecha_max)} de brecha).* Operación estable que favorece la conducción eficiente."
 
-                    # --- MAQUETACIÓN DEL SUB-REPORTE POR JORNADA ---
                     c_rep1, c_rep2 = st.columns(2)
                     with c_rep1:
                         st.markdown("##### 📊 Desempeño y Demanda")
@@ -1640,8 +1632,8 @@ with tabs[11]:
                         if pd.notna(r.get("Doble_pct")): bits.append(f"**Uso Tracción Doble:** {r['Doble_pct']:.0f}%")
                         if r.get("Est_critica"): bits.append(f"**Punto de Saturación:** Estación {r['Est_critica']}")
                         if pd.notna(r.get("Ocup_max")): bits.append(f"**Peak Carga de Tren:** {int(r['Ocup_max']):,} PAX")
-                        if pd.notna(r.get("Viaje_prom")): bits.append(f"**Viaje Promedio (Malla):** {r['Viaje_prom']:.0f} min")
-                        if pd.notna(r.get("Brecha_min")): bits.append(f"**Brecha Irregularidad:** {r['Brecha_min']:.0f} min")
+                        if pd.notna(r.get("Viaje_prom")): bits.append(f"**Viaje Promedio (Malla):** {minutos_a_hhmmss(r['Viaje_prom'])}")
+                        if pd.notna(r.get("Brecha_min")): bits.append(f"**Brecha Irregularidad:** {minutos_a_hhmmss(r['Brecha_min'])}")
                             
                         if bits:
                             with cols_ctx[0]:
@@ -1651,7 +1643,7 @@ with tabs[11]:
 
                         ins = []
                         if pd.notna(r.get("Brecha_min")) and r["Brecha_min"] > 12:
-                            ins.append(f"Alta inestabilidad (Brecha de {r['Brecha_min']:.0f} min). Obliga a patrones 'Stop-and-Go', justificando el alza del consumo de tracción.")
+                            ins.append(f"Alta inestabilidad (Brecha de {minutos_a_hhmmss(r['Brecha_min'])}). Obliga a patrones 'Stop-and-Go', justificando el alza del consumo de tracción.")
                         if ("Eficiencia" in r["Diagnóstico"] or "Sobreconsumo" in r["Diagnóstico"]) and pd.notna(r.get("Doble_pct")) and r["Doble_pct"] > 25:
                             ins.append(f"Despacho elevado de Tracción Doble ({r['Doble_pct']:.0f}%). Más toneladas inerciales movilizadas impactan el indicador de kWh/km.")
                         if ("Volumen" in r["Diagnóstico"] or "Oferta" in r["Diagnóstico"]) and r.get("Est_critica"):
