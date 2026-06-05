@@ -1025,6 +1025,12 @@ with tabs[8]:
             tv2.columns = ['Fecha', 'Tiempo_V2']
             df_tiempos = pd.merge(df_tiempos, tv2, on='Fecha', how='outer') if not df_tiempos.empty else tv2
             
+        # --- PROGRAMACIÓN DEFENSIVA: Asegurar que ambas columnas existan antes de promediar ---
+        if 'Tiempo_V1' not in df_tiempos.columns:
+            df_tiempos['Tiempo_V1'] = np.nan
+        if 'Tiempo_V2' not in df_tiempos.columns:
+            df_tiempos['Tiempo_V2'] = np.nan
+            
         df_tiempos['Tiempo_Promedio_Red'] = df_tiempos[['Tiempo_V1', 'Tiempo_V2']].mean(axis=1)
         df_tiempos['Fecha'] = pd.to_datetime(df_tiempos['Fecha']).dt.normalize()
 
