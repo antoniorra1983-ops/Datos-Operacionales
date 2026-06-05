@@ -130,7 +130,6 @@ def obtener_fecha_es(fecha):
     return f"{dias[fecha.weekday()]} {fecha.day} {meses[fecha.month - 1]} {fecha.year}"
 
 def minutos_a_hhmmss(minutos_float):
-    """Convierte un valor de minutos (float) al estándar ferroviario HH:MM:SS"""
     if pd.isna(minutos_float): return "00:00:00"
     sign = "-" if minutos_float < 0 else ""
     m_abs = abs(minutos_float)
@@ -145,7 +144,7 @@ def minutos_a_hhmmss(minutos_float):
         h += 1
     return f"{sign}{h:02d}:{m:02d}:{s:02d}"
 
-# --- MOTOR DE EMPAREJAMIENTO DE ESTACIONES (Anti-Ruido de Textos) ---
+# --- MOTOR DE EMPAREJAMIENTO DE ESTACIONES ---
 def _norm(s):
     return str(s).upper().translate(str.maketrans("ÁÉÍÓÚÜÑ", "AEIOUUN"))
 
@@ -183,7 +182,7 @@ def extract_series(df, col_name):
         return pd.to_numeric(s.iloc[:, 0], errors='coerce')
     return pd.to_numeric(s, errors='coerce')
 
-# --- 3b. MOTOR DE DIAGNÓSTICO DE ANOMALÍAS (segmentado por tipo de día) ---
+# --- 3b. MOTOR DE DIAGNÓSTICO DE ANOMALÍAS ---
 _MAD_K = 1.4826
 _METRICAS_ANOM = {
     "E_Total": "energía total", "E_Tr": "tracción", "E_12": "auxiliares 12 kV",
@@ -487,6 +486,7 @@ def procesar_thdr_eficiente(file, start_date, end_date):
     except Exception as e:
         diag["error"] = str(e); return pd.DataFrame(), diag
 
+# 🛡️ RESTAURACIÓN DEL LECTOR DE PASAJEROS (Sin Falsos Positivos)
 def procesar_carga_pasajeros(f, start_date, end_date):
     try:
         is_csv = f.name.lower().endswith('.csv')
@@ -498,14 +498,9 @@ def procesar_carga_pasajeros(f, start_date, end_date):
             eu = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
             df = pd.read_excel(f, engine=eu, header=None)
             
-        # 🛡️ MEJORA 1: Búsqueda de encabezados mucho más flexible (Alias)
-        h_idx = None
-        for i in range(min(30, len(df))):
-            row_str = str(df.iloc[i].values).upper()
-            if any(k in row_str for k in ['THDR', 'VIAJE', 'SERV', 'FECHA']):
-                h_idx = i
-                break
-                
+        # 🛡️ RESTAURADO: Solo busca THDR o VIAJE para anclar el encabezado (No FECHA que crea falsos positivos)
+        h_idx = next((i for i in range(min(30, len(df))) if 'THDR' in str(df.iloc[i].values).upper() or 'VIAJE' in str(df.iloc[i].values).upper()), None)
+        
         if h_idx is not None:
             f.seek(0)
             if is_csv:
@@ -517,23 +512,25 @@ def procesar_carga_pasajeros(f, start_date, end_date):
                 
             df.columns = [str(c).strip() for c in df.columns]
             
-            # 🛡️ MEJORA 2: Lectura de Fechas Universal y GATEKEEPER ESTRICTO
+            # Buscar columna de Fecha de forma flexible
             c_fecha = next((c for c in df.columns if 'FECHA' in str(c).upper() or 'DIA' in str(c).upper() or 'DATE' in str(c).upper()), None)
-            
-            if not c_fecha:
-                return pd.DataFrame() # FAIL-FAST: Si no hay columna de fecha, la tabla es inútil. Descartar.
-                
-            df['Fecha'] = pd.to_datetime(df[c_fecha], dayfirst=True, errors='coerce').dt.normalize()
-            df = df.dropna(subset=['Fecha']) # Eliminar filas que no se pudieron traducir a fecha
-            df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
+            if c_fecha:
+                df['Fecha'] = pd.to_datetime(df[c_fecha], dayfirst=True, errors='coerce').dt.normalize()
+                df = df.dropna(subset=['Fecha'])
+                df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
+            elif 'Fecha' in df.columns:
+                df['Fecha'] = pd.to_datetime(df['Fecha'], dayfirst=True, errors='coerce').dt.normalize()
+                df = df.dropna(subset=['Fecha'])
+                df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
             
             if df.empty:
-                return pd.DataFrame() # Si tras filtrar quedó vacío, devolver tabla vacía formal.
+                return pd.DataFrame()
                 
-            # 🛡️ MEJORA 3: Búsqueda Semántica de Pasajeros y Estaciones
             c_tot = next((c for c in df.columns if 'TOTAL' in str(c).upper() and 'BORDO' in str(c).upper()), None)
             if c_tot:
                 df['Total a Bordo'] = pd.to_numeric(df[c_tot], errors='coerce').fillna(0)
+            elif 'Total a Bordo' in df.columns:
+                df['Total a Bordo'] = pd.to_numeric(df['Total a Bordo'], errors='coerce').fillna(0)
                 
             c_est_max = next((c for c in df.columns if 'ESTACI' in str(c).upper() and 'MAX' in _norm(c)), None)
             if c_est_max:
@@ -604,8 +601,8 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-# 🛡️ AUMENTO DE VERSIÓN: Obliga al sistema a releer los archivos con la nueva función flexible
-_CACHE_VERSION = "v16_pax_resiliencia"
+# 🛡️ BUMP VERSION PARA INVALIDAR CACHÉ ANTIGUA
+_CACHE_VERSION = "v17_restauracion_pax"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -790,7 +787,6 @@ elif _hay_archivos and _recalcular:
             df_ops['Servicios'] = 0
 
         if not df_carga_v1.empty or not df_carga_v2.empty:
-            # Escudo de Defensa en Profundidad: Exigir que exista la columna 'Fecha' antes de agrupar
             p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V1') if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'PAX_V1'])
             p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V2') if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'PAX_V2'])
             df_pax = pd.merge(p1, p2, on='Fecha', how='outer').fillna(0)
