@@ -1172,6 +1172,8 @@ with tabs[8]:
         df_ops_filt = df_ops[df_ops['Fecha'].isin(fechas_validas)]
         df_thdr_v1_filt = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_validas)]
         df_thdr_v2_filt = df_thdr_v2[df_thdr_v2['Fecha_Op'].isin(fechas_validas)]
+        df_carga_v1_filt = df_carga_v1[df_carga_v1['Fecha'].isin(fechas_validas)] if not df_carga_v1.empty else pd.DataFrame()
+        df_carga_v2_filt = df_carga_v2[df_carga_v2['Fecha'].isin(fechas_validas)] if not df_carga_v2.empty else pd.DataFrame()
 
         if df_ops_filt.empty:
             st.warning("No hay datos para los filtros seleccionados en este rango de fechas.")
@@ -1234,10 +1236,52 @@ with tabs[8]:
                 st.plotly_chart(fig_mix, use_container_width=True)
                 
                 st.divider()
+                
+                # --- FUNCIÓN DE EXTRACCIÓN DEFENSIVA DE PASAJEROS ---
+                def extraer_pax_heatmap(df_carga_filt, df_thdr_filt, valid_stations, est_origen):
+                    if df_carga_filt.empty: return []
+                    df_c = df_carga_filt.copy()
+                    
+                    # 1. Intentar buscar columna de Hora directa
+                    c_hora = next((c for c in df_c.columns if 'HORA' in str(c).upper()), None)
+                    if c_hora:
+                        df_c['Hora_Salida'] = pd.to_datetime(df_c[c_hora], format='%H:%M:%S', errors='coerce').dt.hour
+                        df_c['Hora_Salida'] = df_c['Hora_Salida'].fillna(pd.to_numeric(df_c[c_hora].astype(str).str[:2], errors='coerce'))
+                    else:
+                        # 2. Cruce con THDR para adivinar la hora
+                        c_serv_c = next((c for c in df_c.columns if 'THDR' in str(c).upper() or 'VIAJE' in str(c).upper()), df_c.columns[0])
+                        c_serv_t = df_thdr_filt.columns[0] if not df_thdr_filt.empty else None
+                        c_sal_t = get_col_thdr(df_thdr_filt, est_origen, 'SALIDA')
+                        if c_sal_t and c_serv_t:
+                            t_sub = df_thdr_filt[['Fecha_Op', c_serv_t, c_sal_t]].copy()
+                            t_sub['Hora_Salida'] = (extract_series(t_sub, c_sal_t) // 60).astype(float)
+                            df_c[c_serv_c] = df_c[c_serv_c].astype(str).str.strip()
+                            t_sub[c_serv_t] = t_sub[c_serv_t].astype(str).str.strip()
+                            df_c = pd.merge(df_c, t_sub, left_on=['Fecha', c_serv_c], right_on=['Fecha_Op', c_serv_t], how='inner')
+                    
+                    if 'Hora_Salida' not in df_c.columns: return []
+                    
+                    df_c = df_c.dropna(subset=['Hora_Salida'])
+                    df_c['Hora_Salida'] = df_c['Hora_Salida'].astype(int)
+                    df_c = df_c[(df_c['Hora_Salida'] >= 5) & (df_c['Hora_Salida'] <= 23)]
+                    
+                    pax_data = []
+                    for est in valid_stations:
+                        # Buscamos la columna de carga de esa estación, excluyendo columnas de totales
+                        c_est = next((c for c in df_c.columns if _norm(est) in _norm(c) and 'MAX' not in _norm(c) and 'MIN' not in _norm(c) and 'TOTAL' not in _norm(c)), None)
+                        if c_est:
+                            temp = df_c[['Hora_Salida', c_est]].copy()
+                            temp.columns = ['Hora_Salida', 'Pax']
+                            temp['Pax'] = pd.to_numeric(temp['Pax'], errors='coerce')
+                            temp = temp.dropna()
+                            if not temp.empty:
+                                temp['Estacion'] = est
+                                pax_data.append(temp)
+                    return pax_data
 
                 # --- ANÁLISIS TOPOLÓGICO POR HORA DE SALIDA (HEATMAPS) VÍA 1 ---
                 st.markdown("#### 🔍 Análisis Topológico por Hora de Salida (Vía 1)")
-                st.markdown("Dinámica de circulación y detenciones para los trenes en dirección Puerto ➔ Limache.")
+                st.markdown("Dinámica cruzada de Pasajeros, Circulación y Detenciones para los trenes en dirección Puerto ➔ Limache.")
 
                 if not df_thdr_v1_filt.empty:
                     valid_stations_v1 = []
@@ -1245,7 +1289,7 @@ with tabs[8]:
                         if get_col_thdr(df_thdr_v1_filt, est, 'LLEGADA') or get_col_thdr(df_thdr_v1_filt, est, 'SALIDA'):
                             valid_stations_v1.append(est)
 
-                    # 3. EXTRAER DWELL TIMES DETALLADOS V1
+                    # 3. EXTRAER DWELL TIMES
                     dwell_data = []
                     for est in valid_stations_v1:
                         c_lleg = get_col_thdr(df_thdr_v1_filt, est, 'LLEGADA')
@@ -1266,7 +1310,7 @@ with tabs[8]:
                                 temp['Estacion'] = est
                                 dwell_data.append(temp[['Hora_Salida', 'Estacion', 'Dwell']])
 
-                    # 4. EXTRAER RUNNING TIMES DETALLADOS V1
+                    # 4. EXTRAER RUNNING TIMES
                     running_data = []
                     for i in range(len(valid_stations_v1)-1):
                         e_A = valid_stations_v1[i]
@@ -1289,10 +1333,13 @@ with tabs[8]:
                                 temp['Tramo'] = f"{e_A} - {e_B}"
                                 running_data.append(temp[['Hora_Salida', 'Tramo', 'RunTime']])
 
-                    c_h1, c_h2 = st.columns(2)
+                    # 5. EXTRAER PAX
+                    pax_data_v1 = extraer_pax_heatmap(df_carga_v1_filt, df_thdr_v1_filt, valid_stations_v1, 'PUERTO')
+
+                    c_h1, c_h2, c_h3 = st.columns(3)
 
                     with c_h1:
-                        st.markdown("##### 🛑 Dwell Time (Vía 1)")
+                        st.markdown("##### 🛑 Dwell Time (Detención)")
                         if dwell_data:
                             df_dwell_full = pd.concat(dwell_data)
                             df_dwell_heat = df_dwell_full.groupby(['Estacion', 'Hora_Salida'])['Dwell'].median().reset_index()
@@ -1302,7 +1349,7 @@ with tabs[8]:
                             pivot_fmt_dw = pivot_dwell.apply(lambda col: col.apply(minutos_a_hhmmss))
                             
                             fig_heat_dw = px.imshow(pivot_dwell, 
-                                                    labels=dict(x="Hora de Salida", y="Estación", color="Tiempo"),
+                                                    labels=dict(x="Hora Salida", y="Estación", color="Tiempo"),
                                                     x=pivot_dwell.columns,
                                                     y=pivot_dwell.index,
                                                     color_continuous_scale="Reds",
@@ -1312,12 +1359,12 @@ with tabs[8]:
                             st.plotly_chart(fig_heat_dw, use_container_width=True)
                             
                             est_max = df_dwell_heat.loc[df_dwell_heat['Dwell'].idxmax()]
-                            st.caption(f"**Insight Dwell:** La peor retención típica en V1 ocurre en **{est_max['Estacion']}** a las **{est_max['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(est_max['Dwell'])}).")
+                            st.caption(f"**Insight:** Máx. detención típica en **{est_max['Estacion']}** a las **{est_max['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(est_max['Dwell'])}).")
                         else:
-                            st.info("No se encontraron datos de detenciones para Vía 1.")
+                            st.info("Sin datos.")
 
                     with c_h2:
-                        st.markdown("##### 🛤️ Circulación entre estación (Vía 1)")
+                        st.markdown("##### 🛤️ Fricción (Circulación tramo)")
                         if running_data:
                             df_run_full = pd.concat(running_data)
                             df_run_heat = df_run_full.groupby(['Tramo', 'Hora_Salida'])['RunTime'].median().reset_index()
@@ -1328,7 +1375,7 @@ with tabs[8]:
                             pivot_fmt_run = pivot_run.apply(lambda col: col.apply(minutos_a_hhmmss))
                             
                             fig_heat_run = px.imshow(pivot_run, 
-                                                    labels=dict(x="Hora de Salida", y="Tramo", color="Tiempo"),
+                                                    labels=dict(x="Hora Salida", y="Tramo", color="Tiempo"),
                                                     x=pivot_run.columns,
                                                     y=pivot_run.index,
                                                     color_continuous_scale="Blues",
@@ -1338,9 +1385,34 @@ with tabs[8]:
                             st.plotly_chart(fig_heat_run, use_container_width=True)
                             
                             tramo_max = df_run_heat.loc[df_run_heat['RunTime'].idxmax()]
-                            st.caption(f"**Insight Circulación:** El tramo más lento en V1 típicamente es **{tramo_max['Tramo']}** a las **{tramo_max['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(tramo_max['RunTime'])}).")
+                            st.caption(f"**Insight:** Tramo más lento **{tramo_max['Tramo']}** a las **{tramo_max['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(tramo_max['RunTime'])}).")
                         else:
-                            st.info("No se encontraron datos de tramos para Vía 1.")
+                            st.info("Sin datos.")
+
+                    with c_h3:
+                        st.markdown("##### 👥 Carga de Pasajeros (PAX)")
+                        if pax_data_v1:
+                            df_pax_full = pd.concat(pax_data_v1)
+                            df_pax_heat = df_pax_full.groupby(['Estacion', 'Hora_Salida'])['Pax'].median().reset_index()
+                            
+                            pivot_pax = df_pax_heat.pivot(index='Estacion', columns='Hora_Salida', values='Pax')
+                            pivot_pax = pivot_pax.reindex([e for e in ESTACIONES[::-1] if e in valid_stations_v1])
+                            
+                            fig_heat_pax = px.imshow(pivot_pax, 
+                                                    labels=dict(x="Hora Salida", y="Estación", color="PAX"),
+                                                    x=pivot_pax.columns,
+                                                    y=pivot_pax.index,
+                                                    color_continuous_scale="Greens",
+                                                    aspect="auto")
+                            fig_heat_pax.update_traces(hovertemplate="Hora: %{x}:00<br>Estación: %{y}<br>Carga PAX: %{z:,.0f}<extra></extra>")
+                            fig_heat_pax.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
+                            st.plotly_chart(fig_heat_pax, use_container_width=True)
+                            
+                            pax_max = df_pax_heat.loc[df_pax_heat['Pax'].idxmax()]
+                            st.caption(f"**Insight:** Mayor carga en tren en **{pax_max['Estacion']}** a las **{pax_max['Hora_Salida']:02d}:00 hrs** ({pax_max['Pax']:,.0f} PAX).")
+                        else:
+                            st.info("Formato de pasajeros por estación no detectado.")
+
                 else:
                     st.info("Se requiere procesar archivo THDR Vía 1 para este filtro.")
 
@@ -1348,7 +1420,7 @@ with tabs[8]:
 
                 # --- ANÁLISIS TOPOLÓGICO POR HORA DE SALIDA (HEATMAPS) VÍA 2 ---
                 st.markdown("#### 🔍 Análisis Topológico por Hora de Salida (Vía 2)")
-                st.markdown("Dinámica de circulación y detenciones para los trenes en dirección Limache ➔ Puerto.")
+                st.markdown("Dinámica cruzada para los trenes en dirección Limache ➔ Puerto.")
 
                 if not df_thdr_v2_filt.empty:
                     valid_stations_v2 = []
@@ -1356,104 +1428,106 @@ with tabs[8]:
                         if get_col_thdr(df_thdr_v2_filt, est, 'LLEGADA') or get_col_thdr(df_thdr_v2_filt, est, 'SALIDA'):
                             valid_stations_v2.append(est)
 
-                    # 3. EXTRAER DWELL TIMES DETALLADOS V2
                     dwell_data_v2 = []
                     for est in valid_stations_v2:
                         c_lleg = get_col_thdr(df_thdr_v2_filt, est, 'LLEGADA')
                         c_sal = get_col_thdr(df_thdr_v2_filt, est, 'SALIDA')
-                        
                         if c_lleg and c_sal:
                             s_lleg = extract_series(df_thdr_v2_filt, c_lleg)
                             s_sal = extract_series(df_thdr_v2_filt, c_sal)
-                            
                             temp = pd.DataFrame({'Fecha_Op': df_thdr_v2_filt['Fecha_Op'], 'Llegada': s_lleg, 'Salida': s_sal})
                             temp['Dwell'] = temp['Salida'] - temp['Llegada']
                             temp['Dwell'] = temp['Dwell'].apply(lambda x: x + 1440 if pd.notna(x) and x < -1000 else x)
                             temp = temp[(temp['Dwell'] >= 0) & (temp['Dwell'] < 15)].dropna()
-                            
                             if not temp.empty:
                                 temp['Hora_Salida'] = (temp['Salida'] // 60).astype(int)
                                 temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
                                 temp['Estacion'] = est
                                 dwell_data_v2.append(temp[['Hora_Salida', 'Estacion', 'Dwell']])
 
-                    # 4. EXTRAER RUNNING TIMES DETALLADOS V2
                     running_data_v2 = []
                     estaciones_orden_v2 = [e for e in ESTACIONES[::-1] if e in valid_stations_v2]
-                    
                     for i in range(len(estaciones_orden_v2)-1):
                         e_A = estaciones_orden_v2[i]
                         e_B = estaciones_orden_v2[i+1]
                         c_s = get_col_thdr(df_thdr_v2_filt, e_A, 'SALIDA')
                         c_l = get_col_thdr(df_thdr_v2_filt, e_B, 'LLEGADA')
-                        
                         if c_s and c_l:
                             s_sal = extract_series(df_thdr_v2_filt, c_s)
                             s_lleg = extract_series(df_thdr_v2_filt, c_l)
-                            
                             temp = pd.DataFrame({'Fecha_Op': df_thdr_v2_filt['Fecha_Op'], 'Salida': s_sal, 'Llegada': s_lleg})
                             temp['RunTime'] = temp['Llegada'] - temp['Salida']
                             temp['RunTime'] = temp['RunTime'].apply(lambda x: x + 1440 if pd.notna(x) and x < -1000 else x)
                             temp = temp[(temp['RunTime'] > 0) & (temp['RunTime'] < 30)].dropna()
-                            
                             if not temp.empty:
                                 temp['Hora_Salida'] = (temp['Salida'] // 60).astype(int)
                                 temp = temp[(temp['Hora_Salida'] >= 5) & (temp['Hora_Salida'] <= 23)]
                                 temp['Tramo'] = f"{e_A} - {e_B}"
                                 running_data_v2.append(temp[['Hora_Salida', 'Tramo', 'RunTime']])
 
-                    c_h3, c_h4 = st.columns(2)
+                    pax_data_v2 = extraer_pax_heatmap(df_carga_v2_filt, df_thdr_v2_filt, valid_stations_v2, 'LIMACHE')
 
-                    with c_h3:
+                    c_h4, c_h5, c_h6 = st.columns(3)
+
+                    with c_h4:
                         st.markdown("##### 🛑 Dwell Time (Vía 2)")
                         if dwell_data_v2:
                             df_dwell_full_v2 = pd.concat(dwell_data_v2)
                             df_dwell_heat_v2 = df_dwell_full_v2.groupby(['Estacion', 'Hora_Salida'])['Dwell'].median().reset_index()
-                            
                             pivot_dwell_v2 = df_dwell_heat_v2.pivot(index='Estacion', columns='Hora_Salida', values='Dwell')
                             pivot_dwell_v2 = pivot_dwell_v2.reindex([e for e in ESTACIONES[::-1] if e in valid_stations_v2])
                             pivot_fmt_dw_v2 = pivot_dwell_v2.apply(lambda col: col.apply(minutos_a_hhmmss))
-                            
                             fig_heat_dw_v2 = px.imshow(pivot_dwell_v2, 
-                                                    labels=dict(x="Hora de Salida", y="Estación", color="Tiempo"),
-                                                    x=pivot_dwell_v2.columns,
-                                                    y=pivot_dwell_v2.index,
-                                                    color_continuous_scale="Oranges",
-                                                    aspect="auto")
+                                                    labels=dict(x="Hora Salida", y="Estación", color="Tiempo"),
+                                                    x=pivot_dwell_v2.columns, y=pivot_dwell_v2.index,
+                                                    color_continuous_scale="Oranges", aspect="auto")
                             fig_heat_dw_v2.update_traces(customdata=pivot_fmt_dw_v2.values, hovertemplate="Hora: %{x}:00<br>Estación: %{y}<br>Detención: %{customdata}<extra></extra>")
                             fig_heat_dw_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
                             st.plotly_chart(fig_heat_dw_v2, use_container_width=True)
-                            
                             est_max_v2 = df_dwell_heat_v2.loc[df_dwell_heat_v2['Dwell'].idxmax()]
-                            st.caption(f"**Insight Dwell:** La peor retención típica en V2 ocurre en **{est_max_v2['Estacion']}** a las **{est_max_v2['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(est_max_v2['Dwell'])}).")
+                            st.caption(f"**Insight:** Máx. detención típica en **{est_max_v2['Estacion']}** a las **{est_max_v2['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(est_max_v2['Dwell'])}).")
                         else:
-                            st.info("No se encontraron datos de detenciones para Vía 2.")
+                            st.info("Sin datos.")
 
-                    with c_h4:
-                        st.markdown("##### 🛤️ Circulación entre estación (Vía 2)")
+                    with c_h5:
+                        st.markdown("##### 🛤️ Circulación (Vía 2)")
                         if running_data_v2:
                             df_run_full_v2 = pd.concat(running_data_v2)
                             df_run_heat_v2 = df_run_full_v2.groupby(['Tramo', 'Hora_Salida'])['RunTime'].median().reset_index()
-                            
                             tramos_orden_v2 = [f"{estaciones_orden_v2[i]} - {estaciones_orden_v2[i+1]}" for i in range(len(estaciones_orden_v2)-1)]
                             pivot_run_v2 = df_run_heat_v2.pivot(index='Tramo', columns='Hora_Salida', values='RunTime')
                             pivot_run_v2 = pivot_run_v2.reindex(tramos_orden_v2[::-1]) 
                             pivot_fmt_run_v2 = pivot_run_v2.apply(lambda col: col.apply(minutos_a_hhmmss))
-                            
                             fig_heat_run_v2 = px.imshow(pivot_run_v2, 
-                                                    labels=dict(x="Hora de Salida", y="Tramo", color="Tiempo"),
-                                                    x=pivot_run_v2.columns,
-                                                    y=pivot_run_v2.index,
-                                                    color_continuous_scale="Purples",
-                                                    aspect="auto")
+                                                    labels=dict(x="Hora Salida", y="Tramo", color="Tiempo"),
+                                                    x=pivot_run_v2.columns, y=pivot_run_v2.index,
+                                                    color_continuous_scale="Purples", aspect="auto")
                             fig_heat_run_v2.update_traces(customdata=pivot_fmt_run_v2.values, hovertemplate="Hora: %{x}:00<br>Tramo: %{y}<br>Tiempo: %{customdata}<extra></extra>")
                             fig_heat_run_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
                             st.plotly_chart(fig_heat_run_v2, use_container_width=True)
-                            
                             tramo_max_v2 = df_run_heat_v2.loc[df_run_heat_v2['RunTime'].idxmax()]
-                            st.caption(f"**Insight Circulación:** El tramo más lento en V2 es **{tramo_max_v2['Tramo']}** a las **{tramo_max_v2['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(tramo_max_v2['RunTime'])}).")
+                            st.caption(f"**Insight:** Tramo más lento **{tramo_max_v2['Tramo']}** a las **{tramo_max_v2['Hora_Salida']:02d}:00 hrs** ({minutos_a_hhmmss(tramo_max_v2['RunTime'])}).")
                         else:
-                            st.info("No se encontraron datos de tramos para Vía 2.")
+                            st.info("Sin datos.")
+
+                    with c_h6:
+                        st.markdown("##### 👥 Carga de Pasajeros (Vía 2)")
+                        if pax_data_v2:
+                            df_pax_full_v2 = pd.concat(pax_data_v2)
+                            df_pax_heat_v2 = df_pax_full_v2.groupby(['Estacion', 'Hora_Salida'])['Pax'].median().reset_index()
+                            pivot_pax_v2 = df_pax_heat_v2.pivot(index='Estacion', columns='Hora_Salida', values='Pax')
+                            pivot_pax_v2 = pivot_pax_v2.reindex([e for e in ESTACIONES[::-1] if e in valid_stations_v2])
+                            fig_heat_pax_v2 = px.imshow(pivot_pax_v2, 
+                                                    labels=dict(x="Hora Salida", y="Estación", color="PAX"),
+                                                    x=pivot_pax_v2.columns, y=pivot_pax_v2.index,
+                                                    color_continuous_scale="Greens", aspect="auto")
+                            fig_heat_pax_v2.update_traces(hovertemplate="Hora: %{x}:00<br>Estación: %{y}<br>Carga PAX: %{z:,.0f}<extra></extra>")
+                            fig_heat_pax_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
+                            st.plotly_chart(fig_heat_pax_v2, use_container_width=True)
+                            pax_max_v2 = df_pax_heat_v2.loc[df_pax_heat_v2['Pax'].idxmax()]
+                            st.caption(f"**Insight:** Mayor carga en tren en **{pax_max_v2['Estacion']}** a las **{pax_max_v2['Hora_Salida']:02d}:00 hrs** ({pax_max_v2['Pax']:,.0f} PAX).")
+                        else:
+                            st.info("Formato de pasajeros por estación no detectado.")
                 else:
                     st.info("Se requiere procesar archivo THDR Vía 2 para este filtro.")
             else:
