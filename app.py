@@ -560,21 +560,12 @@ with tabs[0]:
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
             
-            # --- NUEVA SECCIÓN DE EXPORTACIÓN (EXCEL Y PDF) ---
-            c_exp1, c_exp2, c_space = st.columns([2.5, 2.5, 5])
+            # --- SECCIÓN DE EXPORTACIÓN CORREGIDA (EXCEL Y PDF NATIVO) ---
+            c_exp1, c_exp2, c_space = st.columns([3, 2, 4])
             
             with c_exp1:
-                # Solución moderna de UI: Aprovechar el motor de renderizado del navegador para PDF
-                st.markdown(
-                    """
-                    <a href="javascript:window.print()" target="_self" style="text-decoration: none;">
-                        <div style="text-align: center; background-color: #f0f2f6; color: #005195; padding: 0.4rem; border-radius: 0.4rem; border: 1px solid #005195; font-weight: bold; cursor: pointer; transition: 0.3s;">
-                            🖨️ Imprimir / Guardar como PDF
-                        </div>
-                    </a>
-                    """,
-                    unsafe_allow_html=True
-                )
+                # Práctica recomendada de UX en Streamlit para PDFs sin librerías externas
+                st.info("🖨️ **Exportar a PDF:** Presiona `Ctrl + P` (Windows) o `Cmd + P` (Mac). \n\n*Nota: En 'Más ajustes', activa 'Gráficos de fondo' para mantener los colores.*")
                 
             with c_exp2:
                 # Mejor práctica de Datos: Exportar el dataframe filtrado a Excel puro
