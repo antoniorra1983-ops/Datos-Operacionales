@@ -528,7 +528,8 @@ elif _hay_archivos and _recalcular:
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2})
 
 # --- 8. TABS DE VISUALIZACIÓN ---
-tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Comparación hr",
+# Modificamos el nombre del Tab 4 para reflejar su nueva función analítica
+tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Perfil Horario & Anomalías",
               "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Servicios vs Energía", "👥 Pasajeros", "📝 Informe Ejecutivo"])
 
 with tabs[0]:
@@ -756,18 +757,107 @@ with tabs[3]:
     else: st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
 
 with tabs[4]:
-    if all_fact_full and all_prmte_full:
-        st.write("### Comparación Perfil Horario: Factura vs PRMTE")
-        df_hr_f = pd.DataFrame(all_fact_full).groupby('Hora')['Consumo'].mean().reset_index().rename(columns={'Consumo':'Factura_Promedio'})
-        df_hr_p = pd.DataFrame(all_prmte_full).groupby('Hora')['Consumo'].mean().reset_index().rename(columns={'Consumo':'PRMTE_Promedio'})
-        df_comp = pd.merge(df_hr_f, df_hr_p, on='Hora', how='outer').fillna(0).sort_values('Hora')
+    if all_prmte_full:
+        st.markdown("### 🔍 Análisis Granular de Consumo (15 min y Horario)")
+        st.markdown("Este panel permite auditar el comportamiento eléctrico de la flota detectando consumos parásitos (nocturnos) y picos de demanda críticos.")
         
-        fig_hr = go.Figure()
-        fig_hr.add_trace(go.Scatter(x=df_comp['Hora'], y=df_comp['Factura_Promedio'], mode='lines+markers', name='Factura (Promedio)', line=dict(color='#005195', width=3)))
-        fig_hr.add_trace(go.Scatter(x=df_comp['Hora'], y=df_comp['PRMTE_Promedio'], mode='lines+markers', name='PRMTE (Promedio)', line=dict(color='#E85500', width=2, dash='dash')))
-        fig_hr.update_layout(title="Perfil de Consumo Horario Promedio", xaxis_title="Hora del Día", yaxis_title="Consumo (kWh)")
-        st.plotly_chart(fig_hr, use_container_width=True)
-    else: st.info("Se necesitan cargar datos de **Facturación** y **PRMTE** simultáneamente para mostrar esta comparación.")
+        df_prmte = pd.DataFrame(all_prmte_full)
+        df_prmte['Fecha'] = pd.to_datetime(df_prmte['Fecha']).dt.date
+        
+        # --- 1. AUDITORÍA DE CARGA BASE (CONSUMO NOCTURNO) ---
+        st.markdown("#### 🌙 Auditoría de Consumo Nocturno (01:00 - 05:00 hrs)")
+        
+        # Filtramos la franja donde se asume que NO hay operación comercial
+        df_noche = df_prmte[df_prmte['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
+        
+        if not df_noche.empty:
+            consumo_noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
+            promedio_noche = consumo_noche_diario['Consumo'].mean()
+            
+            c_noct1, c_noct2 = st.columns([3, 1])
+            with c_noct1:
+                fig_noche = px.line(consumo_noche_diario, x='Fecha', y='Consumo', markers=True,
+                                    title="Consumo Total Nocturno por Día (kWh)",
+                                    color_discrete_sequence=["#1f77b4"])
+                fig_noche.add_hline(y=promedio_noche, line_dash="dash", line_color="red", annotation_text="Promedio Base")
+                # Resaltar puntos que superen el promedio + 20%
+                anomalos_noche = consumo_noche_diario[consumo_noche_diario['Consumo'] > promedio_noche * 1.2]
+                if not anomalos_noche.empty:
+                    fig_noche.add_trace(go.Scatter(x=anomalos_noche['Fecha'], y=anomalos_noche['Consumo'],
+                                                   mode='markers', marker=dict(color='red', size=12, symbol='x'),
+                                                   name='Posible Tren Encendido'))
+                fig_noche.update_layout(margin=dict(t=40, b=0, l=0, r=0))
+                st.plotly_chart(fig_noche, use_container_width=True, config={'locale': 'es'})
+            
+            with c_noct2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.metric("Consumo Nocturno Promedio", f"{promedio_noche:,.0f} kWh/noche")
+                st.info("💡 **Insight:** Picos en este gráfico indican que los trenes no fueron apagados correctamente en cocheras, manteniendo equipos auxiliares/climatización operando de forma 'vampira'.")
+        
+        st.divider()
+
+        # --- 2. MAPA DE CALOR DE 15 MINUTOS ---
+        st.markdown("#### 🔥 Mapa de Calor: Consumo cada 15 Minutos")
+        st.markdown("Identifica fácilmente a qué hora y qué día se producen los picos de demanda (colores cálidos) o valles (colores fríos).")
+        
+        # Agrupamos por Fecha y 15min para la matriz
+        matriz_15m = df_prmte.groupby(['Fecha', '15min'])['Consumo'].sum().reset_index()
+        
+        fig_heat = go.Figure(data=go.Heatmap(
+            z=matriz_15m['Consumo'],
+            x=matriz_15m['15min'],
+            y=matriz_15m['Fecha'],
+            colorscale='Turbo', # Escala que va de azul (frío) a rojo/blanco (caliente)
+            hoverongaps=False,
+            hovertemplate='Día: %{y}<br>Hora: %{x}<br>Consumo: %{z:,.1f} kWh<extra></extra>'
+        ))
+        
+        fig_heat.update_layout(
+            xaxis_title="Franja de 15 Minutos",
+            yaxis_title="Fecha",
+            height=500,
+            margin=dict(t=20, b=50, l=0, r=0)
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+        
+        st.divider()
+
+        # --- 3. CURVA DE DEMANDA HORARIA (PERFIL ESTADÍSTICO) ---
+        st.markdown("#### 📈 Curva de Demanda Promedio y Tolerancia Estadística")
+        
+        df_hr_stats = df_prmte.groupby('Hora')['Consumo'].agg(['mean', 'std']).reset_index()
+        df_hr_stats['upper_band'] = df_hr_stats['mean'] + (1.5 * df_hr_stats['std']) # Banda de tolerancia de 1.5 desviaciones
+        df_hr_stats['lower_band'] = df_hr_stats['mean'] - (1.5 * df_hr_stats['std'])
+        df_hr_stats['lower_band'] = df_hr_stats['lower_band'].clip(lower=0)
+        
+        fig_curva = go.Figure()
+        
+        # Sombra de tolerancia (Rango normal)
+        fig_curva.add_trace(go.Scatter(
+            x=pd.concat([df_hr_stats['Hora'], df_hr_stats['Hora'][::-1]]),
+            y=pd.concat([df_hr_stats['upper_band'], df_hr_stats['lower_band'][::-1]]),
+            fill='toself',
+            fillcolor='rgba(0, 81, 149, 0.2)',
+            line=dict(color='rgba(255,255,255,0)'),
+            name='Rango Normal Operativo (±1.5σ)'
+        ))
+        
+        # Línea Promedio
+        fig_curva.add_trace(go.Scatter(
+            x=df_hr_stats['Hora'], y=df_hr_stats['mean'],
+            line=dict(color='#005195', width=3),
+            mode='lines+markers',
+            name='Consumo Promedio'
+        ))
+        
+        fig_curva.update_layout(xaxis_title="Hora del Día", yaxis_title="Consumo (kWh)", hovermode="x unified",
+                                margin=dict(t=30, b=0, l=0, r=0))
+        st.plotly_chart(fig_curva, use_container_width=True)
+        
+        st.info("💡 **Peak Shaving:** El área sombreada celeste representa el 'consumo normal' histórico de la flota a esa hora. Si un día el consumo rompe la barrera superior, podría generar altos **cargos por potencia máxima**. Asegúrate de que los despachos de trenes (THDR) no coincidan exactamente en el mismo segundo para aplanar esta curva.")
+        
+    else: 
+        st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para habilitar el Centro de Control de Anomalías.")
 
 with tabs[5]:
     if not df_ops.empty and df_ops['E_Tr'].sum() > 0:
@@ -941,19 +1031,35 @@ with tabs[10]:
             # --- MOTOR DE CÁLCULOS DE ALTA FRECUENCIA (15 MIN / ESTACIONES / THDR) ---
             fechas_reporte = df_reporte['Fecha'].tolist()
             
-            # 1. Perfil de Consumo Horario (Facturación / PRMTE)
+            # 1. Perfil de Consumo Horario (Facturación / PRMTE) y Consumo Nocturno
             peak_hr_msg = "No se encontraron datos granulares de energía (PRMTE/Facturación) para este periodo."
+            noche_msg = ""
             datos_hr = all_prmte_full if all_prmte_full else all_fact_full
             if datos_hr:
                 df_hr = pd.DataFrame(datos_hr)
                 df_hr['Fecha'] = pd.to_datetime(df_hr['Fecha'])
                 df_hr_filt = df_hr[df_hr['Fecha'].isin(fechas_reporte)]
                 if not df_hr_filt.empty:
-                    # Agrupar por hora del día para sacar el promedio
+                    # Agrupar por hora del día para sacar el promedio (Peak Shaving)
                     hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
                     hora_peak = hr_agrupado.idxmax()
                     consumo_peak = hr_agrupado.max()
                     peak_hr_msg = f"La mayor exigencia a la red eléctrica ocurrió a las **{hora_peak}**, con un consumo promedio de **{consumo_peak:,.0f} kWh**. Esta es su 'Hora Punta'. Evalúe estrategias de *Peak Shaving* (Afeitado de picos) en esta franja si hay cargos por potencia máxima."
+                    
+                    # Auditoría de Carga Base (Consumo Nocturno 01:00 a 05:00)
+                    df_noche = df_hr_filt[df_hr_filt['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
+                    if not df_noche.empty:
+                        noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
+                        promedio_noche = noche_diario['Consumo'].mean()
+                        max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
+                        
+                        # Si el día de mayor consumo nocturno supera en un 20% el promedio, levantamos alerta
+                        if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
+                            fch_anomala = max_noche['Fecha'].strftime('%d/%m')
+                            sobrecosto_pct = ((max_noche['Consumo'] / promedio_noche) - 1) * 100
+                            noche_msg = f"🌙 **Alerta de Consumo Parásito:** El promedio de gasto nocturno (sin operación) es de **{promedio_noche:,.0f} kWh**. Sin embargo, la madrugada del **{fch_anomala}** registró un consumo anómalo de **{max_noche['Consumo']:,.0f} kWh (+{sobrecosto_pct:.1f}%)**. Investigar trenes energizados en cocheras o climatización operando al vacío."
+                        else:
+                            noche_msg = f"🌙 **Auditoría Nocturna (Saludable):** El consumo base de madrugada se mantiene estable en **{promedio_noche:,.0f} kWh/noche**, sin detectarse anomalías graves ni equipos mayores encendidos innecesariamente."
 
             # 2. Análisis de Cuellos de Botella (Carga Tren / Pasajeros)
             estacion_msg = "No se encontraron datos de carga de pasajeros por estación para este periodo."
@@ -1109,7 +1215,15 @@ with tabs[10]:
                 
             with c_rep2:
                 st.markdown("#### 🔬 Diagnóstico de Alta Frecuencia")
-                st.info(f"⚡ **Curva de Demanda:** {peak_hr_msg}")
+                st.info(f"⚡ **Curva de Demanda Diurna:** {peak_hr_msg}")
+                
+                # Inyectamos el mensaje nocturno si existe
+                if noche_msg:
+                    if "Alerta" in noche_msg:
+                        st.error(noche_msg)
+                    else:
+                        st.success(noche_msg)
+                        
                 st.error(f"🛑 **Cuello de Botella Operativo:** {estacion_msg}")
                 st.info(f"🚆 **Logística de Despachos:** {thdr_msg}")
                 st.warning(f"⏱️ **Análisis de Regularidad y Tiempos de Viaje:** \n\n {tiempo_msg}")
