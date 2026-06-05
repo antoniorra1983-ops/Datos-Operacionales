@@ -498,7 +498,14 @@ def procesar_carga_pasajeros(f, start_date, end_date):
             eu = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
             df = pd.read_excel(f, engine=eu, header=None)
             
-        h_idx = next((i for i in range(min(30, len(df))) if 'N° THDR' in str(df.iloc[i].values).upper() or 'N° VIAJE' in str(df.iloc[i].values).upper()), None)
+        # 🛡️ MEJORA 1: Búsqueda de encabezados mucho más flexible (Alias)
+        h_idx = None
+        for i in range(min(30, len(df))):
+            row_str = str(df.iloc[i].values).upper()
+            if any(k in row_str for k in ['THDR', 'VIAJE', 'SERV', 'FECHA']):
+                h_idx = i
+                break
+                
         if h_idx is not None:
             f.seek(0)
             if is_csv:
@@ -509,11 +516,22 @@ def procesar_carga_pasajeros(f, start_date, end_date):
                 df = pd.read_excel(f, engine=eu, header=h_idx)
                 
             df.columns = [str(c).strip() for c in df.columns]
-            if 'Fecha' in df.columns:
-                df['Fecha'] = pd.to_datetime(df['Fecha'], format='%d-%m-%Y', errors='coerce').dt.normalize()
+            
+            # 🛡️ MEJORA 2: Lectura de Fechas Universal (Ignora formatos estrictos)
+            c_fecha = next((c for c in df.columns if 'FECHA' in str(c).upper()), None)
+            if c_fecha:
+                df['Fecha'] = pd.to_datetime(df[c_fecha], dayfirst=True, errors='coerce').dt.normalize()
                 df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
-            if 'Total a Bordo' in df.columns:
-                df['Total a Bordo'] = pd.to_numeric(df['Total a Bordo'], errors='coerce').fillna(0)
+                
+            # 🛡️ MEJORA 3: Búsqueda Semántica de Pasajeros y Estaciones
+            c_tot = next((c for c in df.columns if 'TOTAL' in str(c).upper() and 'BORDO' in str(c).upper()), None)
+            if c_tot:
+                df['Total a Bordo'] = pd.to_numeric(df[c_tot], errors='coerce').fillna(0)
+                
+            c_est_max = next((c for c in df.columns if 'ESTACI' in str(c).upper() and 'MAX' in _norm(c)), None)
+            if c_est_max:
+                df['Estación Máxima'] = df[c_est_max]
+                
             return df
         return pd.DataFrame()
     except Exception:
@@ -579,7 +597,8 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v15_full_validation"
+# 🛡️ AUMENTO DE VERSIÓN: Obliga al sistema a releer los archivos con la nueva función flexible
+_CACHE_VERSION = "v16_pax_resiliencia"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
