@@ -595,10 +595,10 @@ with tabs[0]:
             
             with c_chart_s:
                 fig_serv = px.bar(df_resumen, x='Fecha', y='Servicios', 
-                                  text_auto=True, # Muestra el valor automáticamente en cada barra
                                   color_discrete_sequence=["#005195"],
                                   hover_data=hover_config, title="Servicios Programados")
-                fig_serv.update_traces(textposition='outside')
+                # Valor completo sin decimales. Fuente ajustada para evitar superposición.
+                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='outside', textfont_size=11)
                 # automargin previene que se corten los títulos
                 fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'})
@@ -610,10 +610,10 @@ with tabs[0]:
 
             with c_chart_p:
                 fig_pax = px.bar(df_resumen, x='Fecha', y='PAX', 
-                                  text_auto='.2s', # Formato 's' para miles (ej. 10k, 12k) evita saturar la barra
                                   color_discrete_sequence=["#E85500"], # Naranja para contrastar Demanda vs Oferta
                                   hover_data=hover_config, title="Pasajeros Transportados (PAX)")
-                fig_pax.update_traces(textposition='outside')
+                # Valor completo. Al ser de miles/millones, se rota a -90 grados para que quepa en la barra.
+                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='outside', textangle=-90, textfont_size=11)
                 fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'})
                 
@@ -631,11 +631,12 @@ with tabs[0]:
             with c_chart_k:
                 # Gráfico Agrupado (Barmode='group') para comparar Odómetro vs Tren-Km
                 fig_km = px.bar(df_resumen, x='Fecha', y=['Odómetro [km]', 'Tren-Km [km]'], 
-                                barmode='group', text_auto='.3s',
+                                barmode='group',
                                 color_discrete_map={'Odómetro [km]': '#005195', 'Tren-Km [km]': '#66A5D9'}, # Tonos de azul
                                 hover_data=hover_config, title="Kilometraje (Odómetro vs Tren-Km)")
                 
-                fig_km.update_traces(textposition='outside')
+                # Valores completos, 2 decimales obligatorios. Rotados a -90 grados.
+                fig_km.update_traces(texttemplate='%{y:,.2f}', textposition='outside', textangle=-90, textfont_size=10)
                 # Configuración de leyenda horizontal para no quitar espacio al gráfico
                 fig_km.update_layout(margin=dict(t=50, b=0, l=0, r=0), 
                                      title=dict(font=dict(size=15), automargin=True),
@@ -652,10 +653,10 @@ with tabs[0]:
             with c_chart_u:
                 # Gráfico del Porcentaje UMR
                 fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', 
-                                  text_auto='.1f', # 1 decimal para precisión sin ensuciar la barra
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Tasa Acoplamiento (UMR %)")
-                fig_umr.update_traces(textposition='outside', texttemplate='%{y:.1f}%')
+                # 2 decimales obligatorios con el símbolo de porcentaje.
+                fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='outside', textangle=-90, textfont_size=11)
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'})
                 
@@ -679,11 +680,12 @@ with tabs[0]:
             
             with c_chart_e:
                 fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], 
-                                  barmode='stack', text_auto='.3s',
+                                  barmode='stack',
                                   color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                                   hover_data=hover_config, title="Consumo Energético (kWh)")
                 
-                fig_ener.update_traces(textposition='inside') # En gráficos apilados el texto va adentro
+                # Valores completos, 2 decimales. Rotados a -90 grados y en el interior de los bloques (stack).
+                fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', textangle=-90, textfont_size=10) 
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), 
                                      title=dict(font=dict(size=15), automargin=True),
                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
@@ -697,10 +699,10 @@ with tabs[0]:
 
             with c_chart_i:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
-                                  text_auto='.2f', # <--- Muestra 2 decimales exactos en las barras del gráfico
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Desempeño Energético (IDE)")
-                fig_ide_bar.update_traces(textposition='outside')
+                # IDE con exactamente 2 decimales
+                fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='outside', textfont_size=11)
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True))
                 st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'})
                 
