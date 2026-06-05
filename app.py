@@ -15,18 +15,19 @@ chile_holidays = holidays.Chile()
 st.markdown("""<style>
 .stMetric{background-color:#ffffff;padding:20px;border-radius:10px;
 border-left:5px solid #005195;box-shadow:0 2px 4px rgba(0,0,0,0.05);}
-/* Evitar que los títulos de las tarjetas (Métricas) se corten: Responsive wrapping */
-div[data-testid="stMetricLabel"] > label {
+/* Forzar que los títulos de las tarjetas se vean completos siempre */
+[data-testid="stMetricLabel"] * {
     white-space: normal !important; 
     word-wrap: break-word !important; 
-    min-height: 2.5rem;
-    font-size: 0.95rem;
+    overflow: visible !important;
+    text-overflow: clip !important;
 }
-/* Garantizar que los valores numéricos grandes siempre se vean completos */
-div[data-testid="stMetricValue"] {
-    font-size: 1.6rem !important; /* Ligeramente más pequeño para acomodar números largos */
-    word-wrap: break-word !important;
+/* Forzar que los valores numéricos grandes NUNCA se corten */
+[data-testid="stMetricValue"] * {
+    font-size: 1.45rem !important; /* Letra ajustada para que quepan millones */
     white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
 }
 /* Forzar scroll horizontal SOLO en tablas gigantes, no en el layout principal */
 .stDataFrame { overflow-x: auto; }
@@ -335,7 +336,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v12_formatos_completos"
+_CACHE_VERSION = "v13_forzar_css"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -696,7 +697,7 @@ with tabs[0]:
 
             with c_chart_i:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
-                                  text_auto='.3f', # Mantenemos 3 decimales en la gráfica para ver pequeñas variaciones
+                                  text_auto='.2f', # <--- Muestra 2 decimales exactos en las barras del gráfico
                                   color_discrete_sequence=["#E85500"], 
                                   hover_data=hover_config, title="Desempeño Energético (IDE)")
                 fig_ide_bar.update_traces(textposition='outside')
@@ -709,7 +710,7 @@ with tabs[0]:
                 tot_traccion_real = df_resumen['E_Tr'].sum()
                 ide_global = (tot_traccion_real / tot_odometro) if tot_odometro > 0 else 0
                 
-                # Estandarizado a exactamente 2 decimales para la tarjeta, respetando tu solicitud
+                # Estandarizado a exactamente 2 decimales para la tarjeta
                 st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
