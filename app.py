@@ -970,6 +970,7 @@ with tabs[10]:
 
             # 3. Eficiencia Operativa de Despacho (THDR)
             thdr_msg = "No se encontraron datos de itinerario (THDR) para este periodo."
+            tiempo_msg = "No hay columnas de salida/llegada válidas para calcular tiempos de viaje."
             df_t_filt = pd.DataFrame()
             if not df_thdr_v1.empty or not df_thdr_v2.empty:
                 t1 = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_reporte)] if not df_thdr_v1.empty else pd.DataFrame()
@@ -977,12 +978,45 @@ with tabs[10]:
                 df_t_filt = pd.concat([t1, t2])
                 
                 if not df_t_filt.empty:
-                    # Ejemplo de métrica avanzada: Porcentaje de uso de tracción motriz (Si aplica según la Unidad)
+                    # Ejemplo de métrica avanzada: Porcentaje de uso de tracción motriz
                     total_viajes = len(df_t_filt)
                     if 'Unidad' in df_t_filt.columns:
                         viajes_traccion_doble = len(df_t_filt[df_t_filt['Unidad'].astype(str).str.contains('M', case=False, na=False)])
                         porcentaje_doble = (viajes_traccion_doble / total_viajes * 100) if total_viajes > 0 else 0
-                        thdr_msg = f"Se despacharon un total de **{total_viajes:,} servicios** comerciales (THDR). El análisis revela que el **{porcentaje_doble:.1f}% de los itinerarios fueron configurados en Tracción Doble** desde la programación de origen."
+                        thdr_msg = f"Se despacharon **{total_viajes:,} servicios** comerciales. El **{porcentaje_doble:.1f}% de los itinerarios fueron configurados en Tracción Doble**."
+
+                # 4. Cálculo de Tiempos de Viaje y Velocidad Comercial (Puerto <-> Limache)
+                tiempos_v1 = pd.Series(dtype=float)
+                if not t1.empty:
+                    c_p_sal = next((c for c in t1.columns if 'PUERTO' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    c_l_lleg = next((c for c in t1.columns if 'LIMACHE' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    if c_p_sal and c_l_lleg:
+                        diff = t1[c_l_lleg] - t1[c_p_sal]
+                        # Ajuste matemático por si el viaje cruza la medianoche (ej. sale 23:30, llega 00:30)
+                        tiempos_v1 = diff.apply(lambda x: x + 1440 if x < -500 else x).dropna()
+                        tiempos_v1 = tiempos_v1[(tiempos_v1 > 30) & (tiempos_v1 < 120)] # Filtro de valores lógicos para evitar basura
+                
+                tiempos_v2 = pd.Series(dtype=float)
+                if not t2.empty:
+                    c_l_sal = next((c for c in t2.columns if 'LIMACHE' in str(c).upper() and 'SALIDA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    c_p_lleg = next((c for c in t2.columns if 'PUERTO' in str(c).upper() and 'LLEGADA' in str(c).upper() and '_min' in str(c).lower()), None)
+                    if c_l_sal and c_p_lleg:
+                        diff = t2[c_p_lleg] - t2[c_l_sal]
+                        tiempos_v2 = diff.apply(lambda x: x + 1440 if x < -500 else x).dropna()
+                        tiempos_v2 = tiempos_v2[(tiempos_v2 > 30) & (tiempos_v2 < 120)]
+                        
+                msg_parts = []
+                if not tiempos_v1.empty:
+                    t_prom_v1 = tiempos_v1.mean()
+                    vel_v1 = KM_TOTAL / (t_prom_v1 / 60) if t_prom_v1 > 0 else 0
+                    msg_parts.append(f"**V1 (PU→LI):** {t_prom_v1:.1f} min ({vel_v1:.1f} km/h)")
+                if not tiempos_v2.empty:
+                    t_prom_v2 = tiempos_v2.mean()
+                    vel_v2 = KM_TOTAL / (t_prom_v2 / 60) if t_prom_v2 > 0 else 0
+                    msg_parts.append(f"**V2 (LI→PU):** {t_prom_v2:.1f} min ({vel_v2:.1f} km/h)")
+                    
+                if msg_parts:
+                    tiempo_msg = " | ".join(msg_parts) + f". *(Distancia: {KM_TOTAL} km)*."
 
             # --- REDACCIÓN Y MAQUETACIÓN DEL INFORME ---
             st.info(f"🎯 **KPI de Sostenibilidad (Estándar UIC):** Durante este periodo, la empresa consumió **{kwh_per_pax:.2f} kWh de tracción por cada pasajero transportado**. Este es el indicador medioambiental definitivo que relaciona la oferta (energía) con la demanda real.")
@@ -1002,8 +1036,9 @@ with tabs[10]:
                 st.info(f"⚡ **Curva de Demanda:** {peak_hr_msg}")
                 st.error(f"🛑 **Cuello de Botella Operativo:** {estacion_msg}")
                 st.info(f"🚆 **Logística de Despachos:** {thdr_msg}")
+                st.warning(f"⏱️ **Velocidad Comercial:** {tiempo_msg}")
                     
             st.divider()
-            st.markdown("💡 *Recomendación gerencial analítica:* Al cruzar la Curva de Demanda con el Cuello de Botella Operativo, verifique que los despachos de tracción doble (THDR) estén sincronizados con la hora punta energética. Un desface implica que los trenes grandes operan vacíos aumentando el costo sin absorber demanda.")
+            st.markdown("💡 *Recomendación gerencial analítica:* Al auditar la **Velocidad Comercial (⏱️)**, recuerde que si los tiempos de viaje aumentan, la velocidad comercial disminuye. Esto produce un 'efecto cascada': obliga a inyectar más trenes para mantener la misma frecuencia, incrementando el gasto energético bruto (factura) y deteriorando el IDE debido al aumento de detenciones no programadas (pérdida de inercia y freno regenerativo).")
     else:
         st.info("No hay datos consolidados para generar el análisis.")
