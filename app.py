@@ -547,10 +547,26 @@ with tabs[0]:
         
         df_resumen = df_ops[df_ops['Tipo Día'].isin(filtro_dia)]
         
+        # --- NUEVA LÓGICA DE DRILL-DOWN (CROSS-FILTERING) ---
+        if 'drilldown_date' not in st.session_state:
+            st.session_state.drilldown_date = None
+            
+        if st.session_state.drilldown_date is not None:
+            # Filtrar el dataframe exclusivamente al día seleccionado al hacer click
+            df_resumen = df_resumen[df_resumen['Fecha'] == st.session_state.drilldown_date]
+        
         if df_resumen.empty:
             st.warning("No hay datos operacionales para los filtros seleccionados.")
         else:
             st.markdown("### 🚄 DATOS OPERACIONALES")
+            
+            # --- ALERTA VISUAL Y SALIDA DE EMERGENCIA DE UX ---
+            if st.session_state.drilldown_date is not None:
+                c_info, c_btn = st.columns([4, 1])
+                c_info.info(f"🔍 **Modo Detalle Activo:** Estás viendo los datos exclusivos del día **{st.session_state.drilldown_date.strftime('%d-%m-%Y')}**.")
+                if c_btn.button("❌ Quitar filtro de día", use_container_width=True):
+                    st.session_state.drilldown_date = None
+                    st.rerun()
             
             # Programación Defensiva Estricta
             hover_config = {}
@@ -575,7 +591,9 @@ with tabs[0]:
                 fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                        bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'})
+                
+                # SE CAPTURA EL EVENTO ON_SELECT
+                ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
                 
             with c_card_s:
                 st.markdown("<br><br>", unsafe_allow_html=True)
@@ -589,7 +607,9 @@ with tabs[0]:
                 fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'})
+                
+                # SE CAPTURA EL EVENTO ON_SELECT
+                ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
                 
             with c_card_p:
                 st.markdown("<br><br>", unsafe_allow_html=True)
@@ -610,7 +630,9 @@ with tabs[0]:
                 fig_km.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                      bargap=0.15, uniformtext=dict(minsize=8, mode='hide'))
-                st.plotly_chart(fig_km, use_container_width=True, config={'locale': 'es'})
+                
+                # SE CAPTURA EL EVENTO ON_SELECT
+                ev_km = st.plotly_chart(fig_km, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_km")
                 
             with c_card_k:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -625,7 +647,9 @@ with tabs[0]:
                 fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'})
+                
+                # SE CAPTURA EL EVENTO ON_SELECT
+                ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
                 
             with c_card_u:
                 st.markdown("<br><br>", unsafe_allow_html=True)
@@ -651,7 +675,9 @@ with tabs[0]:
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                      bargap=0.15, uniformtext=dict(minsize=8, mode='hide'))
-                st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'})
+                
+                # SE CAPTURA EL EVENTO ON_SELECT
+                ev_ener = st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
                 
             with c_card_e:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -666,13 +692,35 @@ with tabs[0]:
                 fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                           bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'})
+                
+                # SE CAPTURA EL EVENTO ON_SELECT
+                ev_ide_bar = st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
                 
             with c_card_i:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 tot_traccion_real = df_resumen['E_Tr'].sum()
                 ide_global = (tot_traccion_real / tot_odometro) if tot_odometro > 0 else 0
                 st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
+
+            # --- PROCESAMIENTO CENTRAL DE CLICKS EN GRÁFICOS ---
+            # Reunimos todos los eventos devueltos por los gráficos
+            chart_events = [ev_serv, ev_pax, ev_km, ev_umr, ev_ener, ev_ide_bar]
+            
+            for ev in chart_events:
+                # Verificamos que el evento exista y contenga puntos seleccionados
+                if ev and isinstance(ev, dict) and ev.get('selection') and ev['selection'].get('points'):
+                    clicked_x = ev['selection']['points'][0].get('x')
+                    if clicked_x:
+                        try:
+                            # Convertimos la fecha devuelta por Plotly al formato estándar de nuestro DataFrame
+                            clicked_dt = pd.to_datetime(clicked_x).normalize()
+                            
+                            # Si es un día distinto al que ya está seleccionado, actualizamos la sesión y reiniciamos
+                            if st.session_state.drilldown_date != clicked_dt:
+                                st.session_state.drilldown_date = clicked_dt
+                                st.rerun()
+                        except Exception:
+                            pass # Si por algún motivo Plotly devuelve algo que no es fecha, lo ignoramos de forma segura
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
