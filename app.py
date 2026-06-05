@@ -143,15 +143,32 @@ def _robust_z(serie):
         return pd.Series(0.0, index=s.index)
     return (s - med) / esc
 
-def _perfil_horario_diario(all_prmte_full, all_fact_full):
+# 🛡️ CORRECCIÓN OPERACIONAL: Cálculo de Consumo Nocturno Dinámico
+def _perfil_horario_diario(all_prmte_full, all_fact_full, df_ops=None):
     datos, freq = (all_prmte_full, 15) if all_prmte_full else (all_fact_full, 60)
     if not datos:
         return pd.DataFrame(columns=["Fecha", "Noche_kWh", "Pico_kW"])
     h = pd.DataFrame(datos)
     h["Fecha"] = pd.to_datetime(h["Fecha"]).dt.normalize()
     h["Hora_n"] = h["Hora"].astype(str).str.slice(0, 2).apply(lambda x: int(x) if str(x).isdigit() else -1)
-    noche = h[h["Hora_n"].isin([1, 2, 3, 4])].groupby("Fecha")["Consumo"].sum().rename("Noche_kWh")
+    
+    # Cruzar con Tipo de Día para hacer el horario dinámico
+    if df_ops is not None and not df_ops.empty:
+        mapa_tipo = df_ops.set_index('Fecha')['Tipo Día'].to_dict()
+        h['Tipo Día'] = h['Fecha'].map(mapa_tipo)
+    else:
+        h['Tipo Día'] = h['Fecha'].apply(lambda x: get_tipo_dia(x.date()))
+
+    # Lógica Dinámica de Carga Base (00:00 a X hrs)
+    def _is_noche_dinamico(row):
+        limite = 6 if row['Tipo Día'] == 'L' else (7 if row['Tipo Día'] == 'S' else 8)
+        return 0 <= row['Hora_n'] < limite
+        
+    h['Es_Noche'] = h.apply(_is_noche_dinamico, axis=1)
+    
+    noche = h[h['Es_Noche']].groupby("Fecha")["Consumo"].sum().rename("Noche_kWh")
     pico = (h.groupby("Fecha")["Consumo"].max() * (60.0 / freq)).rename("Pico_kW")
+    
     return pd.concat([noche, pico], axis=1).reset_index()
 
 def _contexto_dia(fecha, cc, tt):
@@ -218,7 +235,9 @@ def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
     d["Fecha"] = pd.to_datetime(d["Fecha"]).dt.normalize()
     if "kWh_por_PAX" not in d.columns:
         d["kWh_por_PAX"] = d["E_Tr"] / d["PAX"].replace(0, np.nan)
-    perfil = _perfil_horario_diario(all_prmte_full, all_fact_full)
+        
+    # Enviar df_ops para garantizar que la carga base sea dinámica
+    perfil = _perfil_horario_diario(all_prmte_full, all_fact_full, d)
     if not perfil.empty:
         d = d.merge(perfil, on="Fecha", how="left")
     for c in ["Noche_kWh", "Pico_kW"]:
@@ -265,7 +284,6 @@ def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
         
         z_en = fired.get("E_Total", fired.get("E_Tr", None))
         
-        # Estructura del nuevo diagnóstico en lenguaje natural
         sintoma_principal = "Desviación Operativa Detectada"
         explicacion = []
 
@@ -293,15 +311,13 @@ def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
             sintoma_principal = "🌙 Alerta de Consumo Parásito (Vampire Load)"
             explicacion = ["Consumo nocturno y de 12 kV simultáneamente disparados. Alta probabilidad de que se dejaron trenes energizados (climatización o equipos auxiliares operando en vacío) en cocheras durante la madrugada."]
         elif fired.get("Noche_kWh", 0) >= z_alerta:
-            explicacion.append("Pico anómalo de demanda en la madrugada (01:00 a 05:00 hrs) fuera del horario comercial.")
+            explicacion.append("Pico anómalo de demanda eléctrica durante la ventana de inactividad comercial nocturna (Carga Base Dinámica).")
 
-        # Añadir mención a otras métricas menores sin sonar robótico
         otras = [f"{_METRICAS_ANOM.get(m, m)} {'alto' if z>0 else 'bajo'}" 
                  for m, z in fired.items() if m not in ["E_Total", "E_Tr", "IDE (kWh/km)", "Servicios", "E_12", "Noche_kWh"]]
         if otras:
             explicacion.append("Adicionalmente, se detectó comportamiento anómalo en: " + ", ".join(otras) + ".")
 
-        # Construir el párrafo final Markdown
         texto_diag = f"**{sintoma_principal}**\n\n" + "\n".join([f"- {e}" for e in explicacion])
         diags.append(texto_diag)
 
@@ -919,10 +935,22 @@ with tabs[4]:
         df_prmte = pd.DataFrame(all_prmte_full)
         df_prmte['Fecha'] = pd.to_datetime(df_prmte['Fecha']).dt.date
         
-        # --- 1. AUDITORÍA DE CARGA BASE (CONSUMO NOCTURNO) ---
-        st.markdown("#### 🌙 Auditoría de Consumo Nocturno (01:00 - 05:00 hrs)")
+        # --- 1. AUDITORÍA DE CARGA BASE (CONSUMO NOCTURNO DINÁMICO) ---
+        st.markdown("#### 🌙 Auditoría de Consumo Nocturno Dinámico (Carga Base)")
+        st.caption("Horario evaluado: 00:00 a 06:00 (Laborales), a 07:00 (Sábados) y a 08:00 (Dom/Fest)")
         
-        df_noche = df_prmte[df_prmte['Hora'].isin(['01:00', '02:00', '03:00', '04:00'])]
+        # Cruzamos con Tipo Día para aplicar las reglas dinámicas
+        mapa_tipo_prmte = df_ops.set_index(df_ops['Fecha'].dt.date)['Tipo Día'].to_dict()
+        df_prmte['Tipo Día'] = df_prmte['Fecha'].map(mapa_tipo_prmte)
+        df_prmte['Tipo Día'] = df_prmte['Tipo Día'].fillna(df_prmte['Fecha'].apply(lambda x: get_tipo_dia(x)))
+        df_prmte['Hora_n'] = df_prmte['Hora'].str.slice(0, 2).astype(int)
+        
+        def is_noche_tab4(row):
+            limite = 6 if row['Tipo Día'] == 'L' else (7 if row['Tipo Día'] == 'S' else 8)
+            return 0 <= row['Hora_n'] < limite
+            
+        df_prmte['Es_Noche'] = df_prmte.apply(is_noche_tab4, axis=1)
+        df_noche = df_prmte[df_prmte['Es_Noche']]
         
         if not df_noche.empty:
             consumo_noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
@@ -1352,15 +1380,16 @@ with tabs[10]:
                             df_hr_filt['Hora_n'] = df_hr_filt['Hora'].astype(str).str.slice(0, 2).astype(int)
                             limite_hora = 6 if tipo == "L" else (7 if tipo == "S" else 8)
                             
-                            df_noche = df_hr_filt[df_hr_filt['Hora_n'] < limite_hora]
+                            # Condición Dinámica de 00:00 a X hrs
+                            df_noche = df_hr_filt[(df_hr_filt['Hora_n'] >= 0) & (df_hr_filt['Hora_n'] < limite_hora)]
                             if not df_noche.empty:
                                 noche_diario = df_noche.groupby('Fecha')['Consumo'].sum().reset_index()
                                 promedio_noche = noche_diario['Consumo'].mean()
                                 max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
                                 if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
-                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')} (Límite auditoría: {limite_hora}:00 AM)."
+                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')} (Ventana: 00:00 a 0{limite_hora}:00 hrs)."
                                 else:
-                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh hasta las {limite_hora}:00 AM)."
+                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh de 00:00 a 0{limite_hora}:00 hrs)."
 
                     # Cuellos de Botella (Estaciones)
                     estacion_msg = "Sin datos de estaciones."
