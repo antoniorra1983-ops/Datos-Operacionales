@@ -517,11 +517,18 @@ def procesar_carga_pasajeros(f, start_date, end_date):
                 
             df.columns = [str(c).strip() for c in df.columns]
             
-            # 🛡️ MEJORA 2: Lectura de Fechas Universal (Ignora formatos estrictos)
-            c_fecha = next((c for c in df.columns if 'FECHA' in str(c).upper()), None)
-            if c_fecha:
-                df['Fecha'] = pd.to_datetime(df[c_fecha], dayfirst=True, errors='coerce').dt.normalize()
-                df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
+            # 🛡️ MEJORA 2: Lectura de Fechas Universal y GATEKEEPER ESTRICTO
+            c_fecha = next((c for c in df.columns if 'FECHA' in str(c).upper() or 'DIA' in str(c).upper() or 'DATE' in str(c).upper()), None)
+            
+            if not c_fecha:
+                return pd.DataFrame() # FAIL-FAST: Si no hay columna de fecha, la tabla es inútil. Descartar.
+                
+            df['Fecha'] = pd.to_datetime(df[c_fecha], dayfirst=True, errors='coerce').dt.normalize()
+            df = df.dropna(subset=['Fecha']) # Eliminar filas que no se pudieron traducir a fecha
+            df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
+            
+            if df.empty:
+                return pd.DataFrame() # Si tras filtrar quedó vacío, devolver tabla vacía formal.
                 
             # 🛡️ MEJORA 3: Búsqueda Semántica de Pasajeros y Estaciones
             c_tot = next((c for c in df.columns if 'TOTAL' in str(c).upper() and 'BORDO' in str(c).upper()), None)
@@ -783,8 +790,9 @@ elif _hay_archivos and _recalcular:
             df_ops['Servicios'] = 0
 
         if not df_carga_v1.empty or not df_carga_v2.empty:
-            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V1') if not df_carga_v1.empty else pd.DataFrame(columns=['Fecha', 'PAX_V1'])
-            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V2') if not df_carga_v2.empty else pd.DataFrame(columns=['Fecha', 'PAX_V2'])
+            # Escudo de Defensa en Profundidad: Exigir que exista la columna 'Fecha' antes de agrupar
+            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V1') if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'PAX_V1'])
+            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V2') if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'PAX_V2'])
             df_pax = pd.merge(p1, p2, on='Fecha', how='outer').fillna(0)
             df_pax['PAX'] = df_pax['PAX_V1'] + df_pax['PAX_V2']
             df_pax['Fecha'] = pd.to_datetime(df_pax['Fecha']).dt.normalize()
@@ -1627,8 +1635,9 @@ with tabs[9]:
         c_p1, c_p2 = st.columns(2)
         with c_p1:
             st.write("#### Total de Pasajeros por Día")
-            df_c1_agg = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index() if not df_carga_v1.empty else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
-            df_c2_agg = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index() if not df_carga_v2.empty else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
+            # Escudo de Defensa en Profundidad: Exigir 'Fecha'
+            df_c1_agg = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index() if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
+            df_c2_agg = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index() if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
             
             fig_pas = go.Figure()
             if not df_c1_agg.empty:
