@@ -1246,12 +1246,14 @@ with tabs[8]:
                 
                 df_plot['Tiempo Promedio HH:MM:SS'] = df_plot['Tiempo_Mediana_Red'].apply(minutos_a_hhmmss)
                 
+                # 🛡️ CORRECCIÓN: Tooltip robusto con listas (evita error de coerción en basevalidators de Plotly)
                 fig_mix = px.scatter(df_plot, 
                                      x='Tiempo_Mediana_Red', 
                                      y='E_Tr', 
                                      size='PAX',
                                      color='Tipo Día', 
-                                     hover_data={'Tiempo_Mediana_Red': False, 'Tiempo Promedio HH:MM:SS': True, 'IDE (kWh/km)': True, 'Fecha': True},
+                                     hover_name='Fecha (ES)',
+                                     hover_data=['Tiempo Promedio HH:MM:SS', 'IDE (kWh/km)'],
                                      labels={'Tiempo_Mediana_Red': 'Tiempo Mediano de Viaje', 'E_Tr': 'Energía de Tracción (kWh)'},
                                      color_discrete_map={'L': '#005195', 'S': '#E85500', 'D/F': '#2CA02C'})
                 
