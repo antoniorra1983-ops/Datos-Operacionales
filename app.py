@@ -1246,7 +1246,7 @@ with tabs[8]:
                 
                 df_plot['Tiempo Promedio HH:MM:SS'] = df_plot['Tiempo_Mediana_Red'].apply(minutos_a_hhmmss)
                 
-                # 🛡️ CORRECCIÓN: Tooltip robusto con listas (evita error de coerción en basevalidators de Plotly)
+                # 🛡️ CORRECCIÓN DE ESTABILIDAD: Eliminación de diccionario en hover_data por lista simple.
                 fig_mix = px.scatter(df_plot, 
                                      x='Tiempo_Mediana_Red', 
                                      y='E_Tr', 
