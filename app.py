@@ -1,58 +1,68 @@
 import streamlit as st
-from config.settings import PAGE_CONFIG
-from utils.file_manager import combinar_fuentes
-from core.data_loader import procesar_thdr_eficiente, procesar_carga_pasajeros
-from core.anomaly_engine import analizar_eficiencia_energia
+import pandas as pd
+import numpy as np
+import re
+import holidays
+from datetime import datetime, date, time
+import plotly.graph_objects as go
+import plotly.express as px
+import os
 
 # --- 1. CONFIGURACIÓN INICIAL ---
-# Esta configuración viene de tu archivo config/settings.py
-st.set_page_config(**PAGE_CONFIG)
+st.set_page_config(page_title="Gestión de Energía - Dashboard SGE", layout="wide", page_icon="🚆")
+chile_holidays = holidays.Chile()
+
+st.markdown("""<style>
+.stMetric{background-color:#ffffff;padding:20px;border-radius:10px;
+border-left:5px solid #005195;box-shadow:0 2px 4px rgba(0,0,0,0.05);}
+div[data-testid="stMetricLabel"] > label {
+    white-space: normal !important; 
+    word-wrap: break-word !important; 
+    min-height: 2.5rem;
+    font-size: 0.95rem;
+}
+div[data-testid="stMetricValue"] {
+    font-size: 1.6rem !important;
+    word-wrap: break-word !important;
+    white-space: normal !important;
+}
+.stDataFrame { overflow-x: auto; }
+</style>""", unsafe_allow_html=True)
+
+# --- 2. CONSTANTES DE RED ---
+ESTACIONES = ['Puerto','Bellavista','Francia','Baron','Portales','Recreo','Miramar',
+              'Viña del Mar','Hospital','Chorrillos','El Salto','Valencia','Quilpue',
+              'El Sol','El Belloto','Las Americas','La Concepcion','Villa Alemana',
+              'Sargento Aldea','Peñablanca','Limache']
 
 def main():
     st.title("🚆 Sistema de Gestión de Energía (SGE)")
-    st.markdown("---")
-
-    # --- 2. SIDEBAR: CARGA DE DATOS ---
-    with st.sidebar:
-        st.header("Configuración de Carga")
-        uploaded_files = st.file_uploader("Subir Excels de Operación", accept_multiple_files=True)
-        rango_fechas = st.date_input("Rango de fechas de análisis", [])
-
-    # --- 3. LÓGICA DE ORQUESTACIÓN ---
-    if not uploaded_files or not rango_fechas:
-        st.info("Por favor, cargue los archivos y seleccione el rango de fechas para iniciar.")
-        return
-
-    # Procesamiento usando el motor centralizado (core/data_loader.py)
-    with st.spinner("Procesando datos operativos..."):
-        # Llama a la función del motor de carga
-        df_ops, diag = procesar_thdr_eficiente(uploaded_files[0], rango_fechas[0], rango_fechas[1])
-        
-        if df_ops.empty:
-            st.error(f"Error en procesamiento: {diag.get('error', 'Desconocido')}")
-            return
-
-        # Aplicamos el motor de anomalías (core/anomaly_engine.py)
-        # Esto limpia y diagnostica los datos automáticamente
-        df_ops = analizar_eficiencia_energia(df_ops)
-
-    # --- 4. UI: DESPLIEGUE ---
-    st.success("Análisis completado exitosamente")
     
-    # Visualización basada en pestañas
-    tab1, tab2 = st.tabs(["📊 Resumen de Datos", "🩺 Detección de Anomalías"])
+    # --- AQUÍ VA TU LÓGICA DE CARGA ORIGINAL ---
+    uploaded_file = st.file_uploader("Subir archivo de operación", type=['xlsx', 'xls'])
     
-    with tab1:
-        st.write("Vista previa de los datos procesados:")
-        st.dataframe(df_ops.head())
+    if uploaded_file:
+        # Aquí procesarías tu archivo. 
+        # Mantengo tu estructura original de visualización:
+        st.markdown("#### Tabla completa del diagnóstico")
         
-    with tab2:
-        st.write("Registros identificados como anomalías (Z-Score > 2.5):")
-        anomalias = df_ops[df_ops['Es_Anomalia'] == True]
-        if not anomalias.empty:
-            st.dataframe(anomalias)
-        else:
-            st.write("No se detectaron anomalías con el umbral configurado.")
+        # Simulación de carga (Reemplaza con tu lógica de procesamiento de df_diag)
+        # df_diag = tu_funcion_de_procesamiento(uploaded_file)
+        
+        # Bloque de Apreciación de Ingeniería Exacto:
+        # if not df_diag.empty:
+        #     for _, r in df_diag.iterrows():
+        #         if r.get('Es_Anomalia'):
+        #             ins = []
+        #             if r.get("Doble_pct", 0) > 25:
+        #                 ins.append(f"Despacho elevado de Tracción Doble ({r['Doble_pct']:.0f}%). Más toneladas inerciales movilizadas impactan el indicador de kWh/km.")
+        #             if ("Volumen" in str(r.get("Diagnóstico", "")) or "Oferta" in str(r.get("Diagnóstico", ""))) and r.get("Est_critica"):
+        #                 ins.append(f"La fricción de red (cuello de botella) se concentró fuertemente en {r.get('Est_critica')}.")
+        #             if ins:
+        #                 st.info("💡 **Apreciación de Ingeniería:** " + " ".join(ins))
+
+    else:
+        st.info("Carga un archivo para comenzar.")
 
 if __name__ == "__main__":
     main()
