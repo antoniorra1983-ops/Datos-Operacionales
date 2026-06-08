@@ -447,16 +447,19 @@ def procesar_thdr_eficiente(file, start_date, end_date):
         def get_route(r):
             times = []
             for est in ESTACIONES:
-                est_n = _norm(est)
-                c_sal = next((c for c in df.columns if est_n in _norm(c) and 'SALIDA' in _norm(c) and c.endswith('_min')), None)
-                c_lleg = next((c for c in df.columns if est_n in _norm(c) and 'LLEGADA' in _norm(c) and c.endswith('_min')), None)
+                # Usar el motor robusto de búsqueda que ya considera alias ("BELLOTO", "VILLA", etc.)
+                c_sal_base = get_col_thdr(df, est, 'SALIDA')
+                c_lleg_base = get_col_thdr(df, est, 'LLEGADA')
                 
                 t = None
-                if c_sal and pd.notna(r.get(c_sal)): t = r[c_sal]
-                elif c_lleg and pd.notna(r.get(c_lleg)): t = r[c_lleg]
+                if c_sal_base and f"{c_sal_base}_min" in r and pd.notna(r[f"{c_sal_base}_min"]): 
+                    t = r[f"{c_sal_base}_min"]
+                elif c_lleg_base and f"{c_lleg_base}_min" in r and pd.notna(r[f"{c_lleg_base}_min"]): 
+                    t = r[f"{c_lleg_base}_min"]
                 
                 if t is not None:
                     times.append((t, est))
+                    
             if len(times) >= 2:
                 # Arreglo para trenes que cruzan la medianoche
                 adj_times = []
@@ -468,7 +471,11 @@ def procesar_thdr_eficiente(file, start_date, end_date):
                 o = SHORT_NAMES_DICT.get(adj_times[0][1], adj_times[0][1][:3])
                 d = SHORT_NAMES_DICT.get(adj_times[-1][1], adj_times[-1][1][:3])
                 return f"{o}-{d}"
-            return "Desconocido"
+            elif len(times) == 1:
+                e = SHORT_NAMES_DICT.get(times[0][1], times[0][1][:3])
+                return f"Local/Maniobra ({e})"
+            
+            return "Suprimido/Sin Ruta"
             
         df['Ruta'] = df.apply(get_route, axis=1)
         # --------------------------------------------
