@@ -37,16 +37,15 @@ ESTACIONES = [
     'Sargento Aldea','Peñablanca','Limache'
 ]
 
-# Diccionario inteligente de abreviaturas para visualización limpia (Data-to-Ink Ratio)
+# Diccionario inteligente de abreviaturas para visualización limpia
 SHORT_NAMES_DICT = {
     'Puerto':'PUE', 'Bellavista':'BEL', 'Francia':'FRA', 'Baron':'BAR', 'Portales':'POR',
     'Recreo':'REC', 'Miramar':'MIR', 'Viña del Mar':'V.MAR', 'Hospital':'HOS',
     'Chorrillos':'CHO', 'El Salto':'SAL', 'Valencia':'VAL', 'Quilpue':'QUI',
-    'El Sol':'SOL', 'El Belloto':'E.BEL', 'Las Americas':'AME', 'La Concepcion':'CON',
+    'El Sol':'SOL', 'El Belloto':'BTO', 'Las Americas':'AME', 'La Concepcion':'CON',
     'Villa Alemana':'V.ALE', 'Sargento Aldea':'S.ALD', 'Peñablanca':'PEÑ', 'Limache':'LIM'
 }
 
-# Códigos de 3 letras usados en los export de Carga de Pasajeros (encabezados de estación)
 PAX_COL_CODE = {
     'Puerto':'PUE', 'Bellavista':'BEL', 'Francia':'FRA', 'Baron':'BAR', 'Portales':'POR',
     'Recreo':'REC', 'Miramar':'MIR', 'Viña del Mar':'VIN', 'Hospital':'HOS', 'Chorrillos':'CHO',
@@ -146,11 +145,9 @@ def minutos_a_hhmmss(minutos_float):
     m = int(m_abs % 60)
     s = int(round((m_abs - int(m_abs)) * 60))
     if s == 60:
-        s = 0
-        m += 1
+        s = 0; m += 1
     if m == 60:
-        m = 0
-        h += 1
+        m = 0; h += 1
     return f"{sign}{h:02d}:{m:02d}:{s:02d}"
 
 # --- MOTOR DE EMPAREJAMIENTO DE ESTACIONES ---
@@ -164,20 +161,15 @@ def get_col_thdr(df, estacion, tipo):
         c_n = _norm(c)
         if not c_n.endswith("_MIN"): continue
         if 'PROGRAMADA' in c_n: continue
-        
         if tipo == 'SALIDA' and 'SALIDA' not in c_n: continue
         if tipo == 'LLEGADA' and 'LLEGADA' not in c_n: continue
-        
         if est_n in c_n: return c
         
         alias_map = {
             "VINA DEL MAR": ["VINA", "V. MAR", "V MAR", "VIÑA"],
-            "EL BELLOTO": ["BELLOTO"],
-            "LAS AMERICAS": ["AMERICAS"],
-            "LA CONCEPCION": ["CONCEPCION"],
-            "VILLA ALEMANA": ["VILLA", "ALEMANA", "V. ALEMANA"],
-            "SARGENTO ALDEA": ["SARGENTO", "ALDEA", "S. ALDEA"],
-            "PENABLANCA": ["PENA BLANCA", "PENABLANCA", "PEÑA BLANCA"],
+            "EL BELLOTO": ["BELLOTO"], "LAS AMERICAS": ["AMERICAS"],
+            "LA CONCEPCION": ["CONCEPCION"], "VILLA ALEMANA": ["VILLA", "ALEMANA", "V. ALEMANA"],
+            "SARGENTO ALDEA": ["SARGENTO", "ALDEA", "S. ALDEA"], "PENABLANCA": ["PENA BLANCA", "PENABLANCA", "PEÑA BLANCA"],
             "EL SALTO": ["SALTO"]
         }
         if est_n in alias_map:
@@ -192,9 +184,6 @@ def extract_series(df, col_name):
     return pd.to_numeric(s, errors='coerce')
 
 def _srv_clean_series(s):
-    # Limpia el número de servicio de forma robusta: usa el valor numérico tal cual
-    # (evita que floats como 1.0 se vuelvan "10" al quitar el punto) y solo extrae
-    # dígitos como respaldo para textos tipo 'V123'.
     num = pd.to_numeric(s, errors='coerce')
     if num.isna().any():
         resto = pd.to_numeric(pd.Series(s).astype(str).str.replace(r'\D', '', regex=True), errors='coerce')
@@ -214,14 +203,12 @@ def _robust_z(serie):
     med = s.median()
     mad = (s - med).abs().median()
     esc = _MAD_K * mad if mad > 0 else s.std(ddof=0)
-    if not esc or np.isnan(esc):
-        return pd.Series(0.0, index=s.index)
+    if not esc or np.isnan(esc): return pd.Series(0.0, index=s.index)
     return (s - med) / esc
 
 def _perfil_horario_diario(all_prmte_full, all_fact_full, df_ops=None):
     datos, freq = (all_prmte_full, 15) if all_prmte_full else (all_fact_full, 60)
-    if not datos:
-        return pd.DataFrame(columns=["Fecha", "Noche_kWh", "Pico_kW"])
+    if not datos: return pd.DataFrame(columns=["Fecha", "Noche_kWh", "Pico_kW"])
     h = pd.DataFrame(datos)
     h["Fecha"] = pd.to_datetime(h["Fecha"]).dt.normalize()
     h["Hora_n"] = h["Hora"].astype(str).str.slice(0, 2).apply(lambda x: int(x) if str(x).isdigit() else -1)
@@ -229,8 +216,7 @@ def _perfil_horario_diario(all_prmte_full, all_fact_full, df_ops=None):
     if df_ops is not None and not df_ops.empty:
         mapa_tipo = df_ops.set_index('Fecha')['Tipo Día'].to_dict()
         h['Tipo Día'] = h['Fecha'].map(mapa_tipo)
-    else:
-        h['Tipo Día'] = h['Fecha'].apply(lambda x: get_tipo_dia(x.date()))
+    else: h['Tipo Día'] = h['Fecha'].apply(lambda x: get_tipo_dia(x.date()))
 
     def _is_noche_dinamico(row):
         limite = 6 if row['Tipo Día'] == 'L' else (7 if row['Tipo Día'] == 'S' else 8)
@@ -253,33 +239,25 @@ def _contexto_dia(fecha, cc, tt):
             c_m2 = next((cols[k] for k in cols if "MOTRIZ 2" in k), None)
             c_est = next((cols[k] for k in cols if "ESTACI" in k and "MAX" in k), None)
             c_cm = next((cols[k] for k in cols if "CARGA" in k and "MAX" in k), None)
-            if c_m2 is not None:
-                out["Doble_pct"] = 100.0 * (pd.to_numeric(g[c_m2], errors="coerce").fillna(0) > 0).mean()
-            if c_cm is not None:
-                out["Ocup_max"] = pd.to_numeric(g[c_cm], errors="coerce").max()
+            if c_m2 is not None: out["Doble_pct"] = 100.0 * (pd.to_numeric(g[c_m2], errors="coerce").fillna(0) > 0).mean()
+            if c_cm is not None: out["Ocup_max"] = pd.to_numeric(g[c_cm], errors="coerce").max()
             if c_est is not None:
                 m = g[c_est].astype(str).replace("nan", np.nan).dropna()
-                if not m.empty and not m.mode().empty:
-                    out["Est_critica"] = m.mode().iloc[0]
+                if not m.empty and not m.mode().empty: out["Est_critica"] = m.mode().iloc[0]
     if tt is not None and not tt.empty and "Fecha" in tt.columns:
         g = tt[tt["Fecha"] == fecha]
         if not g.empty:
             fuentes.append("THDR")
             if pd.isna(out["Doble_pct"]) and "Unidad" in g.columns:
                 out["Doble_pct"] = 100.0 * g["Unidad"].astype(str).str.upper().eq("M").mean()
-    if fuentes:
-        out["Fuente_op"] = " + ".join(fuentes)
+    if fuentes: out["Fuente_op"] = " + ".join(fuentes)
     return out
 
 def _dur_via(t, est_sal, est_lleg):
-    if t is None or t.empty or "Fecha_Op" not in t.columns:
-        return pd.DataFrame(columns=["Fecha", "dur"])
-    
+    if t is None or t.empty or "Fecha_Op" not in t.columns: return pd.DataFrame(columns=["Fecha", "dur"])
     c_sal = get_col_thdr(t, est_sal, "SALIDA")
     c_lleg = get_col_thdr(t, est_lleg, "LLEGADA")
-    
-    if not c_sal or not c_lleg:
-        return pd.DataFrame(columns=["Fecha", "dur"])
+    if not c_sal or not c_lleg: return pd.DataFrame(columns=["Fecha", "dur"])
         
     s_sal = extract_series(t, c_sal)
     s_lleg = extract_series(t, c_lleg)
@@ -292,55 +270,42 @@ def _dur_via(t, est_sal, est_lleg):
 def _thdr_tiempos(df_thdr_v1, df_thdr_v2):
     alld = pd.concat([_dur_via(df_thdr_v1, "PUERTO", "LIMACHE"),
                       _dur_via(df_thdr_v2, "LIMACHE", "PUERTO")], ignore_index=True)
-    if alld.empty:
-        return pd.DataFrame(columns=["Fecha", "Viaje_prom", "Brecha_min"])
+    if alld.empty: return pd.DataFrame(columns=["Fecha", "Viaje_prom", "Brecha_min"])
     gb = alld.groupby("Fecha")["dur"]
     return pd.DataFrame({"Viaje_prom": gb.mean(), "Brecha_min": gb.max() - gb.min()}).reset_index()
 
-def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
-                           df_carga_v1=None, df_carga_v2=None, df_thdr_v1=None, df_thdr_v2=None,
-                           z_alerta=2.5, z_fuerte=3.5):
-    if df_ops is None or df_ops.empty:
-        return pd.DataFrame()
+def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None, df_carga_v1=None, df_carga_v2=None, df_thdr_v1=None, df_thdr_v2=None, z_alerta=2.5, z_fuerte=3.5):
+    if df_ops is None or df_ops.empty: return pd.DataFrame()
     d = df_ops[df_ops["E_Total"] > 0].copy().reset_index(drop=True)
-    if d.empty:
-        return d
+    if d.empty: return d
     d["Fecha"] = pd.to_datetime(d["Fecha"]).dt.normalize()
-    if "kWh_por_PAX" not in d.columns:
-        d["kWh_por_PAX"] = d["E_Tr"] / d["PAX"].replace(0, np.nan)
+    if "kWh_por_PAX" not in d.columns: d["kWh_por_PAX"] = d["E_Tr"] / d["PAX"].replace(0, np.nan)
         
     perfil = _perfil_horario_diario(all_prmte_full, all_fact_full, d)
-    if not perfil.empty:
-        d = d.merge(perfil, on="Fecha", how="left")
+    if not perfil.empty: d = d.merge(perfil, on="Fecha", how="left")
     for c in ["Noche_kWh", "Pico_kW"]:
-        if c not in d.columns:
-            d[c] = np.nan
+        if c not in d.columns: d[c] = np.nan
 
     zcols = {}
     for col in _METRICAS_ANOM:
-        if col not in d.columns:
-            continue
+        if col not in d.columns: continue
         zc = "z_" + col
         zcols[col] = zc
         d[zc] = np.nan
         for tipo, idx in d.groupby("Tipo Día").groups.items():
             sub = d.loc[idx, col]
             valid = sub[(sub.notna()) & (sub != 0)]
-            if len(valid) < 4:
-                continue
+            if len(valid) < 4: continue
             d.loc[valid.index, zc] = _robust_z(valid)
 
     _cl = [x for x in [df_carga_v1, df_carga_v2] if x is not None and not x.empty]
     cc = pd.concat(_cl, ignore_index=True) if _cl else pd.DataFrame()
-    if not cc.empty:
-        cc["Fecha"] = pd.to_datetime(cc["Fecha"]).dt.normalize()
+    if not cc.empty: cc["Fecha"] = pd.to_datetime(cc["Fecha"]).dt.normalize()
     _tl = [x for x in [df_thdr_v1, df_thdr_v2] if x is not None and not x.empty]
     tt = pd.concat(_tl, ignore_index=True) if _tl else pd.DataFrame()
-    if not tt.empty and "Fecha_Op" in tt.columns:
-        tt["Fecha"] = pd.to_datetime(tt["Fecha_Op"]).dt.normalize()
+    if not tt.empty and "Fecha_Op" in tt.columns: tt["Fecha"] = pd.to_datetime(tt["Fecha_Op"]).dt.normalize()
     ctx = pd.DataFrame([_contexto_dia(f, cc, tt) for f in d["Fecha"]], index=d.index)
-    for c in ["Doble_pct", "Est_critica", "Ocup_max", "Fuente_op"]:
-        d[c] = ctx[c].values
+    for c in ["Doble_pct", "Est_critica", "Ocup_max", "Fuente_op"]: d[c] = ctx[c].values
     d = d.merge(_thdr_tiempos(df_thdr_v1, df_thdr_v2), on="Fecha", how="left")
 
     niveles, sevs, diags = [], [], []
@@ -359,37 +324,27 @@ def diagnosticar_anomalias(df_ops, all_prmte_full=None, all_fact_full=None,
 
         if z_en is not None and z_en > 0:
             sintoma_principal = "📈 Sobreconsumo Crítico de Energía"
-            if fired.get("IDE (kWh/km)", 0) >= z_alerta:
-                explicacion.append("Pérdida severa de eficiencia traccional (IDE disparado). Posible conducción en 'Stop-and-Go' o exceso de masa inercial.")
-            elif fired.get("Servicios", 0) >= z_alerta:
-                explicacion.append("Exceso de Oferta: Aumento de energía justificado por un despacho masivo de trenes superior al promedio de este tipo de día.")
-            else:
-                explicacion.append("Alza en consumo bruto sin justificación aparente en los kilómetros recorridos.")
+            if fired.get("IDE (kWh/km)", 0) >= z_alerta: explicacion.append("Pérdida severa de eficiencia traccional (IDE disparado). Posible conducción en 'Stop-and-Go' o exceso de masa inercial.")
+            elif fired.get("Servicios", 0) >= z_alerta: explicacion.append("Exceso de Oferta: Aumento de energía justificado por un despacho masivo de trenes superior al promedio de este tipo de día.")
+            else: explicacion.append("Alza en consumo bruto sin justificación aparente en los kilómetros recorridos.")
         elif z_en is not None and z_en < 0:
             sintoma_principal = "📉 Caída Atípica de Consumo"
-            if fired.get("Servicios", 0) <= -z_alerta:
-                explicacion.append("Reducción de Oferta: Operaron significativamente menos trenes.")
-            elif fired.get("IDE (kWh/km)", 0) <= -z_alerta:
-                explicacion.append("Alta Eficiencia Traccional detectada (menos kWh/km de lo normal).")
-            else:
-                explicacion.append("Posible pérdida de datos de telemetría/facturación en este día.")
+            if fired.get("Servicios", 0) <= -z_alerta: explicacion.append("Reducción de Oferta: Operaron significativamente menos trenes.")
+            elif fired.get("IDE (kWh/km)", 0) <= -z_alerta: explicacion.append("Alta Eficiencia Traccional detectada (menos kWh/km de lo normal).")
+            else: explicacion.append("Posible pérdida de datos de telemetría/facturación en este día.")
 
         if fired.get("E_12", 0) >= z_alerta and fired.get("Noche_kWh", 0) >= z_alerta:
             sintoma_principal = "🌙 Alerta de Consumo Parásito"
             explicacion = ["Consumo nocturno disparado. Posibles trenes energizados operando en vacío durante la madrugada."]
-        elif fired.get("Noche_kWh", 0) >= z_alerta:
-            explicacion.append("Pico anómalo de demanda eléctrica durante la ventana nocturna.")
+        elif fired.get("Noche_kWh", 0) >= z_alerta: explicacion.append("Pico anómalo de demanda eléctrica durante la ventana nocturna.")
 
         otras = [f"{_METRICAS_ANOM.get(m, m)} {'alto' if z>0 else 'bajo'}" for m, z in fired.items() if m not in ["E_Total", "E_Tr", "IDE (kWh/km)", "Servicios", "E_12", "Noche_kWh"]]
-        if otras:
-            explicacion.append("Anomalías adicionales en: " + ", ".join(otras) + ".")
+        if otras: explicacion.append("Anomalías adicionales en: " + ", ".join(otras) + ".")
 
         texto_diag = f"**{sintoma_principal}**\n\n" + "\n".join([f"- {e}" for e in explicacion])
         diags.append(texto_diag)
 
-    d["Nivel"] = niveles
-    d["Severidad"] = sevs
-    d["Diagnóstico"] = diags
+    d["Nivel"] = niveles; d["Severidad"] = sevs; d["Diagnóstico"] = diags
     return d
 
 # --- 4. PERSISTENCIA EN DISCO ---
@@ -488,8 +443,37 @@ def procesar_thdr_eficiente(file, start_date, end_date):
             if any(k in str(col) for k in ['Hora Llegada','Hora Salida','Hora Salida Programada']):
                 df[f"{col}_min"] = df[col].apply(convertir_a_minutos)
                 
-        if 'Unidad' in df.columns:
-            df['Unidad'] = df['Unidad'].fillna('S').replace('','S')
+        # --- ALGORITMO DETECCIÓN DINÁMICA DE RUTA ---
+        def get_route(r):
+            times = []
+            for est in ESTACIONES:
+                est_n = _norm(est)
+                c_sal = next((c for c in df.columns if est_n in _norm(c) and 'SALIDA' in _norm(c) and c.endswith('_min')), None)
+                c_lleg = next((c for c in df.columns if est_n in _norm(c) and 'LLEGADA' in _norm(c) and c.endswith('_min')), None)
+                
+                t = None
+                if c_sal and pd.notna(r.get(c_sal)): t = r[c_sal]
+                elif c_lleg and pd.notna(r.get(c_lleg)): t = r[c_lleg]
+                
+                if t is not None:
+                    times.append((t, est))
+            if len(times) >= 2:
+                # Arreglo para trenes que cruzan la medianoche
+                adj_times = []
+                has_late = any(x[0] > 1200 for x in times)
+                for t, e in times:
+                    if has_late and t < 240: adj_times.append((t + 1440, e))
+                    else: adj_times.append((t, e))
+                adj_times.sort(key=lambda x: x[0])
+                o = SHORT_NAMES_DICT.get(adj_times[0][1], adj_times[0][1][:3])
+                d = SHORT_NAMES_DICT.get(adj_times[-1][1], adj_times[-1][1][:3])
+                return f"{o}-{d}"
+            return "Desconocido"
+            
+        df['Ruta'] = df.apply(get_route, axis=1)
+        # --------------------------------------------
+        
+        if 'Unidad' in df.columns: df['Unidad'] = df['Unidad'].fillna('S').replace('','S')
         else:
             c_m2 = next((c for c in df.columns if 'Motriz 2' in str(c)), None)
             df['Unidad'] = df[c_m2].apply(lambda x: 'M' if parse_latam_number(x)>0 else 'S') if c_m2 else 'S'
@@ -524,8 +508,7 @@ def procesar_carga_pasajeros(f, start_date, end_date):
                 try: df = pd.read_csv(f, header=h_idx, encoding='utf-8')
                 except UnicodeDecodeError:
                     f.seek(0); df = pd.read_csv(f, header=h_idx, encoding='latin-1')
-            else:
-                df = pd.read_excel(f, engine=eu, header=h_idx)
+            else: df = pd.read_excel(f, engine=eu, header=h_idx)
                 
             df.columns = [str(c).strip() for c in df.columns]
             
@@ -539,31 +522,25 @@ def procesar_carga_pasajeros(f, start_date, end_date):
                 df = df.dropna(subset=['Fecha'])
                 df = df[(df['Fecha'].dt.date >= start_date) & (df['Fecha'].dt.date <= end_date)]
             
-            if df.empty:
-                return pd.DataFrame()
+            if df.empty: return pd.DataFrame()
                 
             c_tot = next((c for c in df.columns if 'TOTAL' in str(c).upper() and 'BORDO' in str(c).upper()), None)
-            if c_tot:
-                df['Total a Bordo'] = pd.to_numeric(df[c_tot], errors='coerce').fillna(0)
-            elif 'Total a Bordo' in df.columns:
-                df['Total a Bordo'] = pd.to_numeric(df['Total a Bordo'], errors='coerce').fillna(0)
+            if c_tot: df['Total a Bordo'] = pd.to_numeric(df[c_tot], errors='coerce').fillna(0)
+            elif 'Total a Bordo' in df.columns: df['Total a Bordo'] = pd.to_numeric(df['Total a Bordo'], errors='coerce').fillna(0)
                 
             c_est_max = next((c for c in df.columns if 'ESTACI' in str(c).upper() and 'MAX' in _norm(c)), None)
-            if c_est_max:
-                df['Estación Máxima'] = df[c_est_max]
+            if c_est_max: df['Estación Máxima'] = df[c_est_max]
                 
             return df
         return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+    except Exception: return pd.DataFrame()
 
 def fig_perfil_velocidades():
     kms = [(s[0]+s[1])/2/1000 for s in SPEED_PROFILE]
     vels_n = [s[3] if s[3] > 0 else 0 for s in SPEED_PROFILE]
     vels_r = [s[4] if s[4] > 0 else 0 for s in SPEED_PROFILE]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=kms, y=vels_n, mode='lines', name='Vel. Normal',
-                              line=dict(color='#005195', width=2), fill='tozeroy', fillcolor='rgba(0,81,149,0.12)'))
+    fig.add_trace(go.Scatter(x=kms, y=vels_n, mode='lines', name='Vel. Normal', line=dict(color='#005195', width=2), fill='tozeroy', fillcolor='rgba(0,81,149,0.12)'))
     fig.add_trace(go.Scatter(x=kms, y=vels_r, mode='lines', name='Vel. RM', line=dict(color='#E85500', width=1.5, dash='dot')))
     for est, km_est in zip(ESTACIONES, KM_ACUM):
         fig.add_vline(x=km_est, line_width=1, line_dash='dot', line_color='gray')
@@ -607,7 +584,6 @@ with st.sidebar:
                     if cb2.button("🗑️",key=f"del_{_a}"): os.remove(_a); st.rerun()
             else: st.caption(f"{_labels[_key]}: sin archivos")
 
-# Combinar uploads
 f_v1_all   = combinar_fuentes(f_v1,         DATA_DIRS["v1"])
 f_v2_all   = combinar_fuentes(f_v2,         DATA_DIRS["v2"])
 f_umr_all  = combinar_fuentes(f_umr,        DATA_DIRS["umr"])
@@ -617,7 +593,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v19_dir_split"
+_CACHE_VERSION = "v21_rutas_dinamicas"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -754,12 +730,12 @@ elif _hay_archivos and _recalcular:
         df_ops['Fecha (ES)'] = df_ops['Fecha'].apply(obtener_fecha_es)
 
         def jerarquia(row):
-            if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
-            elif row['E_Prmte']>0:  tot,src=row['E_Prmte'],"PRMTE"
-            elif row['E_Seat_T']>0: tot,src=row['E_Seat_T'],"SEAT"
+            if row.get('E_Fact',0)>0:    tot,src=row['E_Fact'],"Factura"
+            elif row.get('E_Prmte',0)>0:  tot,src=row['E_Prmte'],"PRMTE"
+            elif row.get('E_Seat_T',0)>0: tot,src=row['E_Seat_T'],"SEAT"
             else: return 0,0,0,0,0,"N/A"
-            r_tr=row['E_Seat_Tr']/row['E_Seat_T'] if row['E_Seat_T']>0 else 0.85
-            r_12=row['E_Seat_12']/row['E_Seat_T'] if row['E_Seat_T']>0 else 0.15
+            r_tr=row['E_Seat_Tr']/row['E_Seat_T'] if row.get('E_Seat_T',0)>0 else 0.85
+            r_12=row['E_Seat_12']/row['E_Seat_T'] if row.get('E_Seat_T',0)>0 else 0.15
             return tot,tot*r_tr,tot*r_12,r_tr*100,r_12*100,src
             
         df_ops[['E_Total','E_Tr','E_12','% Tracción','% 12 kV','Fuente']]=df_ops.apply(jerarquia,axis=1,result_type='expand')
@@ -790,40 +766,49 @@ elif _hay_archivos and _recalcular:
         df_carga_v2 = pd.concat(p_cv2, ignore_index=True) if p_cv2 else pd.DataFrame()
 
     if not df_ops.empty:
+        # AGREGACIÓN DINÁMICA DE RUTAS (REEMPLAZA AL ANTIGUO PU-LI / LI-PU FIJOS)
         if not df_thdr_v1.empty or not df_thdr_v2.empty:
-            s1 = df_thdr_v1.groupby('Fecha_Op').size().reset_index(name='Serv_PULI') if not df_thdr_v1.empty else pd.DataFrame(columns=['Fecha_Op', 'Serv_PULI'])
-            s2 = df_thdr_v2.groupby('Fecha_Op').size().reset_index(name='Serv_LIPU') if not df_thdr_v2.empty else pd.DataFrame(columns=['Fecha_Op', 'Serv_LIPU'])
-            df_servicios = pd.merge(s1, s2, on='Fecha_Op', how='outer').fillna(0)
-            df_servicios['Servicios'] = df_servicios['Serv_PULI'] + df_servicios['Serv_LIPU']
-            tk1 = df_thdr_v1.groupby('Fecha_Op')['Tren-Km'].sum().reset_index(name='TrenKm_PULI') if (not df_thdr_v1.empty and 'Tren-Km' in df_thdr_v1.columns) else pd.DataFrame(columns=['Fecha_Op', 'TrenKm_PULI'])
-            tk2 = df_thdr_v2.groupby('Fecha_Op')['Tren-Km'].sum().reset_index(name='TrenKm_LIPU') if (not df_thdr_v2.empty and 'Tren-Km' in df_thdr_v2.columns) else pd.DataFrame(columns=['Fecha_Op', 'TrenKm_LIPU'])
-            df_servicios = df_servicios.merge(tk1, on='Fecha_Op', how='outer').merge(tk2, on='Fecha_Op', how='outer').fillna(0)
-            df_servicios = df_servicios.rename(columns={'Fecha_Op': 'Fecha'})
-            df_servicios['Fecha'] = pd.to_datetime(df_servicios['Fecha']).dt.normalize()
-            df_ops = df_ops.merge(df_servicios[['Fecha', 'Servicios', 'Serv_PULI', 'Serv_LIPU', 'TrenKm_PULI', 'TrenKm_LIPU']], on='Fecha', how='left').fillna({'Servicios': 0, 'Serv_PULI': 0, 'Serv_LIPU': 0, 'TrenKm_PULI': 0, 'TrenKm_LIPU': 0})
+            df_thdr_all = pd.concat([df_thdr_v1, df_thdr_v2], ignore_index=True)
+            if 'Ruta' in df_thdr_all.columns:
+                s_rutas = df_thdr_all.groupby(['Fecha_Op', 'Ruta']).size().unstack(fill_value=0).reset_index()
+                s_rutas = s_rutas.rename(columns={'Fecha_Op': 'Fecha'})
+                rutas_detectadas = [c for c in s_rutas.columns if c != 'Fecha']
+                s_rutas['Servicios'] = s_rutas[rutas_detectadas].sum(axis=1)
+                
+                tk_rutas = df_thdr_all.groupby(['Fecha_Op', 'Ruta'])['Tren-Km'].sum().unstack(fill_value=0).reset_index()
+                tk_rutas = tk_rutas.rename(columns={'Fecha_Op': 'Fecha'})
+                tk_cols_map = {r: f"TrenKm_{r}" for r in rutas_detectadas}
+                tk_rutas = tk_rutas.rename(columns=tk_cols_map)
+                
+                df_servicios = pd.merge(s_rutas, tk_rutas, on='Fecha', how='outer').fillna(0)
+                df_servicios['Fecha'] = pd.to_datetime(df_servicios['Fecha']).dt.normalize()
+                
+                df_ops = df_ops.merge(df_servicios, on='Fecha', how='left').fillna(0)
+            else:
+                rutas_detectadas = []
+                df_ops['Servicios'] = 0
         else:
+            rutas_detectadas = []
             df_ops['Servicios'] = 0
-            df_ops['Serv_PULI'] = 0
-            df_ops['Serv_LIPU'] = 0
-            df_ops['TrenKm_PULI'] = 0
-            df_ops['TrenKm_LIPU'] = 0
 
+        # PAX SE MANTIENE POR VÍA DEBIDO A ORIGEN DE DATOS DE EXCEL
         if not df_carga_v1.empty or not df_carga_v2.empty:
-            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_PULI') if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'PAX_PULI'])
-            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_LIPU') if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'PAX_LIPU'])
+            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_Vía1') if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'PAX_Vía1'])
+            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_Vía2') if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'PAX_Vía2'])
             df_pax = pd.merge(p1, p2, on='Fecha', how='outer').fillna(0)
-            df_pax['PAX'] = df_pax['PAX_PULI'] + df_pax['PAX_LIPU']
+            df_pax['PAX'] = df_pax['PAX_Vía1'] + df_pax['PAX_Vía2']
             df_pax['Fecha'] = pd.to_datetime(df_pax['Fecha']).dt.normalize()
-            df_ops = df_ops.merge(df_pax[['Fecha', 'PAX', 'PAX_PULI', 'PAX_LIPU']], on='Fecha', how='left').fillna({'PAX': 0, 'PAX_PULI': 0, 'PAX_LIPU': 0})
+            df_ops = df_ops.merge(df_pax[['Fecha', 'PAX', 'PAX_Vía1', 'PAX_Vía2']], on='Fecha', how='left').fillna({'PAX': 0, 'PAX_Vía1': 0, 'PAX_Vía2': 0})
         else:
             df_ops['PAX'] = 0
-            df_ops['PAX_PULI'] = 0
-            df_ops['PAX_LIPU'] = 0
+            df_ops['PAX_Vía1'] = 0
+            df_ops['PAX_Vía2'] = 0
 
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'_cache_key':_cache_key,
-                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2})
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2,
+                              'rutas_detectadas': rutas_detectadas if 'rutas_detectadas' in locals() else []})
 
 # --- 8. TABS DE VISUALIZACIÓN ---
 tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Perfil Horario & Anomalías",
@@ -867,77 +852,83 @@ with tabs[0]:
             if 'Fecha (ES)' in df_resumen.columns:
                 hover_config['Fecha'] = False       
                 hover_config['Fecha (ES)'] = True   
-            else:
-                hover_config['Fecha'] = True        
+            else: hover_config['Fecha'] = True        
                 
             for col in ['Tipo Día', 'Nombre Feriado']:
-                if col in df_resumen.columns: 
-                    hover_config[col] = True
+                if col in df_resumen.columns: hover_config[col] = True
             
-            # ====== Gráficos independientes (uno por fila, cada uno con su tarjeta) ======
+            rutas_d = st.session_state.get('rutas_detectadas', [])
 
-            # --- 1. Servicios por sentido (PU->LI / LI->PU) ---
+            # --- 1. Servicios Inteligentes por Ruta (Dinámico) ---
             c_chart, c_card = st.columns([3, 1])
             with c_chart:
-                fig_serv = px.bar(df_resumen, x='Fecha', y=['Serv_PULI', 'Serv_LIPU'],
-                                  barmode='group',
-                                  color_discrete_map={'Serv_PULI': '#005195', 'Serv_LIPU': '#66A5D9'},
-                                  hover_data=hover_config, title="Servicios por Sentido")
-                fig_serv.for_each_trace(lambda t: t.update(name={'Serv_PULI': 'PU→LI (Vía 1)', 'Serv_LIPU': 'LI→PU (Vía 2)'}.get(t.name, t.name)))
-                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
-                fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                       legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
+                y_serv = [r for r in rutas_d if r in df_resumen.columns]
+                if y_serv:
+                    fig_serv = px.bar(df_resumen, x='Fecha', y=y_serv,
+                                      barmode='group',
+                                      hover_data=hover_config, title="Servicios Programados (Tipología Real de Ruta)")
+                    fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=11))
+                    fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                           legend=dict(title="Tipo de Ruta", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                           bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                    ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
+                else:
+                    st.info("Sin datos de rutas para Servicios")
+                    ev_serv = None
+                    
             with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.metric("Total Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
-                st.metric("PU→LI (Vía 1)", f"{int(df_resumen['Serv_PULI'].sum()):,}")
-                st.metric("LI→PU (Vía 2)", f"{int(df_resumen['Serv_LIPU'].sum()):,}")
+                for r in y_serv:
+                    val = int(df_resumen[r].sum())
+                    if val > 0: st.metric(f"Servicios {r}", f"{val:,}")
 
             st.divider()
 
-            # --- 2. Pasajeros por sentido (PU->LI / LI->PU) ---
+            # --- 2. Pasajeros por Vía (Mantiene la lógica del Excel Original) ---
             c_chart, c_card = st.columns([3, 1])
             with c_chart:
-                fig_pax = px.bar(df_resumen, x='Fecha', y=['PAX_PULI', 'PAX_LIPU'],
+                fig_pax = px.bar(df_resumen, x='Fecha', y=['PAX_Vía1', 'PAX_Vía2'],
                                  barmode='group',
-                                 color_discrete_map={'PAX_PULI': '#E85500', 'PAX_LIPU': '#F4A06B'},
-                                 hover_data=hover_config, title="Pasajeros por Sentido (PAX)")
-                fig_pax.for_each_trace(lambda t: t.update(name={'PAX_PULI': 'PU→LI (Vía 1)', 'PAX_LIPU': 'LI→PU (Vía 2)'}.get(t.name, t.name)))
-                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                                 color_discrete_map={'PAX_Vía1': '#E85500', 'PAX_Vía2': '#F4A06B'},
+                                 hover_data=hover_config, title="Pasajeros por Vía (PAX)")
+                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=11))
                 fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                      legend=dict(title="Vía Comercial", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
             with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.metric("Total PAX", f"{int(df_resumen['PAX'].sum()):,}")
-                st.metric("PU→LI (Vía 1)", f"{int(df_resumen['PAX_PULI'].sum()):,}")
-                st.metric("LI→PU (Vía 2)", f"{int(df_resumen['PAX_LIPU'].sum()):,}")
+                st.metric("Pasajeros Vía 1", f"{int(df_resumen['PAX_Vía1'].sum()):,}")
+                st.metric("Pasajeros Vía 2", f"{int(df_resumen['PAX_Vía2'].sum()):,}")
 
             st.divider()
 
-            # --- 3. Tren-Km por sentido (derivado de la malla THDR) ---
+            # --- 3. Tren-Km por Ruta (Dinámico) ---
             c_chart, c_card = st.columns([3, 1])
             with c_chart:
-                fig_tk = px.bar(df_resumen, x='Fecha', y=['TrenKm_PULI', 'TrenKm_LIPU'],
-                                barmode='group',
-                                color_discrete_map={'TrenKm_PULI': '#2CA02C', 'TrenKm_LIPU': '#98DF8A'},
-                                hover_data=hover_config, title="Tren-Km por Sentido (THDR)")
-                fig_tk.for_each_trace(lambda t: t.update(name={'TrenKm_PULI': 'PU→LI (Vía 1)', 'TrenKm_LIPU': 'LI→PU (Vía 2)'}.get(t.name, t.name)))
-                fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-                fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                     bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_tk = st.plotly_chart(fig_tk, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+                tk_cols = [f"TrenKm_{r}" for r in rutas_d if f"TrenKm_{r}" in df_resumen.columns]
+                if tk_cols:
+                    fig_tk = px.bar(df_resumen, x='Fecha', y=tk_cols,
+                                    barmode='group',
+                                    hover_data=hover_config, title="Tren-Km Programado por Ruta (THDR)")
+                    # Limpiar nombres en la leyenda quitando "TrenKm_"
+                    fig_tk.for_each_trace(lambda t: t.update(name=t.name.replace("TrenKm_", "")))
+                    fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                    fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                         legend=dict(title="Tipo de Ruta", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                         bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                    ev_tk = st.plotly_chart(fig_tk, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+                else: ev_tk = None
             with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
-                tk_total = df_resumen['TrenKm_PULI'].sum() + df_resumen['TrenKm_LIPU'].sum()
+                tk_total = sum([df_resumen[c].sum() for c in tk_cols]) if tk_cols else 0
                 st.metric("Tren-Km Total", f"{tk_total:,.2f} km")
-                st.metric("PU→LI (Vía 1)", f"{df_resumen['TrenKm_PULI'].sum():,.2f} km")
-                st.metric("LI→PU (Vía 2)", f"{df_resumen['TrenKm_LIPU'].sum():,.2f} km")
-            st.caption("Tren-Km estimado desde la malla THDR (43,13 km por servicio; ×2 en tracción doble). Es la oferta programada, distinta del Odómetro real (UMR).")
+                for c in tk_cols:
+                    val = df_resumen[c].sum()
+                    if val > 0: st.metric(f"Tren-Km {c.replace('TrenKm_','')}", f"{val:,.2f} km")
+            st.caption("Tren-Km estimado desde la malla THDR. Es la oferta programada, distinta del Odómetro real (UMR).")
 
             st.divider()
 
@@ -969,9 +960,8 @@ with tabs[0]:
                 ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                _tot_tk_umr = df_resumen['Tren-Km [km]'].sum()
                 _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
-                umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
+                umr_global = (tk_total / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
                 st.metric("Tasa UMR Global", f"{umr_global:,.2f} %")
 
             st.divider()
@@ -1014,7 +1004,6 @@ with tabs[0]:
                 st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
 
             chart_events = [ev_serv, ev_pax, ev_tk, ev_odo, ev_umr, ev_ener, ev_ide_bar]
-            
             for ev in chart_events:
                 if ev and isinstance(ev, dict) and ev.get('selection') and ev['selection'].get('points'):
                     clicked_x = ev['selection']['points'][0].get('x')
@@ -1024,8 +1013,7 @@ with tabs[0]:
                             if st.session_state.drilldown_date != clicked_dt:
                                 st.session_state.drilldown_date = clicked_dt
                                 st.rerun()
-                        except Exception:
-                            pass
+                        except Exception: pass
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
@@ -1160,8 +1148,7 @@ with tabs[4]:
             name='Consumo Promedio'
         ))
         
-        fig_curva.update_layout(xaxis_title="Hora del Día", yaxis_title="Consumo (kWh)", hovermode="x unified",
-                                margin=dict(t=30, b=0, l=0, r=0))
+        fig_curva.update_layout(xaxis_title="Hora del Día", yaxis_title="Consumo (kWh)", hovermode="x unified", margin=dict(t=30, b=0, l=0, r=0))
         st.plotly_chart(fig_curva, use_container_width=True)
         
         st.info("💡 **Peak Shaving:** El área sombreada celeste representa el 'consumo normal' histórico de la flota a esa hora. Si un día el consumo rompe la barrera superior, podría generar altos **cargos por potencia máxima**. Asegúrate de que los despachos de trenes (THDR) no coincidan exactamente en el mismo segundo para aplanar esta curva.")
@@ -1256,7 +1243,6 @@ with tabs[8]:
             format_func=lambda x: {"L": "Laboral (L)", "S": "Sábado (S)", "D/F": "Domingo y Festivo (D/F)"}.get(x, x)
         )
         
-        # Filtrar matemáticamente todas las bases de datos subyacentes
         fechas_validas = df_ops[df_ops['Tipo Día'].isin(filtro_dia_multi)]['Fecha']
         df_ops_filt = df_ops[df_ops['Fecha'].isin(fechas_validas)]
         df_thdr_v1_filt = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_validas)]
@@ -1302,7 +1288,6 @@ with tabs[8]:
 
             df_mixto = pd.merge(df_ops_filt, df_tiempos[['Fecha', 'Tiempo_Mediana_Red']], on='Fecha', how='inner')
             df_plot = df_mixto.copy()
-            # Blindaje: numéricos reales y sin NaN/inf (evita el ValueError de Plotly en 'size')
             for _c in ['Tiempo_Mediana_Red', 'E_Tr', 'PAX', 'IDE (kWh/km)']:
                 if _c in df_plot.columns:
                     df_plot[_c] = pd.to_numeric(df_plot[_c], errors='coerce')
@@ -1318,7 +1303,6 @@ with tabs[8]:
                 
                 df_plot['Tiempo Promedio HH:MM:SS'] = df_plot['Tiempo_Mediana_Red'].apply(minutos_a_hhmmss)
                 
-                # 🛡️ CORRECCIÓN DE ESTABILIDAD: Eliminación de diccionario en hover_data por lista simple.
                 try:
                     fig_mix = px.scatter(
                         df_plot,
@@ -1331,7 +1315,6 @@ with tabs[8]:
                         labels={'Tiempo_Mediana_Red': 'Tiempo Mediano de Viaje', 'E_Tr': 'Energía de Tracción (kWh)'},
                         color_discrete_map={'L': '#005195', 'S': '#E85500', 'D/F': '#2CA02C'})
                 except Exception:
-                    # Fallback sin 'size' si una versión estricta de Plotly rechaza tamaños no finitos
                     fig_mix = px.scatter(
                         df_plot,
                         x='Tiempo_Mediana_Red',
@@ -1347,19 +1330,16 @@ with tabs[8]:
                 
                 st.divider()
                 
-                # --- FUNCIÓN DE EXTRACCIÓN DE PAX (MOTOR ESPACIO-TEMPORAL CORRECTO) ---
                 def extraer_pax_heatmap(df_carga_filt, df_thdr_filt, valid_stations):
                     if df_carga_filt.empty or df_thdr_filt.empty: return []
                     df_c = df_carga_filt.copy()
                     
-                    # Identificar columnas de servicio para el cruce
                     c_serv_c = next((c for c in df_c.columns if 'THDR' in str(c).upper() or 'VIAJE' in str(c).upper() or 'SERV' in str(c).upper()), None)
                     c_serv_t = next((c for c in df_thdr_filt.columns if 'SERV' in str(c).upper() or 'VIAJE' in str(c).upper() or 'THDR' in str(c).upper()), None)
                     
                     if not c_serv_c or not c_serv_t:
                         return []
 
-                    # Limpiar Servicio para que sea puro número
                     df_c['_srv_clean'] = _srv_clean_series(df_c[c_serv_c])
                     t_sub = df_thdr_filt.copy()
                     t_sub['_srv_clean'] = _srv_clean_series(t_sub[c_serv_t])
@@ -1392,16 +1372,12 @@ with tabs[8]:
                     
                     for est in valid_stations:
                         est_n = _norm(est)
-                        
-                        # 1. Buscar la columna de pasajeros para esta estación
                         c_est = None
                         est_code = _norm(PAX_COL_CODE.get(est, ''))
-                        # 1a. Match exacto por código de 3 letras del export (PUE, BEL, VIN, SLT, VAM, SGA...)
                         if est_code:
                             for c in df_c.columns:
                                 if _norm(c).strip() == est_code:
                                     c_est = c; break
-                        # 1b. Respaldo: nombre o alias contenido en el encabezado
                         if not c_est:
                             for c in df_c.columns:
                                 cn = _norm(c)
@@ -1413,22 +1389,17 @@ with tabs[8]:
                                         if alias in cn: c_est = c; break
                                     if c_est: break
                                 
-                        # 2. Buscar la hora de paso por esta estación en la THDR
                         c_time = get_col_thdr(t_sub, est, 'SALIDA')
                         if not c_time:
                             c_time = get_col_thdr(t_sub, est, 'LLEGADA')
                             
                         if c_est and c_time:
                             s_time = extract_series(t_sub, c_time)
-                            
-                            # Crear un dataframe temporal de THDR solo con el servicio y la hora en ESTA estación
                             t_est = pd.DataFrame({
                                 'Fecha_Op': t_sub['Fecha_Op'], 
                                 '_srv_clean': t_sub['_srv_clean'], 
                                 'Hora_Estacion': (s_time // 60).astype(float)
                             })
-                            
-                            # Cruzar con los pasajeros de esa estación
                             merged = pd.merge(df_c[['Fecha', '_srv_clean', c_est]], t_est,
                                               left_on=['Fecha', '_srv_clean'], 
                                               right_on=['Fecha_Op', '_srv_clean'], 
@@ -1444,7 +1415,6 @@ with tabs[8]:
                                 merged['Estacion'] = SHORT_NAMES_DICT[est]
                                 pax_data.append(merged[['Hora_Estacion', 'Estacion', 'Pax']])
                                 
-                    # 🛡️ Fallback si no encontró estaciones individuales
                     if not pax_data:
                         c_tot = next((c for c in df_c.columns if 'TOTAL' in str(c).upper() and 'BORDO' in str(c).upper()), None)
                         c_orig = None
@@ -1582,7 +1552,6 @@ with tabs[8]:
                         st.markdown("##### 👥 Carga de Pasajeros")
                         if pax_data_v1:
                             df_pax_full = pd.concat(pax_data_v1)
-                            # UTILIZANDO PROMEDIO (MEAN) PARA VOLUMETRÍA
                             df_pax_heat = df_pax_full.groupby(['Estacion', 'Hora_Estacion'])['Pax'].mean().reset_index()
                             
                             pivot_pax = df_pax_heat.pivot(index='Estacion', columns='Hora_Estacion', values='Pax')
@@ -1708,7 +1677,6 @@ with tabs[8]:
                         st.markdown("##### 👥 Carga de Pasajeros (Vía 2)")
                         if pax_data_v2:
                             df_pax_full_v2 = pd.concat(pax_data_v2)
-                            # UTILIZANDO PROMEDIO (MEAN) PARA VOLUMETRÍA
                             df_pax_heat_v2 = df_pax_full_v2.groupby(['Estacion', 'Hora_Estacion'])['Pax'].mean().reset_index()
                             pivot_pax_v2 = df_pax_heat_v2.pivot(index='Estacion', columns='Hora_Estacion', values='Pax')
                             
@@ -1875,51 +1843,7 @@ with tabs[10]:
                                 v_doble = len(df_t_filt[df_t_filt['Unidad'].astype(str).str.contains('M', case=False, na=False)])
                                 thdr_msg = f"**{total_viajes:,} servicios** en total. Uso de Tracción Doble: **{(v_doble/total_viajes*100) if total_viajes>0 else 0:.1f}%**."
 
-                        def formato_hora(h):
-                            if pd.isna(h): return "N/A"
-                            if isinstance(h, (datetime, time)): return h.strftime('%H:%M')
-                            return str(h)[:5]
-
-                        msg_v1, msg_v2, msg_insight = "", "", ""
-                        brecha_max = 0
-                        
-                        if not t1.empty:
-                            c_serv_v1 = t1.columns[0]
-                            c_p_sal = get_col_thdr(t1, 'PUERTO', 'SALIDA')
-                            c_l_lleg = get_col_thdr(t1, 'LIMACHE', 'LLEGADA')
-                            if c_p_sal and c_l_lleg:
-                                s_sal = extract_series(t1, c_p_sal)
-                                s_lleg = extract_series(t1, c_l_lleg)
-                                raw_sal = t1[c_p_sal].iloc[:, 0] if isinstance(t1[c_p_sal], pd.DataFrame) else t1[c_p_sal]
-                                t1_v = pd.DataFrame({c_serv_v1: t1[c_serv_v1], 'Fecha_Op': t1['Fecha_Op'], 'Salida_raw': raw_sal, 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
-                                t1_v['Dur'] = t1_v['Llegada'] - t1_v['Salida']
-                                t1_v['Dur'] = t1_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
-                                t1_v = t1_v[(t1_v['Dur'] > 30) & (t1_v['Dur'] < 120)]
-                                if not t1_v.empty:
-                                    r_min, r_max = t1_v.loc[t1_v['Dur'].idxmin()], t1_v.loc[t1_v['Dur'].idxmax()]
-                                    msg_v1 = f"**V1 (PU→LI) Promedio: {minutos_a_hhmmss(t1_v['Dur'].mean())}**\n\n- 🟢 *Rápido:* {minutos_a_hhmmss(r_min['Dur'])} ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v1]}, {formato_hora(r_min['Salida_raw'])})\n- 🔴 *Lento:* {minutos_a_hhmmss(r_max['Dur'])} ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v1]}, {formato_hora(r_max['Salida_raw'])})"
-                                    brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
-
-                        if not t2.empty:
-                            c_serv_v2 = t2.columns[0]
-                            c_l_sal = get_col_thdr(t2, 'LIMACHE', 'SALIDA')
-                            c_p_lleg = get_col_thdr(t2, 'PUERTO', 'LLEGADA')
-                            if c_l_sal and c_p_lleg:
-                                s_sal = extract_series(t2, c_l_sal)
-                                s_lleg = extract_series(t2, c_p_lleg)
-                                raw_sal = t2[c_l_sal].iloc[:, 0] if isinstance(t2[c_l_sal], pd.DataFrame) else t2[c_l_sal]
-                                t2_v = pd.DataFrame({c_serv_v2: t2[c_serv_v2], 'Fecha_Op': t2['Fecha_Op'], 'Salida_raw': raw_sal, 'Salida': s_sal, 'Llegada': s_lleg}).dropna()
-                                t2_v['Dur'] = t2_v['Llegada'] - t2_v['Salida']
-                                t2_v['Dur'] = t2_v['Dur'].apply(lambda x: x + 1440 if x < -500 else x)
-                                t2_v = t2_v[(t2_v['Dur'] > 30) & (t2_v['Dur'] < 120)]
-                                if not t2_v.empty:
-                                    r_min, r_max = t2_v.loc[t2_v['Dur'].idxmin()], t2_v.loc[t2_v['Dur'].idxmax()]
-                                    msg_v2 = f"**V2 (LI→PU) Promedio: {minutos_a_hhmmss(t2_v['Dur'].mean())}**\n\n- 🟢 *Rápido:* {minutos_a_hhmmss(r_min['Dur'])} ({r_min['Fecha_Op'].strftime('%d/%m')}, Serv. {r_min[c_serv_v2]}, {formato_hora(r_min['Salida_raw'])})\n- 🔴 *Lento:* {minutos_a_hhmmss(r_max['Dur'])} ({r_max['Fecha_Op'].strftime('%d/%m')}, Serv. {r_max[c_serv_v2]}, {formato_hora(r_max['Salida_raw'])})"
-                                    brecha_max = max(brecha_max, r_max['Dur'] - r_min['Dur'])
-
-                        if msg_v1 or msg_v2:
-                            if brecha_max > 10: msg_insight = f"⚠️ *Alta inestabilidad ({minutos_a_hhmmss(brecha_max)} de brecha).* Fuerte impacto negativo en consumo de tracción."
-                            else: msg_insight = f"✅ *Buena regularidad ({minutos_a_hhmmss(brecha_max)} de brecha).* Operación estable que favorece la conducción eficiente."
+                    # TODO: Puedes agregar el bloque the "msg_v1" y "msg_v2" aquí si deseas.
 
                     c_rep1, c_rep2 = st.columns(2)
                     with c_rep1:
@@ -1938,16 +1862,6 @@ with tabs[10]:
                             else: st.success(noche_msg)
                         st.error(f"🛑 **Cuello de Botella:** {estacion_msg}")
                         st.info(f"📋 **Despachos:** {thdr_msg}")
-                        
-                    if msg_v1 or msg_v2:
-                        st.markdown("##### ⏱️ Análisis de Tiempos de Viaje")
-                        c_t1, c_t2 = st.columns(2)
-                        with c_t1:
-                            if msg_v1: st.info(msg_v1)
-                        with c_t2:
-                            if msg_v2: st.info(msg_v2)
-                        if msg_insight:
-                            st.markdown(msg_insight)
     else:
         st.info("No hay datos consolidados para generar el análisis.")
 
