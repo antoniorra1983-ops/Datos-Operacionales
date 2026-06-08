@@ -46,6 +46,15 @@ SHORT_NAMES_DICT = {
     'Villa Alemana':'V.ALE', 'Sargento Aldea':'S.ALD', 'Peñablanca':'PEÑ', 'Limache':'LIM'
 }
 
+# Códigos de 3 letras usados en los export de Carga de Pasajeros (encabezados de estación)
+PAX_COL_CODE = {
+    'Puerto':'PUE', 'Bellavista':'BEL', 'Francia':'FRA', 'Baron':'BAR', 'Portales':'POR',
+    'Recreo':'REC', 'Miramar':'MIR', 'Viña del Mar':'VIN', 'Hospital':'HOS', 'Chorrillos':'CHO',
+    'El Salto':'SLT', 'Valencia':'VAL', 'Quilpue':'QUI', 'El Sol':'SOL', 'El Belloto':'BTO',
+    'Las Americas':'AME', 'La Concepcion':'CON', 'Villa Alemana':'VAM', 'Sargento Aldea':'SGA',
+    'Peñablanca':'PEN', 'Limache':'LIM'
+}
+
 KM_TRAMO = [0.7,0.7,0.8,1.7,2.1,1.4,0.9,0.9,1.0,1.5,7.4,2.3,1.9,2.0,1.1,1.2,0.9,0.6,1.3,12.73]
 KM_ACUM  = [0.0]
 for _k in KM_TRAMO: KM_ACUM.append(round(KM_ACUM[-1]+_k, 2))
@@ -181,6 +190,16 @@ def extract_series(df, col_name):
     if isinstance(s, pd.DataFrame):
         return pd.to_numeric(s.iloc[:, 0], errors='coerce')
     return pd.to_numeric(s, errors='coerce')
+
+def _srv_clean_series(s):
+    # Limpia el número de servicio de forma robusta: usa el valor numérico tal cual
+    # (evita que floats como 1.0 se vuelvan "10" al quitar el punto) y solo extrae
+    # dígitos como respaldo para textos tipo 'V123'.
+    num = pd.to_numeric(s, errors='coerce')
+    if num.isna().any():
+        resto = pd.to_numeric(pd.Series(s).astype(str).str.replace(r'\D', '', regex=True), errors='coerce')
+        num = num.fillna(resto)
+    return num
 
 # --- 3b. MOTOR DE DIAGNÓSTICO DE ANOMALÍAS ---
 _MAD_K = 1.4826
@@ -598,7 +617,7 @@ f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v18_pax_local_time"
+_CACHE_VERSION = "v19_dir_split"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -772,25 +791,34 @@ elif _hay_archivos and _recalcular:
 
     if not df_ops.empty:
         if not df_thdr_v1.empty or not df_thdr_v2.empty:
-            s1 = df_thdr_v1.groupby('Fecha_Op').size().reset_index(name='V1_S') if not df_thdr_v1.empty else pd.DataFrame(columns=['Fecha_Op', 'V1_S'])
-            s2 = df_thdr_v2.groupby('Fecha_Op').size().reset_index(name='V2_S') if not df_thdr_v2.empty else pd.DataFrame(columns=['Fecha_Op', 'V2_S'])
+            s1 = df_thdr_v1.groupby('Fecha_Op').size().reset_index(name='Serv_PULI') if not df_thdr_v1.empty else pd.DataFrame(columns=['Fecha_Op', 'Serv_PULI'])
+            s2 = df_thdr_v2.groupby('Fecha_Op').size().reset_index(name='Serv_LIPU') if not df_thdr_v2.empty else pd.DataFrame(columns=['Fecha_Op', 'Serv_LIPU'])
             df_servicios = pd.merge(s1, s2, on='Fecha_Op', how='outer').fillna(0)
-            df_servicios['Servicios'] = df_servicios['V1_S'] + df_servicios['V2_S']
+            df_servicios['Servicios'] = df_servicios['Serv_PULI'] + df_servicios['Serv_LIPU']
+            tk1 = df_thdr_v1.groupby('Fecha_Op')['Tren-Km'].sum().reset_index(name='TrenKm_PULI') if (not df_thdr_v1.empty and 'Tren-Km' in df_thdr_v1.columns) else pd.DataFrame(columns=['Fecha_Op', 'TrenKm_PULI'])
+            tk2 = df_thdr_v2.groupby('Fecha_Op')['Tren-Km'].sum().reset_index(name='TrenKm_LIPU') if (not df_thdr_v2.empty and 'Tren-Km' in df_thdr_v2.columns) else pd.DataFrame(columns=['Fecha_Op', 'TrenKm_LIPU'])
+            df_servicios = df_servicios.merge(tk1, on='Fecha_Op', how='outer').merge(tk2, on='Fecha_Op', how='outer').fillna(0)
             df_servicios = df_servicios.rename(columns={'Fecha_Op': 'Fecha'})
             df_servicios['Fecha'] = pd.to_datetime(df_servicios['Fecha']).dt.normalize()
-            df_ops = df_ops.merge(df_servicios[['Fecha', 'Servicios']], on='Fecha', how='left').fillna({'Servicios': 0})
+            df_ops = df_ops.merge(df_servicios[['Fecha', 'Servicios', 'Serv_PULI', 'Serv_LIPU', 'TrenKm_PULI', 'TrenKm_LIPU']], on='Fecha', how='left').fillna({'Servicios': 0, 'Serv_PULI': 0, 'Serv_LIPU': 0, 'TrenKm_PULI': 0, 'TrenKm_LIPU': 0})
         else:
             df_ops['Servicios'] = 0
+            df_ops['Serv_PULI'] = 0
+            df_ops['Serv_LIPU'] = 0
+            df_ops['TrenKm_PULI'] = 0
+            df_ops['TrenKm_LIPU'] = 0
 
         if not df_carga_v1.empty or not df_carga_v2.empty:
-            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V1') if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'PAX_V1'])
-            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_V2') if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'PAX_V2'])
+            p1 = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_PULI') if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'PAX_PULI'])
+            p2 = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index(name='PAX_LIPU') if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'PAX_LIPU'])
             df_pax = pd.merge(p1, p2, on='Fecha', how='outer').fillna(0)
-            df_pax['PAX'] = df_pax['PAX_V1'] + df_pax['PAX_V2']
+            df_pax['PAX'] = df_pax['PAX_PULI'] + df_pax['PAX_LIPU']
             df_pax['Fecha'] = pd.to_datetime(df_pax['Fecha']).dt.normalize()
-            df_ops = df_ops.merge(df_pax[['Fecha', 'PAX']], on='Fecha', how='left').fillna({'PAX': 0})
+            df_ops = df_ops.merge(df_pax[['Fecha', 'PAX', 'PAX_PULI', 'PAX_LIPU']], on='Fecha', how='left').fillna({'PAX': 0, 'PAX_PULI': 0, 'PAX_LIPU': 0})
         else:
             df_ops['PAX'] = 0
+            df_ops['PAX_PULI'] = 0
+            df_ops['PAX_LIPU'] = 0
 
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
@@ -846,108 +874,146 @@ with tabs[0]:
                 if col in df_resumen.columns: 
                     hover_config[col] = True
             
-            c_chart_s, c_card_s, c_chart_p, c_card_p = st.columns([2.5, 1, 2.5, 1]) 
-            
-            with c_chart_s:
-                fig_serv = px.bar(df_resumen, x='Fecha', y='Servicios', 
-                                  color_discrete_sequence=["#005195"],
-                                  hover_data=hover_config, title="Servicios Programados")
-                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
-                fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                       bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
-                
-            with c_card_s:
-                st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("Total Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
+            # ====== Gráficos independientes (uno por fila, cada uno con su tarjeta) ======
 
-            with c_chart_p:
-                fig_pax = px.bar(df_resumen, x='Fecha', y='PAX', 
-                                  color_discrete_sequence=["#E85500"], 
-                                  hover_data=hover_config, title="Pasajeros Transportados (PAX)")
-                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
-                fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                      bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
-                
-            with c_card_p:
-                st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("Total PAX", f"{int(df_resumen['PAX'].sum()):,}")
+            # --- 1. Servicios por sentido (PU->LI / LI->PU) ---
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_serv = px.bar(df_resumen, x='Fecha', y=['Serv_PULI', 'Serv_LIPU'],
+                                  barmode='group',
+                                  color_discrete_map={'Serv_PULI': '#005195', 'Serv_LIPU': '#66A5D9'},
+                                  hover_data=hover_config, title="Servicios por Sentido")
+                fig_serv.for_each_trace(lambda t: t.update(name={'Serv_PULI': 'PU→LI (Vía 1)', 'Serv_LIPU': 'LI→PU (Vía 2)'}.get(t.name, t.name)))
+                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                       legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
+            with c_card:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.metric("Total Servicios", f"{int(df_resumen['Servicios'].sum()):,}")
+                st.metric("PU→LI (Vía 1)", f"{int(df_resumen['Serv_PULI'].sum()):,}")
+                st.metric("LI→PU (Vía 2)", f"{int(df_resumen['Serv_LIPU'].sum()):,}")
 
             st.divider()
-            
-            c_chart_k, c_card_k, c_chart_u, c_card_u = st.columns([2.5, 1, 2.5, 1]) 
-            
-            with c_chart_k:
-                fig_km = px.bar(df_resumen, x='Fecha', y=['Odómetro [km]', 'Tren-Km [km]'], 
-                                barmode='group',
-                                color_discrete_map={'Odómetro [km]': '#005195', 'Tren-Km [km]': '#66A5D9'}, 
-                                hover_data=hover_config, title="Kilometraje (Odómetro vs Tren-Km)")
-                fig_km.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=11))
-                fig_km.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                     bargap=0.15, uniformtext=dict(minsize=8, mode='hide'))
-                ev_km = st.plotly_chart(fig_km, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_km")
-                
-            with c_card_k:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.2f} km")
-                st.metric("Tren-Km Total", f"{df_resumen['Tren-Km [km]'].sum():,.2f} km")
 
-            with c_chart_u:
-                fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', 
-                                  color_discrete_sequence=["#E85500"], 
-                                  hover_data=hover_config, title="Tasa Acoplamiento (UMR %)")
-                fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
-                fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                      bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
-                ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
-                
-            with c_card_u:
+            # --- 2. Pasajeros por sentido (PU->LI / LI->PU) ---
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_pax = px.bar(df_resumen, x='Fecha', y=['PAX_PULI', 'PAX_LIPU'],
+                                 barmode='group',
+                                 color_discrete_map={'PAX_PULI': '#E85500', 'PAX_LIPU': '#F4A06B'},
+                                 hover_data=hover_config, title="Pasajeros por Sentido (PAX)")
+                fig_pax.for_each_trace(lambda t: t.update(name={'PAX_PULI': 'PU→LI (Vía 1)', 'PAX_LIPU': 'LI→PU (Vía 2)'}.get(t.name, t.name)))
+                fig_pax.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                      legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
+            with c_card:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.metric("Total PAX", f"{int(df_resumen['PAX'].sum()):,}")
+                st.metric("PU→LI (Vía 1)", f"{int(df_resumen['PAX_PULI'].sum()):,}")
+                st.metric("LI→PU (Vía 2)", f"{int(df_resumen['PAX_LIPU'].sum()):,}")
+
+            st.divider()
+
+            # --- 3. Tren-Km por sentido (derivado de la malla THDR) ---
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_tk = px.bar(df_resumen, x='Fecha', y=['TrenKm_PULI', 'TrenKm_LIPU'],
+                                barmode='group',
+                                color_discrete_map={'TrenKm_PULI': '#2CA02C', 'TrenKm_LIPU': '#98DF8A'},
+                                hover_data=hover_config, title="Tren-Km por Sentido (THDR)")
+                fig_tk.for_each_trace(lambda t: t.update(name={'TrenKm_PULI': 'PU→LI (Vía 1)', 'TrenKm_LIPU': 'LI→PU (Vía 2)'}.get(t.name, t.name)))
+                fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                     bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                ev_tk = st.plotly_chart(fig_tk, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+            with c_card:
+                st.markdown("<br>", unsafe_allow_html=True)
+                tk_total = df_resumen['TrenKm_PULI'].sum() + df_resumen['TrenKm_LIPU'].sum()
+                st.metric("Tren-Km Total", f"{tk_total:,.2f} km")
+                st.metric("PU→LI (Vía 1)", f"{df_resumen['TrenKm_PULI'].sum():,.2f} km")
+                st.metric("LI→PU (Vía 2)", f"{df_resumen['TrenKm_LIPU'].sum():,.2f} km")
+            st.caption("Tren-Km estimado desde la malla THDR (43,13 km por servicio; ×2 en tracción doble). Es la oferta programada, distinta del Odómetro real (UMR).")
+
+            st.divider()
+
+            # --- 4. Odómetro real (UMR) ---
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]',
+                                 color_discrete_sequence=["#005195"],
+                                 hover_data=hover_config, title="Odómetro Real (UMR)")
+                fig_odo.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                ev_odo = st.plotly_chart(fig_odo, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
+            with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                tot_tren_km = df_resumen['Tren-Km [km]'].sum()
-                tot_odometro = df_resumen['Odómetro [km]'].sum()
-                umr_global = (tot_tren_km / tot_odometro * 100) if tot_odometro > 0 else 0
+                st.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.2f} km")
+
+            st.divider()
+
+            # --- 5. Tasa de acoplamiento (UMR %) ---
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)',
+                                 color_discrete_sequence=["#E85500"],
+                                 hover_data=hover_config, title="Tasa de Acoplamiento (UMR %)")
+                fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
+            with c_card:
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                _tot_tk_umr = df_resumen['Tren-Km [km]'].sum()
+                _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
+                umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
                 st.metric("Tasa UMR Global", f"{umr_global:,.2f} %")
-                
-            st.divider() 
-            
-            c_chart_e, c_card_e, c_chart_i, c_card_i = st.columns([2.5, 1, 2.5, 1]) 
-            
+
+            st.divider()
+
+            # --- 6. Consumo energético (Tracción + Baja Tensión) ---
             df_plot_ener = df_resumen.rename(columns={'E_Tr': 'Tracción', 'E_12': 'Baja Tensión'})
-            
-            with c_chart_e:
-                fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], 
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'],
                                   barmode='stack',
                                   color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                                   hover_data=hover_config, title="Consumo Energético (kWh)")
-                fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=11)) 
+                fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                     bargap=0.15, uniformtext=dict(minsize=8, mode='hide'))
+                                       legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_ener = st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
-                
-            with c_card_e:
+            with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.metric("Total Tracción", f"{df_plot_ener['Tracción'].sum():,.2f} kWh")
                 st.metric("Total Baja Tensión", f"{df_plot_ener['Baja Tensión'].sum():,.2f} kWh")
 
-            with c_chart_i:
-                fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', 
-                                  color_discrete_sequence=["#E85500"], 
-                                  hover_data=hover_config, title="Desempeño Energético (IDE)")
-                fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=13))
+            st.divider()
+
+            # --- 7. Desempeño energético (IDE) ---
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)',
+                                     color_discrete_sequence=["#E85500"],
+                                     hover_data=hover_config, title="Desempeño Energético (IDE)")
+                fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                          bargap=0.15, uniformtext=dict(minsize=9, mode='hide'))
+                                          bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_ide_bar = st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
-                
-            with c_card_i:
+            with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                tot_traccion_real = df_resumen['E_Tr'].sum()
-                ide_global = (tot_traccion_real / tot_odometro) if tot_odometro > 0 else 0
+                _tot_tr_ide = df_resumen['E_Tr'].sum()
+                _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
+                ide_global = (_tot_tr_ide / _tot_odo_ide) if _tot_odo_ide > 0 else 0
                 st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
 
-            chart_events = [ev_serv, ev_pax, ev_km, ev_umr, ev_ener, ev_ide_bar]
+            chart_events = [ev_serv, ev_pax, ev_tk, ev_odo, ev_umr, ev_ener, ev_ide_bar]
             
             for ev in chart_events:
                 if ev and isinstance(ev, dict) and ev.get('selection') and ev['selection'].get('points'):
@@ -1294,9 +1360,9 @@ with tabs[8]:
                         return []
 
                     # Limpiar Servicio para que sea puro número
-                    df_c['_srv_clean'] = pd.to_numeric(df_c[c_serv_c].astype(str).apply(lambda x: re.sub(r'\D', '', x)), errors='coerce')
+                    df_c['_srv_clean'] = _srv_clean_series(df_c[c_serv_c])
                     t_sub = df_thdr_filt.copy()
-                    t_sub['_srv_clean'] = pd.to_numeric(t_sub[c_serv_t].astype(str).apply(lambda x: re.sub(r'\D', '', x)), errors='coerce')
+                    t_sub['_srv_clean'] = _srv_clean_series(t_sub[c_serv_t])
 
                     alias_map_pax = {
                         "PUERTO": ["PTO", "PUERTO"],
@@ -1329,15 +1395,23 @@ with tabs[8]:
                         
                         # 1. Buscar la columna de pasajeros para esta estación
                         c_est = None
-                        for c in df_c.columns:
-                            cn = _norm(c)
-                            if 'MAX' in cn or 'MIN' in cn or 'TOTAL' in cn or 'PROMEDIO' in cn: continue
-                            if est_n in cn: 
-                                c_est = c; break
-                            if est_n in alias_map_pax:
-                                for alias in alias_map_pax[est_n]:
-                                    if alias in cn: c_est = c; break
-                                if c_est: break
+                        est_code = _norm(PAX_COL_CODE.get(est, ''))
+                        # 1a. Match exacto por código de 3 letras del export (PUE, BEL, VIN, SLT, VAM, SGA...)
+                        if est_code:
+                            for c in df_c.columns:
+                                if _norm(c).strip() == est_code:
+                                    c_est = c; break
+                        # 1b. Respaldo: nombre o alias contenido en el encabezado
+                        if not c_est:
+                            for c in df_c.columns:
+                                cn = _norm(c)
+                                if 'MAX' in cn or 'MIN' in cn or 'TOTAL' in cn or 'PROMEDIO' in cn: continue
+                                if est_n in cn:
+                                    c_est = c; break
+                                if est_n in alias_map_pax:
+                                    for alias in alias_map_pax[est_n]:
+                                        if alias in cn: c_est = c; break
+                                    if c_est: break
                                 
                         # 2. Buscar la hora de paso por esta estación en la THDR
                         c_time = get_col_thdr(t_sub, est, 'SALIDA')
@@ -1373,7 +1447,12 @@ with tabs[8]:
                     # 🛡️ Fallback si no encontró estaciones individuales
                     if not pax_data:
                         c_tot = next((c for c in df_c.columns if 'TOTAL' in str(c).upper() and 'BORDO' in str(c).upper()), None)
-                        c_orig = get_col_thdr(t_sub, valid_stations[0], 'SALIDA') if valid_stations else None
+                        c_orig = None
+                        for _e in valid_stations:
+                            c_orig = get_col_thdr(t_sub, _e, 'SALIDA')
+                            if c_orig: break
+                        if not c_orig and valid_stations:
+                            c_orig = get_col_thdr(t_sub, valid_stations[0], 'LLEGADA')
                         if c_tot and c_orig:
                             s_orig = extract_series(t_sub, c_orig)
                             t_est = pd.DataFrame({'Fecha_Op': t_sub['Fecha_Op'], '_srv_clean': t_sub['_srv_clean'], 'Hora_Estacion': (s_orig // 60).astype(float)})
