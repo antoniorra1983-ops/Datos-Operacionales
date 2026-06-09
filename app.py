@@ -885,7 +885,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "📈 Regresión", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
 if _seccion == _SECCIONES[0]:
@@ -1268,28 +1268,62 @@ if _seccion == _SECCIONES[4]:
         st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para habilitar el Centro de Control de Anomalías.")
 
 if _seccion == _SECCIONES[5]:
-    if not df_ops.empty and df_ops['E_Tr'].sum() > 0:
-        st.write("### Relación entre Kilometraje y Consumo de Tracción")
-        df_reg = df_ops.dropna(subset=["Odómetro [km]", "E_Tr"])
-        df_reg = df_reg[(df_reg["Odómetro [km]"] > 0) & (df_reg["E_Tr"] > 0)].sort_values("Odómetro [km]")
-        
-        fig_reg = px.scatter(df_reg, x="Odómetro [km]", y="E_Tr", hover_data=["Fecha"], title="Regresión: Odómetro vs Energía de Tracción", color_discrete_sequence=["#005195"])
-        
-        if len(df_reg) > 1:
-            x_vals = df_reg["Odómetro [km]"].values
-            y_vals = df_reg["E_Tr"].values
-            slope, intercept = np.polyfit(x_vals, y_vals, 1)
-            y_pred = slope * x_vals + intercept
-            
-            corr_matrix = np.corrcoef(x_vals, y_vals)
-            r_squared = corr_matrix[0, 1] ** 2
-            
-            fig_reg.add_trace(go.Scatter(x=x_vals, y=y_pred, mode='lines', name=f'Ajuste Lineal (R²={r_squared:.4f})', line=dict(color='#E85500', width=2.5)))
-            st.metric("Fórmula de Ajuste Matemático", f"y = {slope:.4f} * x + {intercept:.2f}", help="Ecuación lineal de regresión por mínimos cuadrados. y = Tracción (kWh), x = Distancia (km)")
-        
-        fig_reg.update_layout(xaxis_title="Odómetro Total (km)", yaxis_title="Energía de Tracción (kWh)")
-        st.plotly_chart(fig_reg, use_container_width=True)
-    else: st.info("No hay datos cruzados suficientes de kilometraje y consumo energético para calcular la regresión.")
+    st.markdown("### 🌙 Consumo Base Nocturno (Mediana)")
+    if all_prmte_full:
+        st.caption("Ventana nocturna por tipo de día — Laboral: 00:00–06:00 · Sábado: 00:00–07:00 · Domingo/Festivo: 00:00–08:00. Se usa la mediana porque es robusta frente a días atípicos.")
+        _dfp = pd.DataFrame(all_prmte_full)
+        _dfp['Fecha'] = pd.to_datetime(_dfp['Fecha']).dt.date
+        _mapa_td = df_ops.set_index(df_ops['Fecha'].dt.date)['Tipo Día'].to_dict() if not df_ops.empty else {}
+        _dfp['TD'] = _dfp['Fecha'].map(_mapa_td)
+        _dfp['TD'] = _dfp['TD'].fillna(_dfp['Fecha'].apply(get_tipo_dia))
+        _dfp['Hora_n'] = _dfp['Hora'].str.slice(0, 2).astype(int)
+        _dfp['_lim'] = _dfp['TD'].map(lambda t: 6 if t == 'L' else (7 if t == 'S' else 8))
+        _dfp = _dfp[_dfp['Hora_n'] < _dfp['_lim']]
+        _nom = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo/Festivo'}
+        _dfp['Tipo'] = _dfp['TD'].map(lambda t: _nom.get(t, t))
+        _cmap_td = {'Laboral': '#005195', 'Sábado': '#E85500', 'Domingo/Festivo': '#2CA02C'}
+        _orden_td = [x for x in ['Laboral', 'Sábado', 'Domingo/Festivo'] if x in set(_dfp['Tipo'])]
+        if _dfp.empty:
+            st.info("No hay registros de PRMTE dentro de la ventana nocturna para el periodo cargado.")
+        else:
+            _tot_dia = _dfp.groupby(['Tipo', 'Fecha'])['Consumo'].sum().reset_index()
+            _med_tot = _tot_dia.groupby('Tipo')['Consumo'].median()
+            st.markdown("#### Mediana del consumo nocturno total por día")
+            _cm = st.columns(max(1, len(_orden_td)))
+            for _i, _t in enumerate(_orden_td):
+                _cm[_i].metric(_t, f"{_med_tot.get(_t, 0):,.0f} kWh")
+            st.caption("Mediana del total acumulado en la ventana nocturna de cada día (kWh/noche).")
+
+            st.divider()
+            st.markdown("#### Mediana cada 15 minutos")
+            _p15 = _dfp.groupby(['Tipo', '15min'])['Consumo'].median().reset_index()
+            fig15 = px.line(_p15, x='15min', y='Consumo', color='Tipo', markers=True,
+                            color_discrete_map=_cmap_td, category_orders={'Tipo': _orden_td},
+                            labels={'15min': 'Franja de 15 min', 'Consumo': 'Mediana (kWh/15min)', 'Tipo': ''})
+            fig15.update_layout(margin=dict(t=10, b=0, l=0, r=0),
+                                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+            st.plotly_chart(fig15, use_container_width=True, config={'locale': 'es'})
+            st.caption("Para cada franja de 15 min, mediana del consumo de esa franja a lo largo de los días del mismo tipo.")
+
+            st.divider()
+            st.markdown("#### Mediana por hora")
+            _hd = _dfp.groupby(['Tipo', 'Fecha', 'Hora'])['Consumo'].sum().reset_index()
+            _ph = _hd.groupby(['Tipo', 'Hora'])['Consumo'].median().reset_index()
+            figh = px.bar(_ph, x='Hora', y='Consumo', color='Tipo', barmode='group',
+                          color_discrete_map=_cmap_td, category_orders={'Tipo': _orden_td},
+                          labels={'Hora': 'Hora', 'Consumo': 'Mediana (kWh/hora)', 'Tipo': ''})
+            figh.update_layout(margin=dict(t=10, b=0, l=0, r=0),
+                               legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+            st.plotly_chart(figh, use_container_width=True, config={'locale': 'es'})
+            st.caption("Por hora se suman los cuatro tramos de 15 min de cada día (kWh/hora) y luego se toma la mediana entre días.")
+
+            with st.expander("Ver tablas de medianas"):
+                st.markdown("**Cada 15 min (kWh/15min)**")
+                st.dataframe(_p15.pivot(index='15min', columns='Tipo', values='Consumo').round(1), use_container_width=True)
+                st.markdown("**Por hora (kWh/hora)**")
+                st.dataframe(_ph.pivot(index='Hora', columns='Tipo', values='Consumo').round(1), use_container_width=True)
+    else:
+        st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para este análisis de consumo nocturno.")
 
 if _seccion == _SECCIONES[6]:
     if not df_ops.empty and df_ops['IDE (kWh/km)'].sum() > 0:
