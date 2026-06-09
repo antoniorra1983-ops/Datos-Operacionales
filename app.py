@@ -923,75 +923,98 @@ with tabs[0]:
             _fechas_ok = set(df_resumen['Fecha'])
             _st = df_serv_tipo[df_serv_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_serv_tipo.empty else df_serv_tipo
             _pt = df_pax_tipo[df_pax_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_pax_tipo.empty else df_pax_tipo
-            _tipos = sorted(df_serv_tipo['Tipo_Servicio'].dropna().unique().tolist()) if not df_serv_tipo.empty else []
-            _paleta = ['#005195', '#E85500', '#2CA02C', '#9467BD', '#F4A06B', '#66A5D9', '#8C564B', '#17BECF', '#BCBD22']
-            _cmap = {t: _paleta[i % len(_paleta)] for i, t in enumerate(_tipos)}
+            _PUE = SHORT_NAMES_DICT.get('Puerto', 'PUE')
+            def _via_de(_t):
+                _t = str(_t)
+                if _t.startswith(_PUE + "→"): return 'Vía 1'
+                if _t.endswith("→" + _PUE): return 'Vía 2'
+                return 'Otros'
+            _orden_via = {'Vía 1': 0, 'Vía 2': 1, 'Otros': 2}
+            _tot_tipo = df_serv_tipo.groupby('Tipo_Servicio')['Servicios'].sum() if not df_serv_tipo.empty else pd.Series(dtype=float)
+            _tipos = sorted(df_serv_tipo['Tipo_Servicio'].dropna().unique().tolist(), key=lambda t: (_orden_via.get(_via_de(t), 9), -float(_tot_tipo.get(t, 0)), t)) if not df_serv_tipo.empty else []
+            _pal_v1 = ['#005195', '#3B8BD0', '#9ECAE9', '#C6DBEF']
+            _pal_v2 = ['#E85500', '#F4A06B', '#FBD0B0', '#FDE3D0']
+            _pal_otros = ['#2CA02C', '#9467BD', '#8C564B']
+            _cmap = {}
+            _iv1 = _iv2 = _io = 0
+            for _t in _tipos:
+                _v = _via_de(_t)
+                if _v == 'Vía 1':
+                    _cmap[_t] = _pal_v1[_iv1 % len(_pal_v1)]; _iv1 += 1
+                elif _v == 'Vía 2':
+                    _cmap[_t] = _pal_v2[_iv2 % len(_pal_v2)]; _iv2 += 1
+                else:
+                    _cmap[_t] = _pal_otros[_io % len(_pal_otros)]; _io += 1
+            def _tarjeta_por_via(_df, _col, _fmt, _label_total):
+                with st.container(border=True):
+                    _tot = _df[_col].sum() if (not _df.empty and _col in _df.columns) else 0
+                    st.metric(_label_total, _fmt(_tot))
+                    if _df.empty or _col not in _df.columns:
+                        return
+                    _serie = _df.groupby('Tipo_Servicio')[_col].sum()
+                    for _vlbl in ['Vía 1', 'Vía 2', 'Otros']:
+                        _items = sorted([t for t in _serie.index if _via_de(t) == _vlbl], key=lambda t: _serie[t], reverse=True)
+                        if not _items:
+                            continue
+                        st.markdown(f"<div style='color:#6b7280;font-size:0.78rem;font-weight:600;letter-spacing:.04em;margin:.35rem 0 .1rem'>{_vlbl}</div>", unsafe_allow_html=True)
+                        for _t2 in _items:
+                            st.metric(_t2, _fmt(_serie[_t2]))
+            _fmt_int = lambda v: f"{int(round(v)):,}"
+            _fmt_km = lambda v: f"{v:,.1f} km"
             ev_serv = ev_pax = ev_tk = None
 
+            def _layout_tipo(_fig):
+                _fig.update_layout(margin=dict(t=10, b=80, l=0, r=0),
+                                   legend=dict(title="", orientation="h", yanchor="top", y=-0.28, xanchor="center", x=0.5,
+                                               font=dict(size=11)),
+                                   bargap=0.28, xaxis_title=None, yaxis_title=None)
+                return _fig
+
             # --- 1. Servicios por tipo de servicio ---
-            c_chart, c_card = st.columns([3, 1])
+            c_chart, c_card = st.columns([3, 1], vertical_alignment="top")
             with c_chart:
+                st.markdown("**Servicios por tipo de servicio**")
                 if not _st.empty:
                     fig_serv = px.bar(_st, x='Fecha', y='Servicios', color='Tipo_Servicio', barmode='stack',
-                                      color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos},
-                                      title="Servicios por Tipo de Servicio")
-                    fig_serv.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                           legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                                           bargap=0.2)
+                                      color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
+                    _layout_tipo(fig_serv)
                     ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
                 else:
                     st.info("Sin datos de servicios (THDR) para el filtro actual.")
             with c_card:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Total Servicios", f"{int(_st['Servicios'].sum()) if not _st.empty else 0:,}")
-                if not _st.empty:
-                    for _tp, _v in _st.groupby('Tipo_Servicio')['Servicios'].sum().sort_values(ascending=False).items():
-                        st.metric(_tp, f"{int(_v):,}")
+                _tarjeta_por_via(_st, 'Servicios', _fmt_int, "Total Servicios")
 
             st.divider()
 
             # --- 2. Pasajeros por tipo de servicio ---
-            c_chart, c_card = st.columns([3, 1])
+            c_chart, c_card = st.columns([3, 1], vertical_alignment="top")
             with c_chart:
+                st.markdown("**Pasajeros por tipo de servicio (PAX)**")
                 if not _pt.empty:
                     fig_pax = px.bar(_pt, x='Fecha', y='PAX', color='Tipo_Servicio', barmode='stack',
-                                     color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos},
-                                     title="Pasajeros por Tipo de Servicio (PAX)")
-                    fig_pax.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                          legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                                          bargap=0.2)
+                                     color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
+                    _layout_tipo(fig_pax)
                     ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
                 else:
                     st.info("Sin datos de pasajeros cruzables con la malla THDR para el filtro actual.")
             with c_card:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Total PAX", f"{int(_pt['PAX'].sum()) if not _pt.empty else 0:,}")
-                if not _pt.empty:
-                    for _tp, _v in _pt.groupby('Tipo_Servicio')['PAX'].sum().sort_values(ascending=False).items():
-                        st.metric(_tp, f"{int(_v):,}")
+                _tarjeta_por_via(_pt, 'PAX', _fmt_int, "Total PAX")
 
             st.divider()
 
             # --- 3. Tren-Km por tipo de servicio (THDR) ---
-            c_chart, c_card = st.columns([3, 1])
+            c_chart, c_card = st.columns([3, 1], vertical_alignment="top")
             with c_chart:
+                st.markdown("**Tren-Km por tipo de servicio (THDR)**")
                 if not _st.empty and 'TrenKm' in _st.columns:
                     fig_tk = px.bar(_st, x='Fecha', y='TrenKm', color='Tipo_Servicio', barmode='stack',
-                                    color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos},
-                                    title="Tren-Km por Tipo de Servicio (THDR)")
-                    fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                         legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                                         bargap=0.2)
+                                    color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
+                    _layout_tipo(fig_tk)
                     ev_tk = st.plotly_chart(fig_tk, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
                 else:
                     st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
             with c_card:
-                st.markdown("<br>", unsafe_allow_html=True)
-                _tk_tot = _st['TrenKm'].sum() if (not _st.empty and 'TrenKm' in _st.columns) else 0
-                st.metric("Tren-Km Total", f"{_tk_tot:,.2f} km")
-                if not _st.empty and 'TrenKm' in _st.columns:
-                    for _tp, _v in _st.groupby('Tipo_Servicio')['TrenKm'].sum().sort_values(ascending=False).items():
-                        st.metric(_tp, f"{_v:,.1f} km")
+                _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total")
             st.caption("Tipo de servicio = patrón Origen→Destino detectado en la malla THDR. El Tren-Km usa 43,13 km por servicio (×2 en tracción doble); los servicios cortos comparten esa base, así que su Tren-Km es una cota superior, no la distancia exacta.")
 
             st.divider()
