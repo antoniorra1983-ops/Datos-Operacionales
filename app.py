@@ -1295,6 +1295,17 @@ if _seccion == _SECCIONES[5]:
             st.caption("Mediana del total acumulado en la ventana nocturna de cada día (kWh/noche).")
 
             st.divider()
+            st.markdown("#### 📐 Línea base nocturna (kWh/hora)")
+            _hd = _dfp.groupby(['Tipo', 'Fecha', 'Hora'])['Consumo'].sum().reset_index()
+            _base_hora = _hd.groupby('Tipo')['Consumo'].median()
+            _cb = st.columns(max(1, len(_orden_td)))
+            for _i, _t in enumerate(_orden_td):
+                _cb[_i].metric(f"Base {_t}", f"{_base_hora.get(_t, 0):,.0f} kWh/h")
+            _base_global = float(_hd['Consumo'].median())
+            st.success(f"**Línea base nocturna general: {_base_global:,.0f} kWh/hora** — mediana del consumo por hora en la ventana nocturna (carga base de referencia).")
+            st.caption("Valor de referencia (ISO 50001): si el consumo horario nocturno supera esta base de forma sostenida, suele indicar equipos operando sin necesidad (climatización, trenes sin apagar, auxiliares).")
+
+            st.divider()
             st.markdown("#### Mediana cada 15 minutos")
             _p15 = _dfp.groupby(['Tipo', '15min'])['Consumo'].median().reset_index()
             fig15 = px.line(_p15, x='15min', y='Consumo', color='Tipo', markers=True,
@@ -1307,13 +1318,13 @@ if _seccion == _SECCIONES[5]:
 
             st.divider()
             st.markdown("#### Mediana por hora")
-            _hd = _dfp.groupby(['Tipo', 'Fecha', 'Hora'])['Consumo'].sum().reset_index()
             _ph = _hd.groupby(['Tipo', 'Hora'])['Consumo'].median().reset_index()
             figh = px.bar(_ph, x='Hora', y='Consumo', color='Tipo', barmode='group',
                           color_discrete_map=_cmap_td, category_orders={'Tipo': _orden_td},
                           labels={'Hora': 'Hora', 'Consumo': 'Mediana (kWh/hora)', 'Tipo': ''})
             figh.update_layout(margin=dict(t=10, b=0, l=0, r=0),
                                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+            figh.add_hline(y=_base_global, line_dash="dash", line_color="#475569", annotation_text=f"Base {_base_global:,.0f} kWh/h", annotation_position="top left")
             st.plotly_chart(figh, use_container_width=True, config={'locale': 'es'})
             st.caption("Por hora se suman los cuatro tramos de 15 min de cada día (kWh/hora) y luego se toma la mediana entre días.")
 
