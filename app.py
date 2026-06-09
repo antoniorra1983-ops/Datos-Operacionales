@@ -610,6 +610,10 @@ with st.sidebar:
     f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True)
     f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True)
     f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True)
+    st.divider()
+    if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
+        st.session_state["_do_load"] = True
+    st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
     
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
                     (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
@@ -656,7 +660,7 @@ df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 _errores_proc={}
 
-if _hay_archivos and not _recalcular and 'df_ops' in st.session_state:
+if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('_do_load'):
     df_ops=st.session_state['df_ops']
     df_thdr_v1=st.session_state['df_thdr_v1']
     df_thdr_v2=st.session_state['df_thdr_v2']
@@ -669,7 +673,7 @@ if _hay_archivos and not _recalcular and 'df_ops' in st.session_state:
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
-elif _hay_archivos and _recalcular:
+elif _hay_archivos and st.session_state.get('_do_load'):
     if f_umr_all:
         for f in f_umr_all:
             try:
@@ -869,12 +873,22 @@ elif _hay_archivos and _recalcular:
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'_cache_key':_cache_key,
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo})
+    st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
-tabs=st.tabs(["📊 Resumen","📑 Operaciones","📑 Trenes","⚡ Energía","⚖️ Perfil Horario & Anomalías",
-              "📈 Regresión","🚨 Atípicos","📋 THDR","🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"])
+# Avisos de estado de carga
+if not _hay_archivos:
+    st.info("Sube archivos en la barra lateral para comenzar.")
+elif df_ops.empty and not st.session_state.get('_do_load'):
+    st.info("Configura el rango y los archivos en la barra lateral y aprieta **🔄 Cargar / actualizar datos** para procesar.")
+elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _cache_key):
+    st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
-with tabs[0]:
+_SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
+              "📈 Regresión", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"]
+_seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
+
+if _seccion == _SECCIONES[0]:
     _ep=st.session_state.get('_errores_proc',{})
     if _ep:
         with st.expander(f"⚠️ {len(_ep)} archivo(s) con error",expanded=True):
@@ -1107,7 +1121,7 @@ with tabs[0]:
             
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
-with tabs[1]:
+if _seccion == _SECCIONES[1]:
     if not df_ops.empty:
         dv=df_ops.copy()
         dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
@@ -1115,7 +1129,7 @@ with tabs[1]:
         st.dataframe(make_columns_unique(dv), use_container_width=True)
     else: st.info("No hay datos de operaciones en el rango seleccionado.")
 
-with tabs[2]:
+if _seccion == _SECCIONES[2]:
     if all_tr:
         st.write("### Detalle por Unidad (Tren)")
         df_tr = pd.DataFrame(all_tr)
@@ -1123,7 +1137,7 @@ with tabs[2]:
         st.dataframe(make_columns_unique(df_tr), use_container_width=True)
     else: st.info("No hay datos detallados de trenes cargados.")
 
-with tabs[3]:
+if _seccion == _SECCIONES[3]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
         st.write("### Consumo de Energía por Tipo")
         fig_e = go.Figure()
@@ -1138,7 +1152,7 @@ with tabs[3]:
         st.dataframe(make_columns_unique(dv_ener), use_container_width=True)
     else: st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
 
-with tabs[4]:
+if _seccion == _SECCIONES[4]:
     if all_prmte_full:
         st.markdown("### 🔍 Análisis Granular de Consumo (15 min y Horario)")
         st.markdown("Este panel permite auditar el comportamiento eléctrico de la flota detectando consumos parásitos (nocturnos) y picos de demanda críticos.")
@@ -1247,7 +1261,7 @@ with tabs[4]:
     else: 
         st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para habilitar el Centro de Control de Anomalías.")
 
-with tabs[5]:
+if _seccion == _SECCIONES[5]:
     if not df_ops.empty and df_ops['E_Tr'].sum() > 0:
         st.write("### Relación entre Kilometraje y Consumo de Tracción")
         df_reg = df_ops.dropna(subset=["Odómetro [km]", "E_Tr"])
@@ -1271,7 +1285,7 @@ with tabs[5]:
         st.plotly_chart(fig_reg, use_container_width=True)
     else: st.info("No hay datos cruzados suficientes de kilometraje y consumo energético para calcular la regresión.")
 
-with tabs[6]:
+if _seccion == _SECCIONES[6]:
     if not df_ops.empty and df_ops['IDE (kWh/km)'].sum() > 0:
         st.write("### Detección de Valores Atípicos (IDE)")
         mean_ide = df_ops['IDE (kWh/km)'].mean()
@@ -1299,7 +1313,7 @@ with tabs[6]:
         else: st.success("✅ No se detectaron valores atípicos significativos (Z-score > 2) en el periodo analizado.")
     else: st.info("No hay datos de IDE calculados para analizar.")
 
-with tabs[7]:
+if _seccion == _SECCIONES[7]:
     st.write("### Perfil de Velocidades Vía 1 y 2")
     st.plotly_chart(fig_perfil_velocidades(), use_container_width=True)
 
@@ -1318,7 +1332,7 @@ with tabs[7]:
             st.caption("Mostrando hasta 50 registros.")
         else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
-with tabs[8]:
+if _seccion == _SECCIONES[8]:
     st.markdown("### 🔬 Análisis Multivariante: PAX vs Tiempos vs Energía")
     st.markdown("Este módulo utiliza estadística robusta para cruzar la demanda real con la fricción operativa (Tiempos de Viaje/Detenciones) y explicar el gasto de Tracción.")
     
@@ -1813,7 +1827,7 @@ with tabs[8]:
     else: 
         st.info("⚠️ Carga archivos de **THDR (Vía 1 y 2), Facturación/PRMTE/SEAT y Carga de Pasajeros** para habilitar el Microscopio Operacional.")
 
-with tabs[9]:
+if _seccion == _SECCIONES[9]:
     st.write("### Flujo y Carga de Pasajeros")
     if not df_carga_v1.empty or not df_carga_v2.empty:
         c_p1, c_p2 = st.columns(2)
@@ -1861,7 +1875,7 @@ with tabs[9]:
             
     else: st.info("No se han procesado datos de carga de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
 
-with tabs[10]:
+if _seccion == _SECCIONES[10]:
     st.markdown("### 📝 Análisis Ejecutivo Automático")
     if not df_ops.empty:
         if 'filtro_dia' in locals():
@@ -2029,7 +2043,7 @@ with tabs[10]:
     else:
         st.info("No hay datos consolidados para generar el análisis.")
 
-with tabs[11]:
+if _seccion == _SECCIONES[11]:
     st.markdown("### 🩺 Diagnóstico Automático de Anomalías de Consumo")
     st.markdown("Compara **cada día con los de su mismo tipo** (Laboral / Sábado / Domingo-Festivo) "
                 "con estadística robusta, detecta los que se salen de lo normal y **cruza la THDR y la "
