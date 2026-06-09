@@ -923,11 +923,23 @@ with tabs[0]:
             _fechas_ok = set(df_resumen['Fecha'])
             _st = df_serv_tipo[df_serv_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_serv_tipo.empty else df_serv_tipo
             _pt = df_pax_tipo[df_pax_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_pax_tipo.empty else df_pax_tipo
-            _PUE = SHORT_NAMES_DICT.get('Puerto', 'PUE')
+            _SHORT_INV = {v: k for k, v in SHORT_NAMES_DICT.items()}
+            _idx_est = {e: i for i, e in enumerate(ESTACIONES)}
             def _via_de(_t):
-                _t = str(_t)
-                if _t.startswith(_PUE + "→"): return 'Vía 1'
-                if _t.endswith("→" + _PUE): return 'Vía 2'
+                # Sentido de circulación: origen antes que destino en la línea => Vía 1 (hacia Limache); al revés => Vía 2 (hacia Puerto).
+                _p = str(_t).split("→")
+                if len(_p) != 2:
+                    return 'Otros'
+                _o = _SHORT_INV.get(_p[0].strip(), _p[0].strip())
+                _d = _SHORT_INV.get(_p[1].strip(), _p[1].strip())
+                _io = _idx_est.get(_o)
+                _idd = _idx_est.get(_d)
+                if _io is None or _idd is None:
+                    return 'Otros'
+                if _io < _idd:
+                    return 'Vía 1'
+                if _io > _idd:
+                    return 'Vía 2'
                 return 'Otros'
             _orden_via = {'Vía 1': 0, 'Vía 2': 1, 'Otros': 2}
             _tot_tipo = df_serv_tipo.groupby('Tipo_Servicio')['Servicios'].sum() if not df_serv_tipo.empty else pd.Series(dtype=float)
