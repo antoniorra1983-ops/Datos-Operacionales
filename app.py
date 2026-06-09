@@ -971,19 +971,25 @@ if _seccion == _SECCIONES[0]:
                     _cmap[_t] = _pal_v2[_iv2 % len(_pal_v2)]; _iv2 += 1
                 else:
                     _cmap[_t] = _pal_otros[_io % len(_pal_otros)]; _io += 1
-            def _tarjeta_por_via(_df, _col, _fmt, _label_total):
+            def _card_metric(_col, _label, _value, _unit="", _tip=""):
+                _u = ("<span style='font-size:.68rem;font-weight:600;color:#94a3b8;'>&nbsp;" + str(_unit) + "</span>") if _unit else ""
+                _html = ("<div style='padding:2px 8px 4px 2px;' title='" + str(_tip) + "'>"
+                         "<div style='font-size:.72rem;color:#64748b;font-weight:600;line-height:1.18;white-space:normal;word-break:break-word;min-height:2.4em;display:flex;align-items:flex-end;'>" + str(_label) + "</div>"
+                         "<div style='font-size:1.15rem;font-weight:700;color:#0f172a;line-height:1.2;white-space:nowrap;'>" + str(_value) + _u + "</div></div>")
+                _col.markdown(_html, unsafe_allow_html=True)
+            def _tarjeta_por_via(_df, _col, _fmt, _label_total, _unit=""):
                 _serie = _df.groupby('Tipo_Servicio')[_col].sum() if (not _df.empty and _col in _df.columns) else None
                 _tipos_ord = []
                 if _serie is not None:
                     for _vlbl in ['Vía 1', 'Vía 2', 'Otros']:
                         _tipos_ord += sorted([t for t in _serie.index if _via_de(t) == _vlbl], key=lambda t: _serie[t], reverse=True)
                 with st.container(border=True):
-                    _cols = st.columns([1.2] + [1] * len(_tipos_ord))
-                    _cols[0].metric(_label_total, _fmt(_df[_col].sum() if _serie is not None else 0))
+                    _cols = st.columns([1.3] + [1] * len(_tipos_ord))
+                    _card_metric(_cols[0], _label_total, _fmt(_df[_col].sum() if _serie is not None else 0), _unit)
                     for _i, _t2 in enumerate(_tipos_ord):
-                        _cols[_i + 1].metric(_t2, _fmt(_serie[_t2]), help=_via_de(_t2))
+                        _card_metric(_cols[_i + 1], _t2, _fmt(_serie[_t2]), _unit, _via_de(_t2))
             _fmt_int = lambda v: f"{int(round(v)):,}"
-            _fmt_km = lambda v: f"{v:,.1f} km"
+            _fmt_km = lambda v: f"{v:,.1f}"
             ev_serv = ev_pax = ev_tk = None
 
             def _layout_tipo(_fig):
@@ -1028,7 +1034,7 @@ if _seccion == _SECCIONES[0]:
                 ev_tk = st.plotly_chart(fig_tk, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
             else:
                 st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
-            _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total")
+            _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
             st.caption("Tipo de servicio = patrón Origen→Destino detectado en la malla THDR. El Tren-Km usa 43,13 km por servicio (×2 en tracción doble); los servicios cortos comparten esa base, así que su Tren-Km es una cota superior, no la distancia exacta.")
 
             st.divider()
