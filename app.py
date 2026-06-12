@@ -448,6 +448,65 @@ def combinar_fuentes(ul, carpeta):
                              if os.path.basename(p) not in nombres]
 
 # --- 5. FUNCIONES DE PROCESAMIENTO CORE ---
+# --- Servicios por tipo de tren (material rodante) + export Excel ---
+def _tipo_tren(m1):
+    n = pd.to_numeric(m1, errors='coerce')
+    if pd.isna(n): return "Sin asignar"
+    n = int(n)
+    if 1 <= n <= 27:  return "XT-100"     # unidades M01-M27
+    if 28 <= n <= 35: return "XT-M"       # unidades XM28-XM35
+    return "SFE"                          # otras unidades (SFE siempre simple)
+
+def _col_tt(d, name):
+    return next((c for c in d.columns if str(c).strip().upper() == name), None)
+
+def _servicios_norm(df_thdr_v1, df_thdr_v2, fechas=None):
+    parts = []
+    for t, sent in [(df_thdr_v1, "Puerto->Limache"), (df_thdr_v2, "Limache->Puerto")]:
+        if t is None or getattr(t, 'empty', True): continue
+        x = t.copy()
+        if fechas is not None and 'Fecha_Op' in x.columns:
+            x = x[pd.to_datetime(x['Fecha_Op']).dt.normalize().isin(pd.to_datetime(list(fechas)))]
+        if x.empty: continue
+        c1, c2 = _col_tt(x, 'MOTRIZ 1'), _col_tt(x, 'MOTRIZ 2')
+        ct, cv = _col_tt(x, 'TREN'), _col_tt(x, 'VIAJE')
+        df = pd.DataFrame({'Fecha': pd.to_datetime(x['Fecha_Op']).dt.date, 'Tipo de servicio': sent})
+        df['N. Servicio'] = x[ct].values if ct else None
+        df['N. Viaje']    = x[cv].values if cv else None
+        df['Motriz 1']    = pd.to_numeric(x[c1], errors='coerce').values if c1 else np.nan
+        df['Motriz 2']    = pd.to_numeric(x[c2], errors='coerce').values if c2 else np.nan
+        df['Tipo de tren'] = df['Motriz 1'].apply(_tipo_tren)
+        doble = df['Motriz 2'].notna()
+        if 'Unidad' in x.columns:
+            doble = doble | pd.Series(x['Unidad'].astype(str).str.upper().str.strip().eq('M').values)
+        df['Composicion'] = np.where(doble, 'Doble', 'Simple')
+        df.loc[df['Tipo de tren'] == 'SFE', 'Composicion'] = 'Simple'
+        parts.append(df)
+    if not parts: return pd.DataFrame()
+    cols = ['Fecha', 'Tipo de servicio', 'N. Servicio', 'N. Viaje', 'Tipo de tren', 'Composicion', 'Motriz 1', 'Motriz 2']
+    return pd.concat(parts, ignore_index=True)[cols].sort_values(['Fecha', 'Tipo de servicio', 'N. Servicio']).reset_index(drop=True)
+
+def detalle_servicios(df_thdr_v1, df_thdr_v2, fechas=None):
+    return _servicios_norm(df_thdr_v1, df_thdr_v2, fechas)
+
+def servicios_por_tipo_tren(df_thdr_v1, df_thdr_v2, fechas=None):
+    d = _servicios_norm(df_thdr_v1, df_thdr_v2, fechas)
+    if d.empty: return pd.DataFrame()
+    tab = d.groupby(['Tipo de tren', 'Composicion']).size().unstack(fill_value=0)
+    for c in ['Simple', 'Doble']:
+        if c not in tab.columns: tab[c] = 0
+    tab = tab[['Simple', 'Doble']]
+    tab['Total'] = tab['Simple'] + tab['Doble']
+    return tab.reindex([t for t in ['XT-100', 'XT-M', 'SFE', 'Sin asignar'] if t in tab.index])
+
+def excel_servicios(detalle, resumen):
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as w:
+        resumen.to_excel(w, sheet_name='Resumen', index=False)
+        detalle.to_excel(w, sheet_name='Detalle', index=False)
+    return buf.getvalue()
+
+
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "": return None
     try:
@@ -885,7 +944,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📥 Servicios (Excel)"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
 if _seccion == _SECCIONES[0]:
@@ -1009,6 +1068,28 @@ if _seccion == _SECCIONES[0]:
             else:
                 st.info("Sin datos de servicios (THDR) para el filtro actual.")
             _tarjeta_por_via(_st, 'Servicios', _fmt_int, "Total Servicios")
+
+            st.divider()
+
+            # --- 1b. Servicios por tipo de tren (material rodante) ---
+            st.markdown("**Servicios por tipo de tren (XT-100 / XT-M / SFE)**")
+            _tab_tren = servicios_por_tipo_tren(df_thdr_v1, df_thdr_v2, df_resumen['Fecha'].unique())
+            if _tab_tren.empty:
+                st.info("Sin datos de THDR (con Motriz) para el desglose por tipo de tren.")
+            else:
+                _ct1, _ct2 = st.columns([1, 1.3])
+                with _ct1:
+                    st.dataframe(_tab_tren.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
+                    st.caption(f"Total: {int(_tab_tren['Total'].sum()):,} servicios")
+                with _ct2:
+                    _melt_tren = (_tab_tren[['Simple', 'Doble']].rename_axis("Tipo").reset_index()
+                                  .melt(id_vars='Tipo', var_name='Composicion', value_name='Servicios'))
+                    _fig_tren = px.bar(_melt_tren, x='Tipo', y='Servicios', color='Composicion', barmode='stack',
+                                       color_discrete_map={'Simple': '#66A5D9', 'Doble': '#005195'}, text_auto=True)
+                    _fig_tren.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=300,
+                                            legend=dict(orientation='h', y=1.12, x=0))
+                    st.plotly_chart(_fig_tren, use_container_width=True, config={'locale': 'es'})
+            st.caption("XT-100 = unidades M01-M27 · XT-M = unidades XM28-XM35 · SFE = otras unidades (siempre simple).")
 
             st.divider()
 
@@ -2213,3 +2294,27 @@ if _seccion == _SECCIONES[11]:
             st.dataframe(make_columns_unique(tabla), use_container_width=True)
     else:
         st.info("📂 Sube archivos desde el panel lateral para generar el diagnóstico.")
+
+
+if _seccion == _SECCIONES[12]:
+    st.markdown("### 📥 Servicios por tipo de tren (descargable)")
+    st.markdown("Cada servicio realizado con su **tipo de tren** (XT-100 / XT-M / SFE), "
+                "**composición** (simple/doble) y **tipo de servicio** (sentido). Exportable a Excel.")
+    _det = detalle_servicios(df_thdr_v1, df_thdr_v2)
+    if _det.empty:
+        st.info("No hay servicios THDR (con Motriz) en el rango seleccionado. Carga la THDR desde el panel lateral.")
+    else:
+        _res = (_det.groupby(['Tipo de tren', 'Composicion', 'Tipo de servicio'])
+                    .size().reset_index(name='Servicios'))
+        _m1, _m2, _m3 = st.columns(3)
+        _m1.metric("Servicios totales", f"{len(_det):,}")
+        _m2.metric("Dobles", f"{int((_det['Composicion'] == 'Doble').sum()):,}")
+        _m3.metric("Simples", f"{int((_det['Composicion'] == 'Simple').sum()):,}")
+        st.markdown("#### Resumen (tipo de tren x composición x tipo de servicio)")
+        st.dataframe(_res, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Descargar Excel (Resumen + Detalle)",
+                           data=excel_servicios(_det, _res),
+                           file_name="servicios_por_tipo_tren.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.markdown("#### Detalle de servicios")
+        st.dataframe(_det, use_container_width=True, hide_index=True)
