@@ -462,15 +462,24 @@ def _col_tt(d, name):
 
 def _servicios_norm(df_thdr_v1, df_thdr_v2, fechas=None):
     parts = []
-    for t, sent in [(df_thdr_v1, "Puerto->Limache"), (df_thdr_v2, "Limache->Puerto")]:
+    for t in (df_thdr_v1, df_thdr_v2):
         if t is None or getattr(t, 'empty', True): continue
         x = t.copy()
         if fechas is not None and 'Fecha_Op' in x.columns:
             x = x[pd.to_datetime(x['Fecha_Op']).dt.normalize().isin(pd.to_datetime(list(fechas)))]
         if x.empty: continue
+        # Tipo de servicio = patrón Origen->Destino real de la malla (todos los patrones)
+        if 'Tipo_Servicio' in x.columns:
+            tserv = x['Tipo_Servicio']
+        else:
+            try: tserv = clasificar_od_thdr(x)
+            except Exception: tserv = pd.Series(pd.NA, index=x.index)
+        tserv = pd.Series(tserv, index=x.index).astype(object)
+        tserv = tserv.where(tserv.notna(), 'Sin clasificar')
         c1, c2 = _col_tt(x, 'MOTRIZ 1'), _col_tt(x, 'MOTRIZ 2')
         ct, cv = _col_tt(x, 'TREN'), _col_tt(x, 'VIAJE')
-        df = pd.DataFrame({'Fecha': pd.to_datetime(x['Fecha_Op']).dt.date, 'Tipo de servicio': sent})
+        df = pd.DataFrame({'Fecha': pd.to_datetime(x['Fecha_Op']).dt.date})
+        df['Tipo de servicio'] = tserv.values
         df['N. Servicio'] = x[ct].values if ct else None
         df['N. Viaje']    = x[cv].values if cv else None
         df['Motriz 1']    = pd.to_numeric(x[c1], errors='coerce').values if c1 else np.nan
@@ -489,19 +498,14 @@ def _servicios_norm(df_thdr_v1, df_thdr_v2, fechas=None):
 def detalle_servicios(df_thdr_v1, df_thdr_v2, fechas=None):
     return _servicios_norm(df_thdr_v1, df_thdr_v2, fechas)
 
-def servicios_por_tipo_tren(df_thdr_v1, df_thdr_v2, fechas=None):
-    d = _servicios_norm(df_thdr_v1, df_thdr_v2, fechas)
-    if d.empty: return pd.DataFrame()
-    tab = d.groupby(['Tipo de tren', 'Composicion']).size().unstack(fill_value=0)
-    for c in ['Simple', 'Doble']:
-        if c not in tab.columns: tab[c] = 0
-    tab = tab[['Simple', 'Doble']]
-    tab['Total'] = tab['Simple'] + tab['Doble']
-    return tab.reindex([t for t in ['XT-100', 'XT-M', 'SFE', 'Sin asignar'] if t in tab.index])
-
-def excel_servicios(detalle, resumen):
+def excel_servicios(detalle):
+    por_dia = (detalle.groupby(['Fecha', 'Tipo de servicio', 'Tipo de tren', 'Composicion'])
+               .size().reset_index(name='Servicios'))
+    resumen = (detalle.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion'])
+               .size().reset_index(name='Servicios'))
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
+        por_dia.to_excel(w, sheet_name='Por dia', index=False)
         resumen.to_excel(w, sheet_name='Resumen', index=False)
         detalle.to_excel(w, sheet_name='Detalle', index=False)
     return buf.getvalue()
@@ -1073,23 +1077,28 @@ if _seccion == _SECCIONES[0]:
 
             # --- 1b. Servicios por tipo de tren (material rodante) ---
             st.markdown("**Servicios por tipo de tren (XT-100 / XT-M / SFE)**")
-            _tab_tren = servicios_por_tipo_tren(df_thdr_v1, df_thdr_v2, df_resumen['Fecha'].unique())
-            if _tab_tren.empty:
+            _det_tren = detalle_servicios(df_thdr_v1, df_thdr_v2, df_resumen['Fecha'].unique())
+            if _det_tren.empty:
                 st.info("Sin datos de THDR (con Motriz) para el desglose por tipo de tren.")
             else:
-                _ct1, _ct2 = st.columns([1, 1.3])
-                with _ct1:
-                    st.dataframe(_tab_tren.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
-                    st.caption(f"Total: {int(_tab_tren['Total'].sum()):,} servicios")
-                with _ct2:
-                    _melt_tren = (_tab_tren[['Simple', 'Doble']].rename_axis("Tipo").reset_index()
-                                  .melt(id_vars='Tipo', var_name='Composicion', value_name='Servicios'))
-                    _fig_tren = px.bar(_melt_tren, x='Tipo', y='Servicios', color='Composicion', barmode='stack',
-                                       color_discrete_map={'Simple': '#66A5D9', 'Doble': '#005195'}, text_auto=True)
-                    _fig_tren.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=300,
-                                            legend=dict(orientation='h', y=1.12, x=0))
+                _piv = _det_tren.groupby(['Tipo de tren', 'Composicion']).size().unstack(fill_value=0)
+                for _c in ['Simple', 'Doble']:
+                    if _c not in _piv.columns: _piv[_c] = 0
+                _piv = _piv[['Simple', 'Doble']]; _piv['Total'] = _piv['Simple'] + _piv['Doble']
+                _piv = _piv.reindex([t for t in ['XT-100', 'XT-M', 'SFE', 'Sin asignar'] if t in _piv.index])
+                _cta, _ctb = st.columns([1, 1.5])
+                with _cta:
+                    st.dataframe(_piv.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
+                    st.caption(f"Total: {int(_piv['Total'].sum()):,} servicios")
+                with _ctb:
+                    _dd = _det_tren.copy()
+                    _dd['Tren · Comp'] = _dd['Tipo de tren'] + " · " + _dd['Composicion']
+                    _ppd = _dd.groupby(['Fecha', 'Tren · Comp']).size().reset_index(name='Servicios')
+                    _fig_tren = px.bar(_ppd, x='Fecha', y='Servicios', color='Tren · Comp', barmode='stack')
+                    _fig_tren.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=320,
+                                            legend=dict(orientation='h', y=1.18, x=0, font=dict(size=10)), xaxis_title=None)
                     st.plotly_chart(_fig_tren, use_container_width=True, config={'locale': 'es'})
-            st.caption("XT-100 = unidades M01-M27 · XT-M = unidades XM28-XM35 · SFE = otras unidades (siempre simple).")
+            st.caption("Tipo de servicio = patrón Origen→Destino de la malla. XT-100 = M01-M27 · XT-M = XM28-XM35 · SFE = otras unidades (siempre simple).")
 
             st.divider()
 
@@ -2298,23 +2307,28 @@ if _seccion == _SECCIONES[11]:
 
 if _seccion == _SECCIONES[12]:
     st.markdown("### 📥 Servicios por tipo de tren (descargable)")
-    st.markdown("Cada servicio realizado con su **tipo de tren** (XT-100 / XT-M / SFE), "
-                "**composición** (simple/doble) y **tipo de servicio** (sentido). Exportable a Excel.")
+    st.markdown("Cada servicio con su **tipo de tren** (XT-100 / XT-M / SFE), **composición** "
+                "(simple/doble) y **tipo de servicio** (patrón Origen→Destino real de la malla). "
+                "Con corte por día y exportable a Excel.")
     _det = detalle_servicios(df_thdr_v1, df_thdr_v2)
     if _det.empty:
         st.info("No hay servicios THDR (con Motriz) en el rango seleccionado. Carga la THDR desde el panel lateral.")
     else:
-        _res = (_det.groupby(['Tipo de tren', 'Composicion', 'Tipo de servicio'])
-                    .size().reset_index(name='Servicios'))
         _m1, _m2, _m3 = st.columns(3)
         _m1.metric("Servicios totales", f"{len(_det):,}")
         _m2.metric("Dobles", f"{int((_det['Composicion'] == 'Doble').sum()):,}")
         _m3.metric("Simples", f"{int((_det['Composicion'] == 'Simple').sum()):,}")
-        st.markdown("#### Resumen (tipo de tren x composición x tipo de servicio)")
-        st.dataframe(_res, use_container_width=True, hide_index=True)
-        st.download_button("⬇️ Descargar Excel (Resumen + Detalle)",
-                           data=excel_servicios(_det, _res),
+        st.download_button("⬇️ Descargar Excel (Por día + Resumen + Detalle)",
+                           data=excel_servicios(_det),
                            file_name="servicios_por_tipo_tren.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.markdown("#### Por día (tipo de servicio × tipo de tren × composición)")
+        _por_dia = (_det.groupby(['Fecha', 'Tipo de servicio', 'Tipo de tren', 'Composicion'])
+                        .size().reset_index(name='Servicios'))
+        st.dataframe(_por_dia, use_container_width=True, hide_index=True)
+        st.markdown("#### Resumen (totales por tipo de servicio × tipo de tren × composición)")
+        _res = (_det.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion'])
+                    .size().reset_index(name='Servicios'))
+        st.dataframe(_res, use_container_width=True, hide_index=True)
         st.markdown("#### Detalle de servicios")
         st.dataframe(_det, use_container_width=True, hide_index=True)
