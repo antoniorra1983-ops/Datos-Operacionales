@@ -971,21 +971,75 @@ _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía",
               "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📥 Servicios (Excel)"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
+# ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
+st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
+_J_COD = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
+if not df_ops.empty:
+    _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
+    _fmin, _fmax = _ff.min().date(), _ff.max().date()
+    _anios = sorted({d.year for d in _ff.dropna().dt.date}, reverse=True)
+    _sig = (str(_fmin), str(_fmax), ",".join(map(str, _anios)))
+    if st.session_state.get('_f_sig') != _sig:
+        st.session_state['_f_sig'] = _sig
+        for _k in ('_f_anio', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
+    with st.container(border=True):
+        st.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
+        _cf1, _cf2, _cf3 = st.columns([1, 2.3, 2])
+        with _cf1:
+            _sel_a = st.selectbox("Año", ["Todos"] + [str(a) for a in _anios], key="_f_anio")
+        with _cf2:
+            _opj = list(_J_COD.keys())
+            if hasattr(st, "pills"):
+                _selj = st.pills("Tipo de jornada", _opj, selection_mode="multi", default=_opj, key="_f_jornada")
+            else:
+                _selj = st.multiselect("Tipo de jornada", _opj, default=_opj, key="_f_jornada")
+            _selj = _selj or _opj
+        with _cf3:
+            _rg = st.date_input("Fecha", value=(_fmin, _fmax), min_value=_fmin, max_value=_fmax, key="_f_fecha")
+            _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
+    _cods = {_J_COD[j] for j in _selj}
+    def _msk_f(serie):
+        f = pd.to_datetime(serie, errors='coerce')
+        m = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
+        if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
+        if len(_cods) < 3:
+            td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None)
+            m = m & td.isin(_cods)
+        return m.values
+    def _filt_df(df, col):
+        if df is None or getattr(df, 'empty', True) or col not in df.columns: return df
+        return df[_msk_f(df[col])].reset_index(drop=True)
+    def _filt_regs(regs):
+        if not regs: return regs
+        _d = pd.DataFrame(regs)
+        if 'Fecha' not in _d.columns: return regs
+        return _d[_msk_f(_d['Fecha'])].to_dict('records')
+    df_ops = _filt_df(df_ops, 'Fecha')
+    df_thdr_v1 = _filt_df(df_thdr_v1, 'Fecha_Op')
+    df_thdr_v2 = _filt_df(df_thdr_v2, 'Fecha_Op')
+    df_carga_v1 = _filt_df(df_carga_v1, 'Fecha')
+    df_carga_v2 = _filt_df(df_carga_v2, 'Fecha')
+    df_serv_tipo = _filt_df(df_serv_tipo, 'Fecha')
+    df_pax_tipo = _filt_df(df_pax_tipo, 'Fecha')
+    all_prmte_full = _filt_regs(all_prmte_full)
+    all_fact_full = _filt_regs(all_fact_full)
+    all_tr = _filt_regs(all_tr)
+    all_seat = _filt_regs(all_seat)
+    _rf = []
+    if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
+    _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
+    _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
+    st.caption("Filtros activos · " + " · ".join(_rf) + f" · {len(df_ops):,} día(s)")
+
 if _seccion == _SECCIONES[0]:
     _ep=st.session_state.get('_errores_proc',{})
     if _ep:
         with st.expander(f"⚠️ {len(_ep)} archivo(s) con error",expanded=True):
             for _n,_m in _ep.items(): st.error(f"**{_n}**: {_m}")
     if not df_ops.empty:
-        st.markdown("### 🎛️ Filtros de Resumen")
-        filtro_dia = st.multiselect(
-            "Tipo de Jornada:",
-            options=["L", "S", "D/F"],
-            default=["L", "S", "D/F"],
-            format_func=lambda x: {"L": "Laboral (L)", "S": "Sábado (S)", "D/F": "Domingo y Festivo (D/F)"}.get(x, x)
-        )
+        # Jornada/Año/Fecha se filtran en la barra global (arriba).
         
-        df_resumen = df_ops[df_ops['Tipo Día'].isin(filtro_dia)]
+        df_resumen = df_ops
         
         if 'drilldown_date' not in st.session_state:
             st.session_state.drilldown_date = None
@@ -1498,18 +1552,10 @@ if _seccion == _SECCIONES[8]:
     
     if not df_thdr_v1.empty and not df_thdr_v2.empty and not df_ops.empty and not df_carga_v1.empty:
         
-        # --- NUEVO FILTRO DE ESCENARIO POR TIPO DE JORNADA ---
-        st.markdown("#### 🎛️ Filtro de Escenario Analítico")
-        filtro_dia_multi = st.multiselect(
-            "Selecciona el Tipo de Jornada a analizar en el Ecosistema y Mapas de Calor:",
-            options=["L", "S", "D/F"],
-            default=["L", "S", "D/F"],
-            key="filtro_multi",
-            format_func=lambda x: {"L": "Laboral (L)", "S": "Sábado (S)", "D/F": "Domingo y Festivo (D/F)"}.get(x, x)
-        )
+        # El filtro de jornada/año/fecha viene de la barra global (arriba).
         
         # Filtrar matemáticamente todas las bases de datos subyacentes
-        fechas_validas = df_ops[df_ops['Tipo Día'].isin(filtro_dia_multi)]['Fecha']
+        fechas_validas = df_ops['Fecha']
         df_ops_filt = df_ops[df_ops['Fecha'].isin(fechas_validas)]
         df_thdr_v1_filt = df_thdr_v1[df_thdr_v1['Fecha_Op'].isin(fechas_validas)]
         df_thdr_v2_filt = df_thdr_v2[df_thdr_v2['Fecha_Op'].isin(fechas_validas)]
