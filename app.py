@@ -510,6 +510,20 @@ def excel_servicios(detalle):
         detalle.to_excel(w, sheet_name='Detalle', index=False)
     return buf.getvalue()
 
+def _prep_noche(registros, df_ops):
+    if not registros: return pd.DataFrame()
+    d = pd.DataFrame(registros)
+    d['Fecha'] = pd.to_datetime(d['Fecha']).dt.date
+    _m = df_ops.set_index(df_ops['Fecha'].dt.date)['Tipo Día'].to_dict() if (df_ops is not None and not df_ops.empty) else {}
+    d['TD'] = d['Fecha'].map(_m)
+    d['TD'] = d['TD'].fillna(d['Fecha'].apply(get_tipo_dia))
+    d['Hora_n'] = d['Hora'].str.slice(0, 2).astype(int)
+    d['_lim'] = d['TD'].map(lambda t: 6 if t == 'L' else (7 if t == 'S' else 8))
+    d = d[d['Hora_n'] < d['_lim']]
+    _nom = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo/Festivo'}
+    d['Tipo'] = d['TD'].map(lambda t: _nom.get(t, t))
+    return d
+
 
 def convertir_a_minutos(val):
     if pd.isna(val) or str(val).strip() == "": return None
@@ -721,6 +735,7 @@ df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame()
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
+all_prmte_2025=[]
 _errores_proc={}
 
 if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('_do_load'):
@@ -731,6 +746,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     all_seat=st.session_state['all_seat']
     all_fact_full=st.session_state['all_fact_full']
     all_prmte_full=st.session_state['all_prmte_full']
+    all_prmte_2025=st.session_state.get('all_prmte_2025',[])
     df_carga_v1=st.session_state.get('df_carga_v1', pd.DataFrame())
     df_carga_v2=st.session_state.get('df_carga_v2', pd.DataFrame())
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
@@ -826,9 +842,13 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             
                         for _,r in df_pd.dropna(subset=['ts']).iterrows():
                             ts=r['ts']
-                            if pd.isna(ts) or not (start_date<=ts.date()<=end_date): continue
+                            if pd.isna(ts): continue
+                            _en_rango=(start_date<=ts.date()<=end_date); _es_2025=(ts.year==2025)
+                            if not (_en_rango or _es_2025): continue
                             consumo=sum(parse_latam_number(r.get(c,0)) for c in cols_retiro)
-                            all_prmte_full.append({"Fecha":ts.normalize(),"Hora":f"{ts.hour:02d}:00","15min":f"{ts.hour:02d}:{ts.minute:02d}","Consumo":consumo})
+                            _reg_p={"Fecha":ts.normalize(),"Hora":f"{ts.hour:02d}:00","15min":f"{ts.hour:02d}:{ts.minute:02d}","Consumo":consumo}
+                            if _en_rango: all_prmte_full.append(_reg_p)
+                            if _es_2025: all_prmte_2025.append(_reg_p)
             except Exception as e: _errores_proc[f.name]=f"Factura/PRMTE: {e}"
             
     if _errores_proc: st.session_state['_errores_proc']=_errores_proc
@@ -934,7 +954,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
-                              'all_prmte_full':all_prmte_full,'_cache_key':_cache_key,
+                              'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo})
     st.session_state['_do_load'] = False
 
@@ -1361,16 +1381,8 @@ if _seccion == _SECCIONES[5]:
     st.markdown("### 🌙 Consumo Base Nocturno (Mediana)")
     if all_prmte_full:
         st.caption("Ventana nocturna por tipo de día — Laboral: 00:00–06:00 · Sábado: 00:00–07:00 · Domingo/Festivo: 00:00–08:00. Se usa la mediana porque es robusta frente a días atípicos.")
-        _dfp = pd.DataFrame(all_prmte_full)
-        _dfp['Fecha'] = pd.to_datetime(_dfp['Fecha']).dt.date
-        _mapa_td = df_ops.set_index(df_ops['Fecha'].dt.date)['Tipo Día'].to_dict() if not df_ops.empty else {}
-        _dfp['TD'] = _dfp['Fecha'].map(_mapa_td)
-        _dfp['TD'] = _dfp['TD'].fillna(_dfp['Fecha'].apply(get_tipo_dia))
-        _dfp['Hora_n'] = _dfp['Hora'].str.slice(0, 2).astype(int)
-        _dfp['_lim'] = _dfp['TD'].map(lambda t: 6 if t == 'L' else (7 if t == 'S' else 8))
-        _dfp = _dfp[_dfp['Hora_n'] < _dfp['_lim']]
-        _nom = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo/Festivo'}
-        _dfp['Tipo'] = _dfp['TD'].map(lambda t: _nom.get(t, t))
+        _dfp = _prep_noche(all_prmte_full, df_ops)
+        _dfp25 = _prep_noche(all_prmte_2025, df_ops)
         _cmap_td = {'Laboral': '#005195', 'Sábado': '#E85500', 'Domingo/Festivo': '#2CA02C'}
         _orden_td = [x for x in ['Laboral', 'Sábado', 'Domingo/Festivo'] if x in set(_dfp['Tipo'])]
         if _dfp.empty:
@@ -1388,9 +1400,8 @@ if _seccion == _SECCIONES[5]:
             st.markdown("#### 📐 Línea base nocturna (kWh/hora)")
             _hd = _dfp.groupby(['Tipo', 'Fecha', 'Hora'])['Consumo'].sum().reset_index()
             # --- Base anclada a la mediana de 2025 (año base ISO 50001) ---
-            _dfp_2025 = _dfp[pd.to_datetime(_dfp['Fecha']).dt.year == 2025]
-            _hay_2025 = not _dfp_2025.empty
-            _hd_base = (_dfp_2025 if _hay_2025 else _dfp).groupby(['Tipo', 'Fecha', 'Hora'])['Consumo'].sum().reset_index()
+            _hay_2025 = (_dfp25 is not None) and (not _dfp25.empty)
+            _hd_base = (_dfp25 if _hay_2025 else _dfp).groupby(['Tipo', 'Fecha', 'Hora'])['Consumo'].sum().reset_index()
             _base_hora = _hd_base.groupby('Tipo')['Consumo'].median()
             _base_global = float(_hd_base['Consumo'].median())
             _suf = "2025" if _hay_2025 else "periodo cargado"
