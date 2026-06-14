@@ -978,23 +978,33 @@ if not df_ops.empty:
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _fmin, _fmax = _ff.min().date(), _ff.max().date()
     _anios = sorted({d.year for d in _ff.dropna().dt.date}, reverse=True)
+    _dts = sorted(set(_ff.dropna().dt.date))
+    _iso = pd.to_datetime(pd.Series(_dts)).dt.isocalendar()
+    _wkdf = pd.DataFrame({'d': _dts, 'iy': _iso['year'].values, 'iw': _iso['week'].values})
+    _sem_map = {}
+    for (_iy, _iw), _g in _wkdf.groupby(['iy', 'iw']):
+        _lbl = f"Sem {int(_iw):02d} ({_g['d'].min().strftime('%d/%m')}–{_g['d'].max().strftime('%d/%m')})"
+        _sem_map[_lbl] = (int(_iy), int(_iw))
+    _op_sem = ["Todas"] + list(_sem_map.keys())
     _sig = (str(_fmin), str(_fmax), ",".join(map(str, _anios)))
     if st.session_state.get('_f_sig') != _sig:
         st.session_state['_f_sig'] = _sig
-        for _k in ('_f_anio', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
+        for _k in ('_f_anio', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
     with st.container(border=True):
         st.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
-        _cf1, _cf2, _cf3 = st.columns([1, 2.3, 2])
+        _cf1, _cf2, _cf3, _cf4 = st.columns([1, 1.7, 2.1, 1.9])
         with _cf1:
             _sel_a = st.selectbox("Año", ["Todos"] + [str(a) for a in _anios], key="_f_anio")
         with _cf2:
+            _sel_s = st.selectbox("Semana", _op_sem, key="_f_semana")
+        with _cf3:
             _opj = list(_J_COD.keys())
             if hasattr(st, "pills"):
                 _selj = st.pills("Tipo de jornada", _opj, selection_mode="multi", default=_opj, key="_f_jornada")
             else:
                 _selj = st.multiselect("Tipo de jornada", _opj, default=_opj, key="_f_jornada")
             _selj = _selj or _opj
-        with _cf3:
+        with _cf4:
             _rg = st.date_input("Fecha", value=(_fmin, _fmax), min_value=_fmin, max_value=_fmax, key="_f_fecha")
             _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
     _cods = {_J_COD[j] for j in _selj}
@@ -1002,6 +1012,10 @@ if not df_ops.empty:
         f = pd.to_datetime(serie, errors='coerce')
         m = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
         if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
+        if _sel_s != "Todas":
+            _iy2, _iw2 = _sem_map[_sel_s]
+            _ic = f.dt.isocalendar()
+            m = m & (_ic['year'] == _iy2) & (_ic['week'] == _iw2)
         if len(_cods) < 3:
             td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None)
             m = m & td.isin(_cods)
@@ -1027,6 +1041,7 @@ if not df_ops.empty:
     all_seat = _filt_regs(all_seat)
     _rf = []
     if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
+    if _sel_s != "Todas": _rf.append(_sel_s)
     _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
     _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
     st.caption("Filtros activos · " + " · ".join(_rf) + f" · {len(df_ops):,} día(s)")
