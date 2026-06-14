@@ -573,16 +573,18 @@ def tiempos_servicios(df_thdr_v1, df_thdr_v2, fechas=None):
     return out[out['Dur'].notna()].reset_index(drop=True)
 
 def _stats_dur(df, col):
-    g = df.dropna(subset=['Dur']).groupby(col)['Dur']
+    cols = col if isinstance(col, list) else [col]
+    g = df.dropna(subset=['Dur']).groupby(cols)['Dur']
     return g.agg(['mean', 'median', 'max', 'min', 'count']).reset_index()
 
-def _render_tv_cards(stats, col, badge=None):
+def _render_tv_cards(stats, col, badge=None, badge_col=None):
     filas = stats.to_dict('records')
     for j in range(0, len(filas), 3):
         chunk = filas[j:j + 3]
         cols = st.columns(3)
         for k, r in enumerate(chunk):
-            bdg = f'<span class="tv-badge">{badge}</span>' if badge else ''
+            _b = r[badge_col] if badge_col else badge
+            bdg = f'<span class="tv-badge">{_b}</span>' if _b else ''
             html = (f'<div class="tv-card"><div class="tv-head">{r[col]} {bdg}</div>'
                     f'<div class="tv-grid">'
                     f'<div class="tv-stat"><div class="tv-lbl">Promedio</div><div class="tv-val">{_fmt_mmss(r["mean"])}</div></div>'
@@ -604,6 +606,9 @@ def _thdr_filtros():
     if _all.empty: return v1, v2
     _fmin = _all.dt.date.min(); _fmax = _all.dt.date.max()
     _anios = sorted({d.year for d in _all.dt.date}, reverse=True)
+    _MES_t = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    _op_mes_t = ["Todos"] + [_MES_t[mn - 1] for mn in sorted(set(_all.dt.month))]
+    _mesnum_t = {_MES_t[i]: i + 1 for i in range(12)}
     _dts = sorted(set(_all.dt.date))
     _iso = pd.to_datetime(pd.Series(_dts)).dt.isocalendar()
     _wkdf = pd.DataFrame({'d': _dts, 'iy': _iso['year'].values, 'iw': _iso['week'].values})
@@ -614,11 +619,12 @@ def _thdr_filtros():
     _tsig = (str(_fmin), str(_fmax), ",".join(map(str, _anios)))
     if st.session_state.get('_t_sig') != _tsig:
         st.session_state['_t_sig'] = _tsig
-        for _k in ('_t_anio', '_t_sem', '_t_jor', '_t_fec'): st.session_state.pop(_k, None)
+        for _k in ('_t_anio', '_t_mes', '_t_sem', '_t_jor', '_t_fec'): st.session_state.pop(_k, None)
     with st.container(border=True):
         st.markdown("**🎛️ Filtros THDR** — Año · Semana · Jornada · Fecha")
-        _c1, _c2, _c3, _c4 = st.columns([1, 1.7, 2.1, 1.9])
+        _c1, _cmm, _c2, _c3, _c4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
         with _c1: _a = st.selectbox("Año", ["Todos"] + [str(x) for x in _anios], key="_t_anio")
+        with _cmm: _me = st.selectbox("Mes", _op_mes_t, key="_t_mes")
         with _c2: _sw = st.selectbox("Semana", ["Todas"] + list(_smap.keys()), key="_t_sem")
         with _c3:
             _oj = list(_JC.keys())
@@ -632,6 +638,7 @@ def _thdr_filtros():
         f = pd.to_datetime(serie, errors='coerce')
         mm = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
         if _a != "Todos": mm = mm & (f.dt.year == int(_a))
+        if _me != "Todos": mm = mm & (f.dt.month == _mesnum_t[_me])
         if _sw != "Todas":
             _iy2, _iw2 = _smap[_sw]; _ic = f.dt.isocalendar()
             mm = mm & (_ic['year'] == _iy2) & (_ic['week'] == _iw2)
@@ -1111,6 +1118,9 @@ if not df_ops.empty:
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _fmin, _fmax = _ff.min().date(), _ff.max().date()
     _anios = sorted({d.year for d in _ff.dropna().dt.date}, reverse=True)
+    _MES_g = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    _op_mes_g = ["Todos"] + [_MES_g[mn - 1] for mn in sorted(set(_ff.dropna().dt.month))]
+    _mesnum_g = {_MES_g[i]: i + 1 for i in range(12)}
     _dts = sorted(set(_ff.dropna().dt.date))
     _iso = pd.to_datetime(pd.Series(_dts)).dt.isocalendar()
     _wkdf = pd.DataFrame({'d': _dts, 'iy': _iso['year'].values, 'iw': _iso['week'].values})
@@ -1122,12 +1132,14 @@ if not df_ops.empty:
     _sig = (str(_fmin), str(_fmax), ",".join(map(str, _anios)))
     if st.session_state.get('_f_sig') != _sig:
         st.session_state['_f_sig'] = _sig
-        for _k in ('_f_anio', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
+        for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
     with st.container(border=True):
         st.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
-        _cf1, _cf2, _cf3, _cf4 = st.columns([1, 1.7, 2.1, 1.9])
+        _cf1, _cfm, _cf2, _cf3, _cf4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
         with _cf1:
             _sel_a = st.selectbox("Año", ["Todos"] + [str(a) for a in _anios], key="_f_anio")
+        with _cfm:
+            _sel_m = st.selectbox("Mes", _op_mes_g, key="_f_mes")
         with _cf2:
             _sel_s = st.selectbox("Semana", _op_sem, key="_f_semana")
         with _cf3:
@@ -1145,6 +1157,7 @@ if not df_ops.empty:
         f = pd.to_datetime(serie, errors='coerce')
         m = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
         if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
+        if _sel_m != "Todos": m = m & (f.dt.month == _mesnum_g[_sel_m])
         if _sel_s != "Todas":
             _iy2, _iw2 = _sem_map[_sel_s]
             _ic = f.dt.isocalendar()
@@ -1174,6 +1187,7 @@ if not df_ops.empty:
     all_seat = _filt_regs(all_seat)
     _rf = []
     if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
+    if _sel_m != "Todos": _rf.append(_sel_m)
     if _sel_s != "Todas": _rf.append(_sel_s)
     _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
     _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
@@ -1694,9 +1708,9 @@ if _seccion == _SECCIONES[7]:
         else:
             _ss = _stats_dur(_tv, 'Tipo de servicio').sort_values('count', ascending=False)
             _render_tv_cards(_ss, 'Tipo de servicio')
-            st.markdown("#### ⏱️ Tiempo de viaje por tipo de tren")
-            _stt = _stats_dur(_tv, 'Tipo de tren').sort_values('count', ascending=False)
-            _render_tv_cards(_stt, 'Tipo de tren')
+            st.markdown("#### ⏱️ Tiempo de viaje por tipo de tren y tipo de servicio")
+            _stt = _stats_dur(_tv, ['Tipo de tren', 'Tipo de servicio']).sort_values('count', ascending=False)
+            _render_tv_cards(_stt, 'Tipo de servicio', badge_col='Tipo de tren')
             st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Formato HH:MM:SS.")
         if not _det.empty:
             st.divider()
