@@ -449,6 +449,26 @@ def combinar_fuentes(ul, carpeta):
 
 # --- 5. FUNCIONES DE PROCESAMIENTO CORE ---
 # --- Servicios por tipo de tren (material rodante) + export Excel ---
+try:
+    import plotly.io as _pio
+    for _tn in ("plotly", "plotly_white", "simple_white", "none", "ggplot2", "seaborn", "plotly_dark", "presentation"):
+        if _tn in _pio.templates: _pio.templates[_tn].layout.separators = ",."
+except Exception:
+    pass
+
+def _ncl(x, dec=0):
+    try: v = float(x)
+    except (ValueError, TypeError): return str(x)
+    s = f"{v:.{dec}f}"
+    ent, _, frac = s.partition(".")
+    neg = ent.startswith("-"); ent = ent.lstrip("-")
+    grp = ""
+    while len(ent) > 3:
+        grp = "." + ent[-3:] + grp; ent = ent[:-3]
+    ent = ent + grp
+    out = ent + ("," + frac if frac else "")
+    return ("-" if neg else "") + out
+
 def _tipo_tren(m1):
     n = pd.to_numeric(m1, errors='coerce')
     if pd.isna(n): return "Sin asignar"
@@ -591,7 +611,7 @@ def _render_tv_cards(stats, col, badge=None, badge_col=None):
                     f'<div class="tv-stat"><div class="tv-lbl">Mediana</div><div class="tv-val">{_fmt_mmss(r["median"])}</div></div>'
                     f'<div class="tv-stat"><div class="tv-lbl">Máxima</div><div class="tv-val">{_fmt_mmss(r["max"])}</div></div>'
                     f'<div class="tv-stat"><div class="tv-lbl">Mínima</div><div class="tv-val">{_fmt_mmss(r["min"])}</div></div>'
-                    f'</div><div class="tv-foot">N = {int(r["count"]):,} servicios</div></div>')
+                    f'</div><div class="tv-foot">N = {_ncl(int(r["count"]), 0)} servicios</div></div>')
             cols[k].markdown(html, unsafe_allow_html=True)
 
 def _mat_sal_lle(df_thdr):
@@ -1254,7 +1274,7 @@ if not df_ops.empty and _seccion != _SECCIONES[7]:
     if _sel_s != "Todas": _rf.append(_sel_s)
     _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
     _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
-    st.caption("Filtros activos · " + " · ".join(_rf) + f" · {len(df_ops):,} día(s)")
+    st.caption("Filtros activos · " + " · ".join(_rf) + f" · {_ncl(len(df_ops), 0)} día(s)")
 
 if _seccion == _SECCIONES[0]:
     _ep=st.session_state.get('_errores_proc',{})
@@ -1350,8 +1370,8 @@ if _seccion == _SECCIONES[0]:
                     _card_metric(_cols[0], _label_total, _fmt(_df[_col].sum() if _serie is not None else 0), _unit)
                     for _i, _t2 in enumerate(_tipos_ord):
                         _card_metric(_cols[_i + 1], _t2, _fmt(_serie[_t2]), _unit, _via_de(_t2))
-            _fmt_int = lambda v: f"{int(round(v)):,}"
-            _fmt_km = lambda v: f"{v:,.1f}"
+            _fmt_int = lambda v: f"{_ncl(int(round(v)), 0)}"
+            _fmt_km = lambda v: f"{_ncl(v, 1)}"
             ev_serv = ev_pax = ev_tk = None
 
             def _layout_tipo(_fig):
@@ -1388,7 +1408,7 @@ if _seccion == _SECCIONES[0]:
                 _cta, _ctb = st.columns([1, 1.5])
                 with _cta:
                     st.dataframe(_piv.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
-                    st.caption(f"Total: {int(_piv['Total'].sum()):,} servicios")
+                    st.caption(f"Total: {_ncl(int(_piv['Total'].sum()), 0)} servicios")
                 with _ctb:
                     _dd = _det_tren.copy()
                     _dd['Tren · Comp'] = _dd['Tipo de tren'] + " · " + _dd['Composicion']
@@ -1434,13 +1454,13 @@ if _seccion == _SECCIONES[0]:
                 fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]',
                                  color_discrete_sequence=["#005195"],
                                  hover_data=hover_config, title="Odómetro Real (UMR)")
-                fig_odo.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_odo.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_odo = st.plotly_chart(fig_odo, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("Odómetro Total", f"{df_resumen['Odómetro [km]'].sum():,.2f} km")
+                st.metric("Odómetro Total", f"{_ncl(df_resumen['Odómetro [km]'].sum(), 2)} km")
 
             st.divider()
 
@@ -1450,7 +1470,7 @@ if _seccion == _SECCIONES[0]:
                 fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)',
                                  color_discrete_sequence=["#E85500"],
                                  hover_data=hover_config, title="Tasa de Acoplamiento (UMR %)")
-                fig_umr.update_traces(texttemplate='%{y:,.2f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_umr.update_traces(texttemplate='%{_ncl(y, 2)}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
@@ -1459,7 +1479,7 @@ if _seccion == _SECCIONES[0]:
                 _tot_tk_umr = df_resumen['Tren-Km [km]'].sum()
                 _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
                 umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
-                st.metric("Tasa UMR Global", f"{umr_global:,.2f} %")
+                st.metric("Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
 
             st.divider()
 
@@ -1471,15 +1491,15 @@ if _seccion == _SECCIONES[0]:
                                   barmode='stack',
                                   color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                                   hover_data=hover_config, title="Consumo Energético (kWh)")
-                fig_ener.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_ener.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                        legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                        bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_ener = st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
             with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Total Tracción", f"{df_plot_ener['Tracción'].sum():,.2f} kWh")
-                st.metric("Total Baja Tensión", f"{df_plot_ener['Baja Tensión'].sum():,.2f} kWh")
+                st.metric("Total Tracción", f"{_ncl(df_plot_ener['Tracción'].sum(), 2)} kWh")
+                st.metric("Total Baja Tensión", f"{_ncl(df_plot_ener['Baja Tensión'].sum(), 2)} kWh")
 
             st.divider()
 
@@ -1489,7 +1509,7 @@ if _seccion == _SECCIONES[0]:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)',
                                      color_discrete_sequence=["#E85500"],
                                      hover_data=hover_config, title="Desempeño Energético (IDE)")
-                fig_ide_bar.update_traces(texttemplate='%{y:,.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_ide_bar.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                           bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_ide_bar = st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
@@ -1498,7 +1518,7 @@ if _seccion == _SECCIONES[0]:
                 _tot_tr_ide = df_resumen['E_Tr'].sum()
                 _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
                 ide_global = (_tot_tr_ide / _tot_odo_ide) if _tot_odo_ide > 0 else 0
-                st.metric("IDE Global", f"{ide_global:,.2f} kWh/km")
+                st.metric("IDE Global", f"{_ncl(ide_global, 2)} kWh/km")
 
             chart_events = [ev_serv, ev_pax, ev_tk, ev_odo, ev_umr, ev_ener, ev_ide_bar]
             
@@ -1591,7 +1611,7 @@ if _seccion == _SECCIONES[4]:
             
             with c_noct2:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Consumo Nocturno Promedio", f"{promedio_noche:,.0f} kWh/noche")
+                st.metric("Consumo Nocturno Promedio", f"{_ncl(promedio_noche, 0)} kWh/noche")
                 st.info("💡 **Insight:** Picos en este gráfico indican que los trenes no fueron apagados correctamente en cocheras, manteniendo equipos auxiliares/climatización operando de forma 'vampira'.")
         
         st.divider()
@@ -1608,7 +1628,7 @@ if _seccion == _SECCIONES[4]:
             y=matriz_15m['Fecha'],
             colorscale='Turbo',
             hoverongaps=False,
-            hovertemplate='Día: %{y}<br>Hora: %{x}<br>Consumo: %{z:,.1f} kWh<extra></extra>'
+            hovertemplate='Día: %{y}<br>Hora: %{x}<br>Consumo: %{_ncl(z, 1)} kWh<extra></extra>'
         ))
         
         fig_heat.update_layout(
@@ -1672,7 +1692,7 @@ if _seccion == _SECCIONES[5]:
             st.markdown("#### Mediana del consumo nocturno total por día")
             _cm = st.columns(max(1, len(_orden_td)))
             for _i, _t in enumerate(_orden_td):
-                _cm[_i].metric(_t, f"{_med_tot.get(_t, 0):,.0f} kWh")
+                _cm[_i].metric(_t, f"{_ncl(_med_tot.get(_t, 0), 0)} kWh")
             st.caption("Mediana del total acumulado en la ventana nocturna de cada día (kWh/noche).")
 
             st.divider()
@@ -1686,11 +1706,11 @@ if _seccion == _SECCIONES[5]:
             _suf = "2025" if _hay_2025 else "periodo cargado"
             _cb = st.columns(max(1, len(_orden_td)))
             for _i, _t in enumerate(_orden_td):
-                _cb[_i].metric(f"Base {_t} ({_suf})", f"{_base_hora.get(_t, 0):,.0f} kWh/h")
+                _cb[_i].metric(f"Base {_t} ({_suf})", f"{_ncl(_base_hora.get(_t, 0), 0)} kWh/h")
             if _hay_2025:
-                st.success(f"**Línea base nocturna general (2025): {_base_global:,.0f} kWh/hora** — mediana del consumo nocturno por hora durante 2025 (año base de referencia).")
+                st.success(f"**Línea base nocturna general (2025): {_ncl(_base_global, 0)} kWh/hora** — mediana del consumo nocturno por hora durante 2025 (año base de referencia).")
             else:
-                st.warning(f"No hay PRMTE de 2025 cargado: la base usa el periodo cargado ({_base_global:,.0f} kWh/hora). Carga el PRMTE de 2025 para anclar la base al año base.")
+                st.warning(f"No hay PRMTE de 2025 cargado: la base usa el periodo cargado ({_ncl(_base_global, 0)} kWh/hora). Carga el PRMTE de 2025 para anclar la base al año base.")
             st.caption("Valor de referencia (ISO 50001): la base es la mediana nocturna de 2025; si el consumo horario nocturno la supera de forma sostenida, suele indicar equipos operando sin necesidad (climatización, trenes sin apagar, auxiliares).")
 
             st.divider()
@@ -1712,7 +1732,7 @@ if _seccion == _SECCIONES[5]:
                           labels={'Hora': 'Hora', 'Consumo': 'Mediana (kWh/hora)', 'Tipo': ''})
             figh.update_layout(margin=dict(t=10, b=0, l=0, r=0),
                                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
-            figh.add_hline(y=_base_global, line_dash="dash", line_color="#475569", annotation_text=f"Base {_suf} · {_base_global:,.0f} kWh/h", annotation_position="top left")
+            figh.add_hline(y=_base_global, line_dash="dash", line_color="#475569", annotation_text=f"Base {_suf} · {_ncl(_base_global, 0)} kWh/h", annotation_position="top left")
             st.plotly_chart(figh, use_container_width=True, config={'locale': 'es'})
             st.caption("Por hora se suman los cuatro tramos de 15 min de cada día (kWh/hora) y luego se toma la mediana entre días.")
 
@@ -1762,9 +1782,9 @@ if _seccion == _SECCIONES[7]:
         _det = detalle_servicios(df_thdr_v1, df_thdr_v2)
         _tv = tiempos_servicios(df_thdr_v1, df_thdr_v2)
         _k1, _k2, _k3 = st.columns(3)
-        _k1.metric("Servicios totales", f"{len(_det):,}")
-        _k2.metric("Dobles", f"{int((_det['Composicion'] == 'Doble').sum()):,}" if not _det.empty else "0")
-        _k3.metric("Simples", f"{int((_det['Composicion'] == 'Simple').sum()):,}" if not _det.empty else "0")
+        _k1.metric("Servicios totales", f"{_ncl(len(_det), 0)}")
+        _k2.metric("Dobles", f"{_ncl(int((_det['Composicion'] == 'Doble').sum()), 0)}" if not _det.empty else "0")
+        _k3.metric("Simples", f"{_ncl(int((_det['Composicion'] == 'Simple').sum()), 0)}" if not _det.empty else "0")
         st.markdown("#### ⏱️ Tiempo de viaje por tipo de servicio")
         if _tv.empty:
             st.info("No se pudieron calcular tiempos de viaje (faltan horas de salida/llegada en la THDR).")
@@ -2162,12 +2182,12 @@ if _seccion == _SECCIONES[8]:
                                                     y=pivot_pax.index,
                                                     color_continuous_scale="Greens",
                                                     aspect="auto")
-                            fig_heat_pax.update_traces(hovertemplate="Hora Local: %{x}:00<br>Sector: %{y}<br>Carga PAX: %{z:,.0f}<extra></extra>")
+                            fig_heat_pax.update_traces(hovertemplate="Hora Local: %{x}:00<br>Sector: %{y}<br>Carga PAX: %{_ncl(z, 0)}<extra></extra>")
                             fig_heat_pax.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
                             st.plotly_chart(fig_heat_pax, use_container_width=True)
                             
                             pax_max = df_pax_heat.loc[df_pax_heat['Pax'].idxmax()]
-                            st.caption(f"**Insight:** Mayor carga prom. en **{pax_max['Estacion']}** a las **{pax_max['Hora_Estacion']:02d}:00 hrs** ({pax_max['Pax']:,.0f} PAX).")
+                            st.caption(f"**Insight:** Mayor carga prom. en **{pax_max['Estacion']}** a las **{pax_max['Hora_Estacion']:02d}:00 hrs** ({_ncl(pax_max['Pax'], 0)} PAX).")
                         else:
                             st.info("Formato de pasajeros no detectado (ni por estación ni consolidado).")
 
@@ -2285,11 +2305,11 @@ if _seccion == _SECCIONES[8]:
                                                     labels=dict(x="Hora Local", y="Métrica", color="PAX Prom"),
                                                     x=pivot_pax_v2.columns, y=pivot_pax_v2.index,
                                                     color_continuous_scale="Greens", aspect="auto")
-                            fig_heat_pax_v2.update_traces(hovertemplate="Hora Local: %{x}:00<br>Sector: %{y}<br>Carga PAX: %{z:,.0f}<extra></extra>")
+                            fig_heat_pax_v2.update_traces(hovertemplate="Hora Local: %{x}:00<br>Sector: %{y}<br>Carga PAX: %{_ncl(z, 0)}<extra></extra>")
                             fig_heat_pax_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
                             st.plotly_chart(fig_heat_pax_v2, use_container_width=True)
                             pax_max_v2 = df_pax_heat_v2.loc[df_pax_heat_v2['Pax'].idxmax()]
-                            st.caption(f"**Insight:** Mayor carga prom. en **{pax_max_v2['Estacion']}** a las **{pax_max_v2['Hora_Estacion']:02d}:00 hrs** ({pax_max_v2['Pax']:,.0f} PAX).")
+                            st.caption(f"**Insight:** Mayor carga prom. en **{pax_max_v2['Estacion']}** a las **{pax_max_v2['Hora_Estacion']:02d}:00 hrs** ({_ncl(pax_max_v2['Pax'], 0)} PAX).")
                         else:
                             st.info("Formato de pasajeros no detectado (ni por estación ni consolidado).")
                 else:
@@ -2401,7 +2421,7 @@ if _seccion == _SECCIONES[10]:
                             hr_agrupado = df_hr_filt.groupby('Hora')['Consumo'].mean()
                             hora_peak = hr_agrupado.idxmax()
                             consumo_peak = hr_agrupado.max()
-                            peak_hr_msg = f"La 'Hora Punta Eléctrica' ocurre a las **{hora_peak}** ({consumo_peak:,.0f} kWh prom.)."
+                            peak_hr_msg = f"La 'Hora Punta Eléctrica' ocurre a las **{hora_peak}** ({_ncl(consumo_peak, 0)} kWh prom.)."
                             
                             df_hr_filt['Hora_n'] = df_hr_filt['Hora'].astype(str).str.slice(0, 2).astype(int)
                             limite_hora = 6 if tipo == "L" else (7 if tipo == "S" else 8)
@@ -2412,9 +2432,9 @@ if _seccion == _SECCIONES[10]:
                                 promedio_noche = noche_diario['Consumo'].mean()
                                 max_noche = noche_diario.loc[noche_diario['Consumo'].idxmax()]
                                 if max_noche['Consumo'] > (promedio_noche * 1.2) and promedio_noche > 0:
-                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{max_noche['Consumo']:,.0f} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')} (Ventana: 00:00 a 0{limite_hora}:00 hrs)."
+                                    noche_msg = f"🌙 **Alerta Parásita:** Pico de **{_ncl(max_noche['Consumo'], 0)} kWh** la madrugada del {max_noche['Fecha'].strftime('%d/%m')} (Ventana: 00:00 a 0{limite_hora}:00 hrs)."
                                 else:
-                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({promedio_noche:,.0f} kWh de 00:00 a 0{limite_hora}:00 hrs)."
+                                    noche_msg = f"🌙 **Auditoría Nocturna:** Estable ({_ncl(promedio_noche, 0)} kWh de 00:00 a 0{limite_hora}:00 hrs)."
 
                     estacion_msg = "Sin datos de estaciones."
                     df_c_filt = pd.DataFrame()
@@ -2437,7 +2457,7 @@ if _seccion == _SECCIONES[10]:
                             total_viajes = len(df_t_filt)
                             if 'Unidad' in df_t_filt.columns:
                                 v_doble = len(df_t_filt[df_t_filt['Unidad'].astype(str).str.contains('M', case=False, na=False)])
-                                thdr_msg = f"**{total_viajes:,} servicios** en total. Uso de Tracción Doble: **{(v_doble/total_viajes*100) if total_viajes>0 else 0:.1f}%**."
+                                thdr_msg = f"**{_ncl(total_viajes, 0)} servicios** en total. Uso de Tracción Doble: **{(v_doble/total_viajes*100) if total_viajes>0 else 0:.1f}%**."
 
                         def formato_hora(h):
                             if pd.isna(h): return "N/A"
@@ -2491,7 +2511,7 @@ if _seccion == _SECCIONES[10]:
                         st.success(f"🏆 **Mayor Eficiencia:** {dia_min_ide['Fecha (ES)']} (IDE: **{dia_min_ide['IDE (kWh/km)']:.2f} kWh/km**)")
                         st.warning(f"🚨 **Día Crítico (Ineficiente):** {dia_max_ide['Fecha (ES)']} (IDE: **{dia_max_ide['IDE (kWh/km)']:.2f} kWh/km**)")
                         if dia_max_pax is not None and dia_max_pax['PAX'] > 0:
-                            st.info(f"👥 **Peak de Demanda:** {dia_max_pax['Fecha (ES)']} con **{int(dia_max_pax['PAX']):,}** personas.")
+                            st.info(f"👥 **Peak de Demanda:** {dia_max_pax['Fecha (ES)']} con **{_ncl(int(dia_max_pax['PAX']), 0)}** personas.")
                         st.info(f"🚆 **Tasa UMR Promedio:** {umr_global:.1f}%.")
                         
                     with c_rep2:
@@ -2582,25 +2602,25 @@ if _seccion == _SECCIONES[11]:
                             
                         st.markdown("##### 🔍 Evidencia Numérica del Día")
                         a1, a2, a3, a4 = st.columns(4)
-                        a1.metric("E. Total", f"{r['E_Total']:,.0f} kWh")
-                        a2.metric("Tracción", f"{r['E_Tr']:,.0f} kWh")
-                        a3.metric("12 kV", f"{r['E_12']:,.0f} kWh")
-                        a4.metric("IDE", f"{r['IDE (kWh/km)']:,.2f} kWh/km")
+                        a1.metric("E. Total", f"{_ncl(r['E_Total'], 0)} kWh")
+                        a2.metric("Tracción", f"{_ncl(r['E_Tr'], 0)} kWh")
+                        a3.metric("12 kV", f"{_ncl(r['E_12'], 0)} kWh")
+                        a4.metric("IDE", f"{_ncl(r['IDE (kWh/km)'], 2)} kWh/km")
                         
                         b1, b2, b3, b4 = st.columns(4)
                         noche_ok = ("Noche_kWh" in df_diag.columns) and pd.notna(r["Noche_kWh"])
-                        b1.metric("Nocturno", f"{r['Noche_kWh']:,.0f} kWh" if noche_ok else "—")
-                        b2.metric("Servicios", f"{int(r['Servicios']):,}")
-                        b3.metric("PAX", f"{int(r['PAX']):,}" if pd.notna(r["PAX"]) else "—")
+                        b1.metric("Nocturno", f"{_ncl(r['Noche_kWh'], 0)} kWh" if noche_ok else "—")
+                        b2.metric("Servicios", f"{_ncl(int(r['Servicios']), 0)}")
+                        b3.metric("PAX", f"{_ncl(int(r['PAX']), 0)}" if pd.notna(r["PAX"]) else "—")
                         odo_ok = ("Odómetro [km]" in df_diag.columns) and pd.notna(r["Odómetro [km]"])
-                        b4.metric("Odómetro", f"{r['Odómetro [km]']:,.0f} km" if odo_ok else "—")
+                        b4.metric("Odómetro", f"{_ncl(r['Odómetro [km]'], 0)} km" if odo_ok else "—")
 
                         st.markdown("##### 🚆 Análisis Logístico y Contexto")
                         cols_ctx = st.columns(2)
                         bits = []
                         if pd.notna(r.get("Doble_pct")): bits.append(f"**Uso Tracción Doble:** {r['Doble_pct']:.0f}%")
                         if r.get("Est_critica"): bits.append(f"**Punto de Saturación:** Estación {r['Est_critica']}")
-                        if pd.notna(r.get("Ocup_max")): bits.append(f"**Peak Carga de Tren:** {int(r['Ocup_max']):,} PAX")
+                        if pd.notna(r.get("Ocup_max")): bits.append(f"**Peak Carga de Tren:** {_ncl(int(r['Ocup_max']), 0)} PAX")
                         if pd.notna(r.get("Viaje_prom")): bits.append(f"**Viaje Promedio (Malla):** {minutos_a_hhmmss(r['Viaje_prom'])}")
                         if pd.notna(r.get("Brecha_min")): bits.append(f"**Brecha Irregularidad:** {minutos_a_hhmmss(r['Brecha_min'])}")
                             
