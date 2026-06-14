@@ -510,6 +510,87 @@ def excel_servicios(detalle):
         detalle.to_excel(w, sheet_name='Detalle', index=False)
     return buf.getvalue()
 
+def _fmt_mmss(m):
+    if m is None or (isinstance(m, float) and np.isnan(m)) or pd.isna(m): return "—"
+    m = float(m); _s = int(round((m - int(m)) * 60))
+    if _s == 60: m += 1; _s = 0
+    return f"{int(m)}:{_s:02d}"
+
+def _od_y_dur(df_thdr):
+    if df_thdr is None or getattr(df_thdr, 'empty', True):
+        return pd.DataFrame(columns=['OD', 'Dur'])
+    _ests = ESTACIONES
+    _S = np.full((len(df_thdr), len(_ests)), np.nan)
+    _L = np.full((len(df_thdr), len(_ests)), np.nan)
+    for _j, _e in enumerate(_ests):
+        _cs = get_col_thdr(df_thdr, _e, 'SALIDA'); _cl = get_col_thdr(df_thdr, _e, 'LLEGADA')
+        if _cs: _S[:, _j] = pd.to_numeric(df_thdr[_cs], errors='coerce').values
+        if _cl: _L[:, _j] = pd.to_numeric(df_thdr[_cl], errors='coerce').values
+    _ods = []; _durs = []
+    for _r in range(len(df_thdr)):
+        _s = _S[_r]; _l = _L[_r]
+        _orig = [k for k in range(len(_ests)) if not np.isnan(_s[k]) and np.isnan(_l[k])]
+        _dest = [k for k in range(len(_ests)) if not np.isnan(_l[k]) and np.isnan(_s[k])]
+        _oi = _orig[0] if _orig else (int(np.nanargmin(_s)) if not np.isnan(_s).all() else None)
+        _di = _dest[-1] if _dest else (int(np.nanargmax(_l)) if not np.isnan(_l).all() else None)
+        if _oi is None or _di is None:
+            _ods.append(pd.NA); _durs.append(np.nan); continue
+        _ods.append(f"{SHORT_NAMES_DICT.get(_ests[_oi], _ests[_oi])}→{SHORT_NAMES_DICT.get(_ests[_di], _ests[_di])}")
+        _d = _l[_di] - _s[_oi]
+        if not np.isnan(_d) and _d < -500: _d += 1440
+        _durs.append(_d if (not np.isnan(_d) and 1 <= _d <= 180) else np.nan)
+    return pd.DataFrame({'OD': _ods, 'Dur': _durs}, index=df_thdr.index)
+
+def tiempos_servicios(df_thdr_v1, df_thdr_v2, fechas=None):
+    parts = []
+    for t in (df_thdr_v1, df_thdr_v2):
+        if t is None or getattr(t, 'empty', True): continue
+        x = t.copy()
+        if fechas is not None and 'Fecha_Op' in x.columns:
+            x = x[pd.to_datetime(x['Fecha_Op']).dt.normalize().isin(pd.to_datetime(list(fechas)))]
+        if x.empty: continue
+        _r = _od_y_dur(x)
+        if 'Tipo_Servicio' in x.columns:
+            _ts = pd.Series(x['Tipo_Servicio'].values, index=x.index).astype(object)
+            _ts = _ts.where(_ts.notna(), _r['OD'])
+        else:
+            _ts = _r['OD']
+        c1 = _col_tt(x, 'MOTRIZ 1'); c2 = _col_tt(x, 'MOTRIZ 2')
+        df = pd.DataFrame({'Fecha': pd.to_datetime(x['Fecha_Op']).dt.date.values})
+        df['Tipo de servicio'] = pd.Series(_ts).where(pd.Series(_ts).notna(), 'Sin clasificar').values
+        df['Dur'] = _r['Dur'].values
+        _m1 = pd.to_numeric(x[c1], errors='coerce') if c1 else pd.Series(np.nan, index=x.index)
+        df['Tipo de tren'] = _m1.apply(_tipo_tren).values
+        _doble = pd.to_numeric(x[c2], errors='coerce').notna() if c2 else pd.Series(False, index=x.index)
+        if 'Unidad' in x.columns:
+            _doble = _doble | x['Unidad'].astype(str).str.upper().str.strip().eq('M')
+        df['Composicion'] = np.where(_doble.values, 'Doble', 'Simple')
+        df.loc[df['Tipo de tren'] == 'SFE', 'Composicion'] = 'Simple'
+        parts.append(df)
+    if not parts: return pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True)
+    return out[out['Dur'].notna()].reset_index(drop=True)
+
+def _stats_dur(df, col):
+    g = df.dropna(subset=['Dur']).groupby(col)['Dur']
+    return g.agg(['mean', 'median', 'max', 'min', 'count']).reset_index()
+
+def _render_tv_cards(stats, col, badge=None):
+    filas = stats.to_dict('records')
+    for j in range(0, len(filas), 3):
+        chunk = filas[j:j + 3]
+        cols = st.columns(3)
+        for k, r in enumerate(chunk):
+            bdg = f'<span class="tv-badge">{badge}</span>' if badge else ''
+            html = (f'<div class="tv-card"><div class="tv-head">{r[col]} {bdg}</div>'
+                    f'<div class="tv-grid">'
+                    f'<div class="tv-stat"><div class="tv-lbl">Promedio</div><div class="tv-val">{_fmt_mmss(r["mean"])}</div></div>'
+                    f'<div class="tv-stat"><div class="tv-lbl">Mediana</div><div class="tv-val">{_fmt_mmss(r["median"])}</div></div>'
+                    f'<div class="tv-stat"><div class="tv-lbl">Máxima</div><div class="tv-val">{_fmt_mmss(r["max"])}</div></div>'
+                    f'<div class="tv-stat"><div class="tv-lbl">Mínima</div><div class="tv-val">{_fmt_mmss(r["min"])}</div></div>'
+                    f'</div><div class="tv-foot">N = {int(r["count"]):,} servicios</div></div>')
+            cols[k].markdown(html, unsafe_allow_html=True)
+
 def _prep_noche(registros, df_ops):
     if not registros: return pd.DataFrame()
     d = pd.DataFrame(registros)
@@ -968,7 +1049,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📥 Servicios (Excel)"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
@@ -1543,9 +1624,40 @@ if _seccion == _SECCIONES[6]:
     else: st.info("No hay datos de IDE calculados para analizar.")
 
 if _seccion == _SECCIONES[7]:
-    st.write("### Perfil de Velocidades Vía 1 y 2")
-    st.plotly_chart(fig_perfil_velocidades(), use_container_width=True)
-
+    st.markdown("### 📋 THDR — Servicios y Tiempos de Viaje")
+    st.markdown("<style>.tv-card{border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#ffffff,#f7fafc);box-shadow:0 1px 4px rgba(15,23,42,.07)}.tv-head{font-weight:800;color:#005195;font-size:1.02rem;margin-bottom:.55rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}.tv-badge{background:#005195;color:#fff;font-size:.68rem;padding:2px 9px;border-radius:999px;font-weight:700}.tv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.tv-stat{background:#fff;border:1px solid #eef2f7;border-radius:10px;padding:7px 10px;text-align:center}.tv-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}.tv-val{font-size:1.22rem;font-weight:800;color:#0f172a;font-variant-numeric:tabular-nums}.tv-foot{margin-top:.5rem;font-size:.74rem;color:#64748b;text-align:right}</style>", unsafe_allow_html=True)
+    if df_thdr_v1.empty and df_thdr_v2.empty:
+        st.info("No se ha cargado/procesado THDR (o los filtros dejaron 0 registros).")
+    else:
+        _det = detalle_servicios(df_thdr_v1, df_thdr_v2)
+        _tv = tiempos_servicios(df_thdr_v1, df_thdr_v2)
+        _k1, _k2, _k3 = st.columns(3)
+        _k1.metric("Servicios totales", f"{len(_det):,}")
+        _k2.metric("Dobles", f"{int((_det['Composicion'] == 'Doble').sum()):,}" if not _det.empty else "0")
+        _k3.metric("Simples", f"{int((_det['Composicion'] == 'Simple').sum()):,}" if not _det.empty else "0")
+        st.markdown("#### ⏱️ Tiempo de viaje por tipo de servicio")
+        if _tv.empty:
+            st.info("No se pudieron calcular tiempos de viaje (faltan horas de salida/llegada en la THDR).")
+        else:
+            _ss = _stats_dur(_tv, 'Tipo de servicio').sort_values('count', ascending=False)
+            _render_tv_cards(_ss, 'Tipo de servicio')
+            st.markdown("#### ⏱️ Tiempo de viaje por tipo de tren")
+            _stt = _stats_dur(_tv, 'Tipo de tren').sort_values('count', ascending=False)
+            _render_tv_cards(_stt, 'Tipo de tren')
+            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Formato mm:ss.")
+        if not _det.empty:
+            st.divider()
+            st.markdown("#### 📥 Servicios por tipo de tren (descargable)")
+            st.download_button("⬇️ Descargar Excel (Por día + Resumen + Detalle)", data=excel_servicios(_det), file_name="servicios_por_tipo_tren.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            _ca, _cb = st.columns(2)
+            with _ca:
+                st.markdown("**Por día**")
+                st.dataframe(_det.groupby(['Fecha', 'Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
+            with _cb:
+                st.markdown("**Resumen (totales)**")
+                st.dataframe(_det.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
+    st.divider()
+    st.markdown("#### Datos THDR crudos")
     c_v1, c_v2 = st.columns(2)
     with c_v1:
         st.write("#### Datos THDR Vía 1")
@@ -2383,32 +2495,3 @@ if _seccion == _SECCIONES[11]:
             st.dataframe(make_columns_unique(tabla), use_container_width=True)
     else:
         st.info("📂 Sube archivos desde el panel lateral para generar el diagnóstico.")
-
-
-if _seccion == _SECCIONES[12]:
-    st.markdown("### 📥 Servicios por tipo de tren (descargable)")
-    st.markdown("Cada servicio con su **tipo de tren** (XT-100 / XT-M / SFE), **composición** "
-                "(simple/doble) y **tipo de servicio** (patrón Origen→Destino real de la malla). "
-                "Con corte por día y exportable a Excel.")
-    _det = detalle_servicios(df_thdr_v1, df_thdr_v2)
-    if _det.empty:
-        st.info("No hay servicios THDR (con Motriz) en el rango seleccionado. Carga la THDR desde el panel lateral.")
-    else:
-        _m1, _m2, _m3 = st.columns(3)
-        _m1.metric("Servicios totales", f"{len(_det):,}")
-        _m2.metric("Dobles", f"{int((_det['Composicion'] == 'Doble').sum()):,}")
-        _m3.metric("Simples", f"{int((_det['Composicion'] == 'Simple').sum()):,}")
-        st.download_button("⬇️ Descargar Excel (Por día + Resumen + Detalle)",
-                           data=excel_servicios(_det),
-                           file_name="servicios_por_tipo_tren.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        st.markdown("#### Por día (tipo de servicio × tipo de tren × composición)")
-        _por_dia = (_det.groupby(['Fecha', 'Tipo de servicio', 'Tipo de tren', 'Composicion'])
-                        .size().reset_index(name='Servicios'))
-        st.dataframe(_por_dia, use_container_width=True, hide_index=True)
-        st.markdown("#### Resumen (totales por tipo de servicio × tipo de tren × composición)")
-        _res = (_det.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion'])
-                    .size().reset_index(name='Servicios'))
-        st.dataframe(_res, use_container_width=True, hide_index=True)
-        st.markdown("#### Detalle de servicios")
-        st.dataframe(_det, use_container_width=True, hide_index=True)
