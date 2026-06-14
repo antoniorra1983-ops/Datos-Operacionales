@@ -574,7 +574,7 @@ def tiempos_servicios(df_thdr_v1, df_thdr_v2, fechas=None):
 
 def _stats_dur(df, col):
     cols = col if isinstance(col, list) else [col]
-    g = df.dropna(subset=['Dur']).groupby(cols)['Dur']
+    g = df.dropna(subset=['Dur']).groupby(cols, sort=False)['Dur']
     return g.agg(['mean', 'median', 'max', 'min', 'count']).reset_index()
 
 def _render_tv_cards(stats, col, badge=None, badge_col=None):
@@ -593,6 +593,69 @@ def _render_tv_cards(stats, col, badge=None, badge_col=None):
                     f'<div class="tv-stat"><div class="tv-lbl">Mínima</div><div class="tv-val">{_fmt_mmss(r["min"])}</div></div>'
                     f'</div><div class="tv-foot">N = {int(r["count"]):,} servicios</div></div>')
             cols[k].markdown(html, unsafe_allow_html=True)
+
+def _mat_sal_lle(df_thdr):
+    _n = len(df_thdr); _ne = len(ESTACIONES)
+    _S = np.full((_n, _ne), np.nan); _L = np.full((_n, _ne), np.nan)
+    for _j, _e in enumerate(ESTACIONES):
+        _cs = get_col_thdr(df_thdr, _e, 'SALIDA'); _cl = get_col_thdr(df_thdr, _e, 'LLEGADA')
+        if _cs: _S[:, _j] = pd.to_numeric(df_thdr[_cs], errors='coerce').values
+        if _cl: _L[:, _j] = pd.to_numeric(df_thdr[_cl], errors='coerce').values
+    return _S, _L
+
+def _dwell_estaciones(v1, v2):
+    parts = []
+    for t in (v1, v2):
+        if t is None or getattr(t, 'empty', True): continue
+        _S, _L = _mat_sal_lle(t)
+        for _j, _e in enumerate(ESTACIONES):
+            d = _S[:, _j] - _L[:, _j]
+            d = d[~np.isnan(d)]; d = d[(d >= 0) & (d <= 30)]
+            if len(d): parts.append(pd.DataFrame({'Estacion': SHORT_NAMES_DICT.get(_e, _e), 'Dur': d}))
+    if not parts: return pd.DataFrame(columns=['Estacion', 'Dur'])
+    return pd.concat(parts, ignore_index=True)
+
+def _segmentos(v1, v2):
+    parts = []; E = ESTACIONES
+    if v1 is not None and not getattr(v1, 'empty', True):
+        _S, _L = _mat_sal_lle(v1)
+        for _j in range(len(E) - 1):
+            d = _L[:, _j + 1] - _S[:, _j]
+            d = d[~np.isnan(d)]; d = d[(d > 0) & (d <= 60)]
+            if len(d): parts.append(pd.DataFrame({'Segmento': f"{SHORT_NAMES_DICT.get(E[_j], E[_j])}→{SHORT_NAMES_DICT.get(E[_j + 1], E[_j + 1])}", 'Dur': d}))
+    if v2 is not None and not getattr(v2, 'empty', True):
+        _S, _L = _mat_sal_lle(v2)
+        for _j in range(len(E) - 1):
+            d = _L[:, _j] - _S[:, _j + 1]
+            d = d[~np.isnan(d)]; d = d[(d > 0) & (d <= 60)]
+            if len(d): parts.append(pd.DataFrame({'Segmento': f"{SHORT_NAMES_DICT.get(E[_j + 1], E[_j + 1])}→{SHORT_NAMES_DICT.get(E[_j], E[_j])}", 'Dur': d}))
+    if not parts: return pd.DataFrame(columns=['Segmento', 'Dur'])
+    return pd.concat(parts, ignore_index=True)
+
+def _orden_serv_key(s):
+    s = str(s)
+    if '→' not in s: return (9, 99, s)
+    _o, _d = s.split('→', 1)
+    _PR = {'LIM': 0, 'S.ALD': 1, 'E.BEL': 2}
+    if _o == 'PUE': return (0, _PR.get(_d, 50), _d)
+    if _d == 'PUE': return (1, _PR.get(_o, 50), _o)
+    return (2, 0, s)
+
+def _ordenar_serv(stats, servcol):
+    if stats is None or stats.empty: return stats
+    k = list(stats[servcol].map(_orden_serv_key))
+    s = stats.copy()
+    s['_g'] = [x[0] for x in k]; s['_p'] = [x[1] for x in k]; s['_l'] = [x[2] for x in k]
+    return s.sort_values(['_g', '_p', '_l']).drop(columns=['_g', '_p', '_l'])
+
+def _ordenar_serv_tren(stats, servcol, trencol):
+    if stats is None or stats.empty: return stats
+    _TR = {'XT-100': 0, 'XT-M': 1, 'SFE': 2, 'Sin asignar': 3}
+    k = list(stats[servcol].map(_orden_serv_key))
+    s = stats.copy()
+    s['_g'] = [x[0] for x in k]; s['_p'] = [x[1] for x in k]; s['_l'] = [x[2] for x in k]
+    s['_t'] = list(stats[trencol].map(lambda x: _TR.get(x, 9)))
+    return s.sort_values(['_g', '_p', '_l', '_t']).drop(columns=['_g', '_p', '_l', '_t'])
 
 def _thdr_filtros():
     v1 = st.session_state.get('df_thdr_v1', pd.DataFrame())
@@ -1114,7 +1177,7 @@ _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion",
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
 _J_COD = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
-if not df_ops.empty:
+if not df_ops.empty and _seccion != _SECCIONES[7]:
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _fmin, _fmax = _ff.min().date(), _ff.max().date()
     _anios = sorted({d.year for d in _ff.dropna().dt.date}, reverse=True)
@@ -1706,12 +1769,21 @@ if _seccion == _SECCIONES[7]:
         if _tv.empty:
             st.info("No se pudieron calcular tiempos de viaje (faltan horas de salida/llegada en la THDR).")
         else:
-            _ss = _stats_dur(_tv, 'Tipo de servicio').sort_values('count', ascending=False)
+            _ss = _ordenar_serv(_stats_dur(_tv, 'Tipo de servicio'), 'Tipo de servicio')
             _render_tv_cards(_ss, 'Tipo de servicio')
             st.markdown("#### ⏱️ Tiempo de viaje por tipo de tren y tipo de servicio")
-            _stt = _stats_dur(_tv, ['Tipo de tren', 'Tipo de servicio']).sort_values('count', ascending=False)
+            _stt = _ordenar_serv_tren(_stats_dur(_tv, ['Tipo de tren', 'Tipo de servicio']), 'Tipo de servicio', 'Tipo de tren')
             _render_tv_cards(_stt, 'Tipo de servicio', badge_col='Tipo de tren')
-            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Formato HH:MM:SS.")
+            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Orden: Vía 1 (Puerto→...) y luego Vía 2 (...→Puerto). Formato HH:MM:SS.")
+            with st.expander("🚉 Detención en estaciones y tiempo entre estaciones (mostrar / ocultar)", expanded=False):
+                _dw = _dwell_estaciones(df_thdr_v1, df_thdr_v2)
+                st.markdown("**🛑 Tiempo detenido en cada estación**")
+                if _dw.empty: st.info("Sin datos de detención por estación.")
+                else: _render_tv_cards(_stats_dur(_dw, 'Estacion'), 'Estacion')
+                _sg = _segmentos(df_thdr_v1, df_thdr_v2)
+                st.markdown("**↔️ Tiempo de viaje entre estaciones consecutivas**")
+                if _sg.empty: st.info("Sin datos de tiempo entre estaciones.")
+                else: _render_tv_cards(_stats_dur(_sg, 'Segmento'), 'Segmento')
         if not _det.empty:
             st.divider()
             st.markdown("#### 📥 Servicios por tipo de tren (descargable)")
