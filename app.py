@@ -512,9 +512,10 @@ def excel_servicios(detalle):
 
 def _fmt_mmss(m):
     if m is None or (isinstance(m, float) and np.isnan(m)) or pd.isna(m): return "—"
-    m = float(m); _s = int(round((m - int(m)) * 60))
-    if _s == 60: m += 1; _s = 0
-    return f"{int(m)}:{_s:02d}"
+    m = float(m); _h = int(m // 60); _mn = int(m % 60); _s = int(round((m - int(m)) * 60))
+    if _s == 60: _s = 0; _mn += 1
+    if _mn == 60: _mn = 0; _h += 1
+    return f"{_h:02d}:{_mn:02d}:{_s:02d}"
 
 def _od_y_dur(df_thdr):
     if df_thdr is None or getattr(df_thdr, 'empty', True):
@@ -590,6 +591,57 @@ def _render_tv_cards(stats, col, badge=None):
                     f'<div class="tv-stat"><div class="tv-lbl">Mínima</div><div class="tv-val">{_fmt_mmss(r["min"])}</div></div>'
                     f'</div><div class="tv-foot">N = {int(r["count"]):,} servicios</div></div>')
             cols[k].markdown(html, unsafe_allow_html=True)
+
+def _thdr_filtros():
+    v1 = st.session_state.get('df_thdr_v1', pd.DataFrame())
+    v2 = st.session_state.get('df_thdr_v2', pd.DataFrame())
+    _f = []
+    for t in (v1, v2):
+        if t is not None and not getattr(t, 'empty', True) and 'Fecha_Op' in t.columns:
+            _f.append(pd.to_datetime(t['Fecha_Op'], errors='coerce'))
+    if not _f: return v1, v2
+    _all = pd.concat(_f).dropna()
+    if _all.empty: return v1, v2
+    _fmin = _all.dt.date.min(); _fmax = _all.dt.date.max()
+    _anios = sorted({d.year for d in _all.dt.date}, reverse=True)
+    _dts = sorted(set(_all.dt.date))
+    _iso = pd.to_datetime(pd.Series(_dts)).dt.isocalendar()
+    _wkdf = pd.DataFrame({'d': _dts, 'iy': _iso['year'].values, 'iw': _iso['week'].values})
+    _smap = {}
+    for (_iy, _iw), _g in _wkdf.groupby(['iy', 'iw']):
+        _smap[f"Sem {int(_iw):02d} ({_g['d'].min().strftime('%d/%m')}–{_g['d'].max().strftime('%d/%m')})"] = (int(_iy), int(_iw))
+    _JC = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
+    _tsig = (str(_fmin), str(_fmax), ",".join(map(str, _anios)))
+    if st.session_state.get('_t_sig') != _tsig:
+        st.session_state['_t_sig'] = _tsig
+        for _k in ('_t_anio', '_t_sem', '_t_jor', '_t_fec'): st.session_state.pop(_k, None)
+    with st.container(border=True):
+        st.markdown("**🎛️ Filtros THDR** — Año · Semana · Jornada · Fecha")
+        _c1, _c2, _c3, _c4 = st.columns([1, 1.7, 2.1, 1.9])
+        with _c1: _a = st.selectbox("Año", ["Todos"] + [str(x) for x in _anios], key="_t_anio")
+        with _c2: _sw = st.selectbox("Semana", ["Todas"] + list(_smap.keys()), key="_t_sem")
+        with _c3:
+            _oj = list(_JC.keys())
+            _j = st.pills("Tipo de jornada", _oj, selection_mode="multi", default=_oj, key="_t_jor") if hasattr(st, "pills") else st.multiselect("Tipo de jornada", _oj, default=_oj, key="_t_jor")
+            _j = _j or _oj
+        with _c4:
+            _rg = st.date_input("Fecha", value=(_fmin, _fmax), min_value=_fmin, max_value=_fmax, key="_t_fec")
+            _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
+    _cods = {_JC[x] for x in _j}
+    def _mk(serie):
+        f = pd.to_datetime(serie, errors='coerce')
+        mm = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
+        if _a != "Todos": mm = mm & (f.dt.year == int(_a))
+        if _sw != "Todas":
+            _iy2, _iw2 = _smap[_sw]; _ic = f.dt.isocalendar()
+            mm = mm & (_ic['year'] == _iy2) & (_ic['week'] == _iw2)
+        if len(_cods) < 3:
+            _td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None); mm = mm & _td.isin(_cods)
+        return mm.values
+    def _ap(t):
+        if t is None or getattr(t, 'empty', True) or 'Fecha_Op' not in t.columns: return t
+        return t[_mk(t['Fecha_Op'])].reset_index(drop=True)
+    return _ap(v1), _ap(v2)
 
 def _prep_noche(registros, df_ops):
     if not registros: return pd.DataFrame()
@@ -1626,6 +1678,7 @@ if _seccion == _SECCIONES[6]:
 if _seccion == _SECCIONES[7]:
     st.markdown("### 📋 THDR — Servicios y Tiempos de Viaje")
     st.markdown("<style>.tv-card{border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#ffffff,#f7fafc);box-shadow:0 1px 4px rgba(15,23,42,.07)}.tv-head{font-weight:800;color:#005195;font-size:1.02rem;margin-bottom:.55rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}.tv-badge{background:#005195;color:#fff;font-size:.68rem;padding:2px 9px;border-radius:999px;font-weight:700}.tv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.tv-stat{background:#fff;border:1px solid #eef2f7;border-radius:10px;padding:7px 10px;text-align:center}.tv-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}.tv-val{font-size:1.22rem;font-weight:800;color:#0f172a;font-variant-numeric:tabular-nums}.tv-foot{margin-top:.5rem;font-size:.74rem;color:#64748b;text-align:right}</style>", unsafe_allow_html=True)
+    df_thdr_v1, df_thdr_v2 = _thdr_filtros()
     if df_thdr_v1.empty and df_thdr_v2.empty:
         st.info("No se ha cargado/procesado THDR (o los filtros dejaron 0 registros).")
     else:
@@ -1644,7 +1697,7 @@ if _seccion == _SECCIONES[7]:
             st.markdown("#### ⏱️ Tiempo de viaje por tipo de tren")
             _stt = _stats_dur(_tv, 'Tipo de tren').sort_values('count', ascending=False)
             _render_tv_cards(_stt, 'Tipo de tren')
-            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Formato mm:ss.")
+            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Formato HH:MM:SS.")
         if not _det.empty:
             st.divider()
             st.markdown("#### 📥 Servicios por tipo de tren (descargable)")
