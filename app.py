@@ -702,6 +702,15 @@ def _ordenar_serv_tren(stats, servcol, trencol):
     s['_t'] = list(stats[trencol].map(lambda x: _TR.get(x, 9)))
     return s.sort_values(['_g', '_p', '_l', '_t']).drop(columns=['_g', '_p', '_l', '_t'])
 
+def _ordenar_serv_comp(stats, servcol, compcol):
+    if stats is None or stats.empty: return stats
+    _CP = {'Simple': 0, 'Doble': 1}
+    k = list(stats[servcol].map(_orden_serv_key))
+    s = stats.copy()
+    s['_g'] = [x[0] for x in k]; s['_p'] = [x[1] for x in k]; s['_l'] = [x[2] for x in k]
+    s['_c'] = list(stats[compcol].map(lambda x: _CP.get(x, 9)))
+    return s.sort_values(['_g', '_p', '_l', '_c']).drop(columns=['_g', '_p', '_l', '_c'])
+
 def _thdr_filtros():
     v1 = st.session_state.get('df_thdr_v1', pd.DataFrame())
     v2 = st.session_state.get('df_thdr_v2', pd.DataFrame())
@@ -1810,16 +1819,23 @@ if _seccion == _SECCIONES[7]:
         _k1.metric("Servicios totales", f"{_ncl(len(_det), 0)}")
         _k2.metric("Dobles", f"{_ncl(int((_det['Composicion'] == 'Doble').sum()), 0)}" if not _det.empty else "0")
         _k3.metric("Simples", f"{_ncl(int((_det['Composicion'] == 'Simple').sum()), 0)}" if not _det.empty else "0")
-        st.markdown("#### ⏱️ Tiempo de viaje por tipo de servicio")
         if _tv.empty:
             st.info("No se pudieron calcular tiempos de viaje (faltan horas de salida/llegada en la THDR).")
         else:
-            _ss = _ordenar_serv(_stats_dur(_tv, 'Tipo de servicio'), 'Tipo de servicio')
-            _render_tv_cards(_ss, 'Tipo de servicio')
-            st.markdown("#### ⏱️ Tiempo de viaje por tipo de tren y tipo de servicio")
-            _stt = _ordenar_serv_tren(_stats_dur(_tv, ['Tipo de tren', 'Tipo de servicio']), 'Tipo de servicio', 'Tipo de tren')
-            _render_tv_cards(_stt, 'Tipo de servicio', badge_col='Tipo de tren')
-            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Orden: Vía 1 (Puerto→...) y luego Vía 2 (...→Puerto). Formato HH:MM:SS.")
+            st.markdown("#### ⏱️ Tiempos de viaje")
+            st.caption("Tiempo de viaje = llegada al destino − salida del origen (malla THDR). Orden: Vía 1 (Puerto→...) y luego Vía 2 (...→Puerto). Formato HH:MM:SS. Cada bloque se puede mostrar u ocultar.")
+            with st.expander("⏱️ Por tipo de servicio (mostrar / ocultar)", expanded=True):
+                _ss = _ordenar_serv(_stats_dur(_tv, 'Tipo de servicio'), 'Tipo de servicio')
+                _render_tv_cards(_ss, 'Tipo de servicio')
+            with st.expander("🚆 Por composición — tren simple / doble (mostrar / ocultar)", expanded=False):
+                _sc = _ordenar_serv_comp(_stats_dur(_tv, ['Tipo de servicio', 'Composicion']), 'Tipo de servicio', 'Composicion')
+                if _sc.empty: st.info("Sin datos por composición.")
+                else: _render_tv_cards(_sc, 'Tipo de servicio', badge_col='Composicion')
+                st.caption("Cada servicio separado en tren Simple y Doble (cuando hay registros de ambos).")
+            with st.expander("🚇 Por tipo de tren y tipo de servicio (mostrar / ocultar)", expanded=False):
+                _stt = _ordenar_serv_tren(_stats_dur(_tv, ['Tipo de tren', 'Tipo de servicio']), 'Tipo de servicio', 'Tipo de tren')
+                _render_tv_cards(_stt, 'Tipo de servicio', badge_col='Tipo de tren')
+                st.caption("XT-100 / XT-M / SFE por cada servicio.")
             with st.expander("🚉 Detención en estaciones y tiempo entre estaciones (mostrar / ocultar)", expanded=False):
                 _dw = _dwell_estaciones(df_thdr_v1, df_thdr_v2)
                 st.markdown("**🛑 Tiempo detenido en cada estación**")
