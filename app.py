@@ -684,12 +684,24 @@ def _segmentos(v1, v2):
 def _diagrama_marey(v1, v2):
     """Diagrama tiempo-distancia (Marey / string-line). Cada servicio es una linea:
     via1 sube (Puerto->Limache), via2 baja (Limache->Puerto). Donde una linea de via1
-    cruza una de via2, dos trenes se cruzan en ese punto y a esa hora (cruzamiento)."""
+    cruza una de via2 hay un cruzamiento; el marcador muestra km, servicios y recorrido."""
     import plotly.graph_objects as _go
+    _N = len(ESTACIONES)
+    _kmacum = np.array([float(_k) for _k in KM_ACUM[:_N]], dtype=float)
+    _ix = np.arange(_N, dtype=float)
     _fig = _go.Figure()
     _COL = {'V1': '#005195', 'V2': '#E85500'}
     _NOM = {'V1': 'Vía 1 (Puerto→Limache)', 'V2': 'Vía 2 (Limache→Puerto)'}
-    _any = False
+    _serv = {'V1': [], 'V2': []}
+
+    def _meta(_row, _name):
+        if _name in _row.index and pd.notna(_row[_name]):
+            try:
+                return str(int(float(_row[_name])))
+            except Exception:
+                return str(_row[_name])
+        return "?"
+
     for _via, _t in (('V1', v1), ('V2', v2)):
         if _t is None or getattr(_t, 'empty', True):
             continue
@@ -697,7 +709,7 @@ def _diagrama_marey(v1, v2):
         _xs = []; _ys = []
         for _r in range(len(_t)):
             _pts = []
-            for _j in range(len(ESTACIONES)):
+            for _j in range(_N):
                 _l = _L[_r, _j]; _s = _S[_r, _j]
                 if not np.isnan(_l): _pts.append((_l, _j))
                 if not np.isnan(_s): _pts.append((_s, _j))
@@ -707,23 +719,70 @@ def _diagrama_marey(v1, v2):
             for _p in _pts:
                 _xs.append(_p[0]); _ys.append(_p[1])
             _xs.append(None); _ys.append(None)
+            _row = _t.iloc[_r]
+            _o = int(_pts[0][1]); _d = int(_pts[-1][1])
+            _od = f"{SHORT_NAMES_DICT.get(ESTACIONES[_o], ESTACIONES[_o])}→{SHORT_NAMES_DICT.get(ESTACIONES[_d], ESTACIONES[_d])}"
+            _serv[_via].append({
+                't': np.array([_q[0] for _q in _pts], dtype=float),
+                'y': np.array([_q[1] for _q in _pts], dtype=float),
+                'tmin': _pts[0][0], 'tmax': _pts[-1][0],
+                'num': _meta(_row, 'Viaje'), 'tren': _meta(_row, 'Tren'), 'od': _od})
         if _xs:
             _fig.add_trace(_go.Scatter(x=_xs, y=_ys, mode='lines',
-                line=dict(color=_COL[_via], width=1.1), opacity=0.6,
+                line=dict(color=_COL[_via], width=1.1), opacity=0.55,
                 name=_NOM[_via], legendgroup=_via, hoverinfo='skip', connectgaps=False))
-            _any = True
-    if not _any:
-        return None
-    _fig.update_yaxes(tickmode='array', tickvals=list(range(len(ESTACIONES))),
+
+    if not _serv['V1'] and not _serv['V2']:
+        return None, []
+
+    _cx = []; _cy = []; _ctxt = []; _cruces = []
+    for _a in _serv['V1']:
+        for _b in _serv['V2']:
+            _tlo = max(_a['tmin'], _b['tmin']); _thi = min(_a['tmax'], _b['tmax'])
+            if _tlo >= _thi:
+                continue
+            _tg = np.linspace(_tlo, _thi, 60)
+            _y1 = np.interp(_tg, _a['t'], _a['y'])
+            _y2 = np.interp(_tg, _b['t'], _b['y'])
+            _dif = _y1 - _y2
+            _chg = np.where(np.diff(np.sign(_dif)) != 0)[0]
+            if len(_chg) == 0:
+                continue
+            _k = int(_chg[0])
+            _den = _dif[_k + 1] - _dif[_k]
+            _tcr = _tg[_k] if _den == 0 else _tg[_k] - _dif[_k] * (_tg[_k + 1] - _tg[_k]) / _den
+            _ycr = float(np.interp(_tcr, _a['t'], _a['y']))
+            _kmcr = float(np.interp(_ycr, _ix, _kmacum))
+            _lo = int(np.clip(np.floor(_ycr), 0, _N - 1)); _hi = int(np.clip(np.ceil(_ycr), 0, _N - 1))
+            if _lo == _hi:
+                _tramo = SHORT_NAMES_DICT.get(ESTACIONES[_lo], ESTACIONES[_lo])
+            else:
+                _tramo = f"{SHORT_NAMES_DICT.get(ESTACIONES[_lo], ESTACIONES[_lo])}–{SHORT_NAMES_DICT.get(ESTACIONES[_hi], ESTACIONES[_hi])}"
+            _hh = int(_tcr) // 60; _mm = int(_tcr) % 60
+            _cx.append(_tcr); _cy.append(_ycr)
+            _ctxt.append(
+                f"<b>Cruce {_hh:02d}:{_mm:02d}</b><br>"
+                f"Km ≈ {_kmcr:.1f} · tramo {_tramo}<br>"
+                f"<b>Vía 1</b> → Viaje {_a['num']} · Tren {_a['tren']} · {_a['od']}<br>"
+                f"<b>Vía 2</b> → Viaje {_b['num']} · Tren {_b['tren']} · {_b['od']}")
+            _cruces.append({'hora': f"{_hh:02d}:{_mm:02d}", 'hora_h': int(_hh), 'km': round(_kmcr, 1), 'tramo': _tramo})
+
+    if _cx:
+        _fig.add_trace(_go.Scatter(x=_cx, y=_cy, mode='markers',
+            marker=dict(size=7, color='#15803d', symbol='x', line=dict(color='#ffffff', width=0.5)),
+            name=f'Cruzamientos ({len(_cx)})', legendgroup='CX',
+            text=_ctxt, hovertemplate='%{text}<extra></extra>'))
+
+    _fig.update_yaxes(tickmode='array', tickvals=list(range(_N)),
                       ticktext=[SHORT_NAMES_DICT.get(_e, _e) for _e in ESTACIONES],
                       title='Estación', gridcolor='#eef2f7')
     _tk = list(range(0, 1441, 60))
     _fig.update_xaxes(tickmode='array', tickvals=_tk,
                       ticktext=[f"{_m // 60:02d}:{_m % 60:02d}" for _m in _tk],
                       title='Hora del día', gridcolor='#eef2f7')
-    _fig.update_layout(height=620, margin=dict(t=30, b=0, l=0, r=0),
+    _fig.update_layout(height=640, margin=dict(t=30, b=0, l=0, r=0), hovermode='closest',
                        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0))
-    return _fig
+    return _fig, _cruces
 
 def _fechas_thdr(v1, v2):
     _f = set()
@@ -1931,12 +1990,27 @@ if _seccion == _SECCIONES[7]:
             else:
                 st.caption("Este diagrama usa su propio selector de día (independiente de los filtros de la pestaña). El cruzamiento solo es real dentro de un mismo día.")
                 _fsel = st.selectbox("📅 Día a graficar", _fm, format_func=lambda _d: _d.strftime('%d-%m-%Y'), key="marey_fecha")
-                _figm = _diagrama_marey(_filtra_fecha_op(_v1raw, _fsel), _filtra_fecha_op(_v2raw, _fsel))
+                _figm, _cruces = _diagrama_marey(_filtra_fecha_op(_v1raw, _fsel), _filtra_fecha_op(_v2raw, _fsel))
                 if _figm is None:
                     st.info("Sin datos suficientes para el diagrama de cruzamientos en ese día.")
                 else:
                     st.plotly_chart(_figm, use_container_width=True, config={'locale': 'es'})
-                    st.caption("Cada línea es un servicio del día elegido: las azules (vía 1) suben de Puerto a Limache y las naranjas (vía 2) bajan de Limache a Puerto. Donde una azul cruza una naranja, dos trenes se cruzan en ese punto y a esa hora.")
+                    st.caption("Cada línea es un servicio del día elegido: las azules (vía 1) suben de Puerto a Limache y las naranjas (vía 2) bajan de Limache a Puerto. Las ✕ verdes son los cruzamientos: pasa el cursor sobre una para ver el km, el número de servicio (Viaje), el tren y el recorrido de ambos trenes.")
+                    if _cruces:
+                        _dfc = pd.DataFrame(_cruces)
+                        _por_tramo = _dfc.groupby('tramo').size().sort_values(ascending=False)
+                        _por_hora = _dfc.groupby('hora_h').size().sort_values(ascending=False)
+                        st.markdown("##### 📊 Resumen de cruzamientos del día")
+                        _rm1, _rm2, _rm3 = st.columns(3)
+                        _rm1.metric("Total de cruzamientos", _ncl(len(_dfc), 0))
+                        _rm2.metric("Tramo con más cruces", _por_tramo.index[0], f"{_ncl(int(_por_tramo.iloc[0]), 0)} cruces")
+                        _rm3.metric("Hora con más cruces", f"{int(_por_hora.index[0]):02d}:00 h", f"{_ncl(int(_por_hora.iloc[0]), 0)} cruces")
+                        _bt = _por_tramo.reset_index(); _bt.columns = ['Tramo', 'Cruces']
+                        _figb = px.bar(_bt, x='Cruces', y='Tramo', orientation='h', text='Cruces', color_discrete_sequence=['#15803d'])
+                        _figb.update_layout(height=max(280, 24 * len(_bt)), margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(autorange='reversed', title=''))
+                        _figb.update_traces(textposition='outside', cliponaxis=False)
+                        st.plotly_chart(_figb, use_container_width=True, config={'locale': 'es'})
+                        st.caption("Tramos donde más se cruzan los trenes: mientras más larga la barra, mayor concentración de cruzamientos en ese tramo de la línea.")
         if not _det.empty:
             st.divider()
             st.markdown("#### 📥 Servicios por tipo de tren (descargable)")
