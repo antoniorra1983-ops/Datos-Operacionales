@@ -449,6 +449,31 @@ def combinar_fuentes(ul, carpeta):
 
 # --- 5. FUNCIONES DE PROCESAMIENTO CORE ---
 # --- Servicios por tipo de tren (material rodante) + export Excel ---
+def _no_huecos(_fig, _fmt='%d-%m-%y'):
+    """Eje X de fechas categorico: oculta dias/meses/anios sin datos (sin huecos),
+    etiquetas dd-mm-aa en orden cronologico. Sirve para px y go (alinea trazas extra)."""
+    try:
+        _pares = []
+        for _tr in _fig.data:
+            _xv = getattr(_tr, 'x', None)
+            if _xv is None:
+                continue
+            _dt = pd.to_datetime(pd.Series(list(_xv)), errors='coerce')
+            _lab = _dt.dt.strftime(_fmt)
+            _tr.x = tuple('' if pd.isna(_l) else _l for _l in _lab)
+            for _d, _l in zip(_dt, _lab):
+                if pd.notna(_d):
+                    _pares.append((_d, _l))
+        if _pares:
+            _pares.sort(key=lambda _p: _p[0])
+            _seen = set(); _orden = []
+            for _d, _l in _pares:
+                if _l not in _seen:
+                    _seen.add(_l); _orden.append(_l)
+            _fig.update_xaxes(type='category', categoryorder='array', categoryarray=_orden)
+    except Exception:
+        pass
+    return _fig
 try:
     import plotly.io as _pio
     for _tn in ("plotly", "plotly_white", "simple_white", "none", "ggplot2", "seaborn", "plotly_dark", "presentation"):
@@ -1387,7 +1412,7 @@ if _seccion == _SECCIONES[0]:
                 fig_serv = px.bar(_st, x='Fecha', y='Servicios', color='Tipo_Servicio', barmode='stack',
                                   color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
                 _layout_tipo(fig_serv)
-                ev_serv = st.plotly_chart(fig_serv, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
+                ev_serv = st.plotly_chart(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
             else:
                 st.info("Sin datos de servicios (THDR) para el filtro actual.")
             _tarjeta_por_via(_st, 'Servicios', _fmt_int, "Total Servicios")
@@ -1416,7 +1441,7 @@ if _seccion == _SECCIONES[0]:
                     _fig_tren = px.bar(_ppd, x='Fecha', y='Servicios', color='Tren · Comp', barmode='stack')
                     _fig_tren.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=320,
                                             legend=dict(orientation='h', y=1.18, x=0, font=dict(size=10)), xaxis_title=None)
-                    st.plotly_chart(_fig_tren, use_container_width=True, config={'locale': 'es'})
+                    st.plotly_chart(_no_huecos(_fig_tren), use_container_width=True, config={'locale': 'es'})
             st.caption("Tipo de servicio = patrón Origen→Destino de la malla. XT-100 = M01-M27 · XT-M = XM28-XM35 · SFE = otras unidades (siempre simple).")
 
             st.divider()
@@ -1427,7 +1452,7 @@ if _seccion == _SECCIONES[0]:
                 fig_pax = px.bar(_pt, x='Fecha', y='PAX', color='Tipo_Servicio', barmode='stack',
                                  color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
                 _layout_tipo(fig_pax)
-                ev_pax = st.plotly_chart(fig_pax, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
+                ev_pax = st.plotly_chart(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
             else:
                 st.info("Sin datos de pasajeros cruzables con la malla THDR para el filtro actual.")
             _tarjeta_por_via(_pt, 'PAX', _fmt_int, "Total PAX")
@@ -1440,7 +1465,7 @@ if _seccion == _SECCIONES[0]:
                 fig_tk = px.bar(_st, x='Fecha', y='TrenKm', color='Tipo_Servicio', barmode='stack',
                                 color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
                 _layout_tipo(fig_tk)
-                ev_tk = st.plotly_chart(fig_tk, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+                ev_tk = st.plotly_chart(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
             else:
                 st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
             _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
@@ -1457,7 +1482,7 @@ if _seccion == _SECCIONES[0]:
                 fig_odo.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_odo = st.plotly_chart(fig_odo, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
+                ev_odo = st.plotly_chart(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 st.metric("Odómetro Total", f"{_ncl(df_resumen['Odómetro [km]'].sum(), 2)} km")
@@ -1473,7 +1498,7 @@ if _seccion == _SECCIONES[0]:
                 fig_umr.update_traces(texttemplate='%{_ncl(y, 2)}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_umr = st.plotly_chart(fig_umr, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
+                ev_umr = st.plotly_chart(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 _tot_tk_umr = df_resumen['Tren-Km [km]'].sum()
@@ -1495,7 +1520,7 @@ if _seccion == _SECCIONES[0]:
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                        legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                        bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_ener = st.plotly_chart(fig_ener, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
+                ev_ener = st.plotly_chart(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
             with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.metric("Total Tracción", f"{_ncl(df_plot_ener['Tracción'].sum(), 2)} kWh")
@@ -1512,7 +1537,7 @@ if _seccion == _SECCIONES[0]:
                 fig_ide_bar.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                           bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_ide_bar = st.plotly_chart(fig_ide_bar, use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
+                ev_ide_bar = st.plotly_chart(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 _tot_tr_ide = df_resumen['E_Tr'].sum()
@@ -1527,7 +1552,7 @@ if _seccion == _SECCIONES[0]:
                     clicked_x = ev['selection']['points'][0].get('x')
                     if clicked_x:
                         try:
-                            clicked_dt = pd.to_datetime(clicked_x).normalize()
+                            clicked_dt = pd.to_datetime(clicked_x, dayfirst=True).normalize()
                             if st.session_state.drilldown_date != clicked_dt:
                                 st.session_state.drilldown_date = clicked_dt
                                 st.rerun()
@@ -1559,7 +1584,7 @@ if _seccion == _SECCIONES[3]:
         fig_e.add_trace(go.Bar(x=df_ops['Fecha'], y=df_ops['E_Tr'], name='Tracción', marker_color='#E85500'))
         fig_e.add_trace(go.Bar(x=df_ops['Fecha'], y=df_ops['E_12'], name='12 kV', marker_color='#005195'))
         fig_e.update_layout(barmode='stack', title="Consumo Energético: Tracción vs Servicios Auxiliares (12kV)", xaxis_title="Fecha", yaxis_title="Consumo (kWh)")
-        st.plotly_chart(fig_e, use_container_width=True)
+        st.plotly_chart(_no_huecos(fig_e), use_container_width=True)
         
         st.write("### Desglose Detallado")
         dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
@@ -1607,7 +1632,7 @@ if _seccion == _SECCIONES[4]:
                                                    mode='markers', marker=dict(color='red', size=12, symbol='x'),
                                                    name='Posible Tren Encendido'))
                 fig_noche.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(fig_noche, use_container_width=True, config={'locale': 'es'})
+                st.plotly_chart(_no_huecos(fig_noche), use_container_width=True, config={'locale': 'es'})
             
             with c_noct2:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -1762,7 +1787,7 @@ if _seccion == _SECCIONES[6]:
         fig_out.add_hline(y=mean_ide - 2*std_ide, line_dash="dot", line_color="orange", annotation_text="-2 Desv. Est.")
         
         fig_out.update_layout(title="IDE Diario (Identificando días más allá de ±2 desviaciones estándar)", xaxis_title="Fecha", yaxis_title="IDE (kWh/km)")
-        st.plotly_chart(fig_out, use_container_width=True)
+        st.plotly_chart(_no_huecos(fig_out), use_container_width=True)
         
         atipicos = df_ops[df_ops['Es_Atípico']][['Fecha', 'IDE (kWh/km)', 'Odómetro [km]', 'E_Tr']]
         if not atipicos.empty:
@@ -2335,7 +2360,7 @@ if _seccion == _SECCIONES[9]:
                 fig_pas.add_trace(go.Bar(x=df_c2_agg['Fecha'], y=df_c2_agg['Total a Bordo'], name='Vía 2 (Limache->Puerto)', marker_color='#E85500'))
             
             fig_pas.update_layout(barmode='group', xaxis_title="Fecha", yaxis_title="Total Pasajeros", margin=dict(t=30))
-            st.plotly_chart(fig_pas, use_container_width=True)
+            st.plotly_chart(_no_huecos(fig_pas), use_container_width=True)
 
         with c_p2:
             st.write("#### Estaciones con Carga Máxima (Frecuencia)")
