@@ -725,6 +725,18 @@ def _diagrama_marey(v1, v2):
                        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0))
     return _fig
 
+def _fechas_thdr(v1, v2):
+    _f = set()
+    for _t in (v1, v2):
+        if _t is not None and not getattr(_t, 'empty', True) and 'Fecha_Op' in _t.columns:
+            _f |= set(pd.to_datetime(_t['Fecha_Op'], errors='coerce').dropna().dt.date.tolist())
+    return sorted(_f)
+
+def _filtra_fecha_op(df, fecha):
+    if df is None or getattr(df, 'empty', True) or 'Fecha_Op' not in df.columns:
+        return df
+    return df[pd.to_datetime(df['Fecha_Op'], errors='coerce').dt.date == fecha]
+
 def _orden_serv_key(s):
     s = str(s)
     if '→' not in s: return (9, 99, s)
@@ -1911,12 +1923,20 @@ if _seccion == _SECCIONES[7]:
                 else: _render_tv_cards(_stats_dur(_sg, 'Segmento'), 'Segmento')
         st.markdown("#### 🚦 Cruzamientos entre vía 1 y vía 2")
         with st.expander("🚦 Diagrama de cruzamientos (tiempo × estación) — mostrar / ocultar", expanded=False):
-            _figm = _diagrama_marey(df_thdr_v1, df_thdr_v2)
-            if _figm is None:
-                st.info("Sin datos suficientes para el diagrama de cruzamientos.")
+            _v1raw = st.session_state.get('df_thdr_v1', pd.DataFrame())
+            _v2raw = st.session_state.get('df_thdr_v2', pd.DataFrame())
+            _fm = _fechas_thdr(_v1raw, _v2raw)
+            if not _fm:
+                st.info("Sin fechas disponibles para el diagrama de cruzamientos.")
             else:
-                st.plotly_chart(_figm, use_container_width=True, config={'locale': 'es'})
-                st.caption("Cada línea es un servicio: las azules (vía 1) suben de Puerto a Limache y las naranjas (vía 2) bajan de Limache a Puerto. Donde una azul cruza una naranja, dos trenes se cruzan en ese punto y a esa hora. Para ver los cruces de un día puntual, filtra por fecha en la barra de arriba.")
+                st.caption("Este diagrama usa su propio selector de día (independiente de los filtros de la pestaña). El cruzamiento solo es real dentro de un mismo día.")
+                _fsel = st.selectbox("📅 Día a graficar", _fm, format_func=lambda _d: _d.strftime('%d-%m-%Y'), key="marey_fecha")
+                _figm = _diagrama_marey(_filtra_fecha_op(_v1raw, _fsel), _filtra_fecha_op(_v2raw, _fsel))
+                if _figm is None:
+                    st.info("Sin datos suficientes para el diagrama de cruzamientos en ese día.")
+                else:
+                    st.plotly_chart(_figm, use_container_width=True, config={'locale': 'es'})
+                    st.caption("Cada línea es un servicio del día elegido: las azules (vía 1) suben de Puerto a Limache y las naranjas (vía 2) bajan de Limache a Puerto. Donde una azul cruza una naranja, dos trenes se cruzan en ese punto y a esa hora.")
         if not _det.empty:
             st.divider()
             st.markdown("#### 📥 Servicios por tipo de tren (descargable)")
