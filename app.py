@@ -628,8 +628,12 @@ def _render_tv_cards(stats, col, badge=None, badge_col=None):
         chunk = filas[j:j + 3]
         cols = st.columns(3)
         for k, r in enumerate(chunk):
-            _b = r[badge_col] if badge_col else badge
-            bdg = f'<span class="tv-badge">{_b}</span>' if _b else ''
+            if isinstance(badge_col, list):
+                _bk = [_bc for _bc in badge_col if r.get(_bc) not in (None, '')]
+                bdg = ''.join(f'<span class="tv-badge{"" if _i == 0 else " tv-badge-alt"}">{r[_bc]}</span>' for _i, _bc in enumerate(_bk))
+            else:
+                _b = r[badge_col] if badge_col else badge
+                bdg = f'<span class="tv-badge">{_b}</span>' if _b else ''
             html = (f'<div class="tv-card"><div class="tv-head">{r[col]} {bdg}</div>'
                     f'<div class="tv-grid">'
                     f'<div class="tv-stat"><div class="tv-lbl">Promedio</div><div class="tv-val">{_fmt_mmss(r["mean"])}</div></div>'
@@ -710,6 +714,17 @@ def _ordenar_serv_comp(stats, servcol, compcol):
     s['_g'] = [x[0] for x in k]; s['_p'] = [x[1] for x in k]; s['_l'] = [x[2] for x in k]
     s['_c'] = list(stats[compcol].map(lambda x: _CP.get(x, 9)))
     return s.sort_values(['_g', '_p', '_l', '_c']).drop(columns=['_g', '_p', '_l', '_c'])
+
+def _ordenar_serv_tren_comp(stats, servcol, trencol, compcol):
+    if stats is None or stats.empty: return stats
+    _TR = {'XT-100': 0, 'XT-M': 1, 'SFE': 2, 'Sin asignar': 3}
+    _CP = {'Simple': 0, 'Doble': 1}
+    k = list(stats[servcol].map(_orden_serv_key))
+    s = stats.copy()
+    s['_g'] = [x[0] for x in k]; s['_p'] = [x[1] for x in k]; s['_l'] = [x[2] for x in k]
+    s['_t'] = list(stats[trencol].map(lambda x: _TR.get(x, 9)))
+    s['_c'] = list(stats[compcol].map(lambda x: _CP.get(x, 9)))
+    return s.sort_values(['_g', '_p', '_l', '_t', '_c']).drop(columns=['_g', '_p', '_l', '_t', '_c'])
 
 def _thdr_filtros():
     v1 = st.session_state.get('df_thdr_v1', pd.DataFrame())
@@ -1808,7 +1823,7 @@ if _seccion == _SECCIONES[6]:
 
 if _seccion == _SECCIONES[7]:
     st.markdown("### 📋 THDR — Servicios y Tiempos de Viaje")
-    st.markdown("<style>.tv-card{border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#ffffff,#f7fafc);box-shadow:0 1px 4px rgba(15,23,42,.07)}.tv-head{font-weight:800;color:#005195;font-size:1.02rem;margin-bottom:.55rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}.tv-badge{background:#005195;color:#fff;font-size:.68rem;padding:2px 9px;border-radius:999px;font-weight:700}.tv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.tv-stat{background:#fff;border:1px solid #eef2f7;border-radius:10px;padding:7px 10px;text-align:center}.tv-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}.tv-val{font-size:1.22rem;font-weight:800;color:#0f172a;font-variant-numeric:tabular-nums}.tv-foot{margin-top:.5rem;font-size:.74rem;color:#64748b;text-align:right}</style>", unsafe_allow_html=True)
+    st.markdown("<style>.tv-card{border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#ffffff,#f7fafc);box-shadow:0 1px 4px rgba(15,23,42,.07)}.tv-head{font-weight:800;color:#005195;font-size:1.02rem;margin-bottom:.55rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}.tv-badge{background:#005195;color:#fff;font-size:.68rem;padding:2px 9px;border-radius:999px;font-weight:700}.tv-badge-alt{background:#0a7c6e}.tv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.tv-stat{background:#fff;border:1px solid #eef2f7;border-radius:10px;padding:7px 10px;text-align:center}.tv-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}.tv-val{font-size:1.22rem;font-weight:800;color:#0f172a;font-variant-numeric:tabular-nums}.tv-foot{margin-top:.5rem;font-size:.74rem;color:#64748b;text-align:right}</style>", unsafe_allow_html=True)
     df_thdr_v1, df_thdr_v2 = _thdr_filtros()
     if df_thdr_v1.empty and df_thdr_v2.empty:
         st.info("No se ha cargado/procesado THDR (o los filtros dejaron 0 registros).")
@@ -1835,7 +1850,12 @@ if _seccion == _SECCIONES[7]:
             with st.expander("🚇 Por tipo de tren y tipo de servicio (mostrar / ocultar)", expanded=False):
                 _stt = _ordenar_serv_tren(_stats_dur(_tv, ['Tipo de tren', 'Tipo de servicio']), 'Tipo de servicio', 'Tipo de tren')
                 _render_tv_cards(_stt, 'Tipo de servicio', badge_col='Tipo de tren')
-                st.caption("XT-100 / XT-M / SFE por cada servicio.")
+                st.caption("XT-100 / XT-M / SFE por cada servicio (vista general).")
+            with st.expander("🚈 Por tipo de tren + composición — simple / doble (mostrar / ocultar)", expanded=False):
+                _stc = _ordenar_serv_tren_comp(_stats_dur(_tv, ['Tipo de servicio', 'Tipo de tren', 'Composicion']), 'Tipo de servicio', 'Tipo de tren', 'Composicion')
+                if _stc.empty: st.info("Sin datos por tipo de tren y composición.")
+                else: _render_tv_cards(_stc, 'Tipo de servicio', badge_col=['Tipo de tren', 'Composicion'])
+                st.caption("Cada servicio por material rodante (XT-100/XT-M/SFE) y además simple/doble. La vista general (sin separar simple/doble) está en el bloque anterior.")
             with st.expander("🚉 Detención en estaciones y tiempo entre estaciones (mostrar / ocultar)", expanded=False):
                 _dw = _dwell_estaciones(df_thdr_v1, df_thdr_v2)
                 st.markdown("**🛑 Tiempo detenido en cada estación**")
