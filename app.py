@@ -681,6 +681,50 @@ def _segmentos(v1, v2):
     if not parts: return pd.DataFrame(columns=['Segmento', 'Dur'])
     return pd.concat(parts, ignore_index=True)
 
+def _diagrama_marey(v1, v2):
+    """Diagrama tiempo-distancia (Marey / string-line). Cada servicio es una linea:
+    via1 sube (Puerto->Limache), via2 baja (Limache->Puerto). Donde una linea de via1
+    cruza una de via2, dos trenes se cruzan en ese punto y a esa hora (cruzamiento)."""
+    import plotly.graph_objects as _go
+    _fig = _go.Figure()
+    _COL = {'V1': '#005195', 'V2': '#E85500'}
+    _NOM = {'V1': 'Vía 1 (Puerto→Limache)', 'V2': 'Vía 2 (Limache→Puerto)'}
+    _any = False
+    for _via, _t in (('V1', v1), ('V2', v2)):
+        if _t is None or getattr(_t, 'empty', True):
+            continue
+        _S, _L = _mat_sal_lle(_t)
+        _xs = []; _ys = []
+        for _r in range(len(_t)):
+            _pts = []
+            for _j in range(len(ESTACIONES)):
+                _l = _L[_r, _j]; _s = _S[_r, _j]
+                if not np.isnan(_l): _pts.append((_l, _j))
+                if not np.isnan(_s): _pts.append((_s, _j))
+            if len(_pts) < 2:
+                continue
+            _pts.sort(key=lambda _p: _p[0])
+            for _p in _pts:
+                _xs.append(_p[0]); _ys.append(_p[1])
+            _xs.append(None); _ys.append(None)
+        if _xs:
+            _fig.add_trace(_go.Scatter(x=_xs, y=_ys, mode='lines',
+                line=dict(color=_COL[_via], width=1.1), opacity=0.6,
+                name=_NOM[_via], legendgroup=_via, hoverinfo='skip', connectgaps=False))
+            _any = True
+    if not _any:
+        return None
+    _fig.update_yaxes(tickmode='array', tickvals=list(range(len(ESTACIONES))),
+                      ticktext=[SHORT_NAMES_DICT.get(_e, _e) for _e in ESTACIONES],
+                      title='Estación', gridcolor='#eef2f7')
+    _tk = list(range(0, 1441, 60))
+    _fig.update_xaxes(tickmode='array', tickvals=_tk,
+                      ticktext=[f"{_m // 60:02d}:{_m % 60:02d}" for _m in _tk],
+                      title='Hora del día', gridcolor='#eef2f7')
+    _fig.update_layout(height=620, margin=dict(t=30, b=0, l=0, r=0),
+                       legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0))
+    return _fig
+
 def _orden_serv_key(s):
     s = str(s)
     if '→' not in s: return (9, 99, s)
@@ -1865,6 +1909,14 @@ if _seccion == _SECCIONES[7]:
                 st.markdown("**↔️ Tiempo de viaje entre estaciones consecutivas**")
                 if _sg.empty: st.info("Sin datos de tiempo entre estaciones.")
                 else: _render_tv_cards(_stats_dur(_sg, 'Segmento'), 'Segmento')
+        st.markdown("#### 🚦 Cruzamientos entre vía 1 y vía 2")
+        with st.expander("🚦 Diagrama de cruzamientos (tiempo × estación) — mostrar / ocultar", expanded=False):
+            _figm = _diagrama_marey(df_thdr_v1, df_thdr_v2)
+            if _figm is None:
+                st.info("Sin datos suficientes para el diagrama de cruzamientos.")
+            else:
+                st.plotly_chart(_figm, use_container_width=True, config={'locale': 'es'})
+                st.caption("Cada línea es un servicio: las azules (vía 1) suben de Puerto a Limache y las naranjas (vía 2) bajan de Limache a Puerto. Donde una azul cruza una naranja, dos trenes se cruzan en ese punto y a esa hora. Para ver los cruces de un día puntual, filtra por fecha en la barra de arriba.")
         if not _det.empty:
             st.divider()
             st.markdown("#### 📥 Servicios por tipo de tren (descargable)")
