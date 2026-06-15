@@ -523,16 +523,16 @@ def _servicios_norm(df_thdr_v1, df_thdr_v2, fechas=None):
         tserv = tserv.where(tserv.notna(), 'Sin clasificar')
         c1, c2 = _col_tt(x, 'MOTRIZ 1'), _col_tt(x, 'MOTRIZ 2')
         ct, cv = _col_tt(x, 'TREN'), _col_tt(x, 'VIAJE')
-        df = pd.DataFrame({'Fecha': pd.to_datetime(x['Fecha_Op']).dt.date})
+        df = pd.DataFrame({'Fecha': pd.to_datetime(x['Fecha_Op']).dt.date.values})
         df['Tipo de servicio'] = tserv.values
         df['N. Servicio'] = x[ct].values if ct else None
         df['N. Viaje']    = x[cv].values if cv else None
         df['Motriz 1']    = pd.to_numeric(x[c1], errors='coerce').values if c1 else np.nan
         df['Motriz 2']    = pd.to_numeric(x[c2], errors='coerce').values if c2 else np.nan
         df['Tipo de tren'] = df['Motriz 1'].apply(_tipo_tren)
-        doble = df['Motriz 2'].notna()
+        doble = df['Motriz 2'].notna().values
         if 'Unidad' in x.columns:
-            doble = doble | pd.Series(x['Unidad'].astype(str).str.upper().str.strip().eq('M').values)
+            doble = doble | x['Unidad'].astype(str).str.upper().str.strip().eq('M').values
         df['Composicion'] = np.where(doble, 'Doble', 'Simple')
         df.loc[df['Tipo de tren'] == 'SFE', 'Composicion'] = 'Simple'
         parts.append(df)
