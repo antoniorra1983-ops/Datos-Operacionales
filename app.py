@@ -824,6 +824,13 @@ def _km_por_tren(all_tr):
     if not _odo.empty:
         _res['Odómetro actual'] = _odo.sort_values('Fecha').groupby('Tren')['Valor'].last()
     _res = _res.reset_index().sort_values('Km recorridos', ascending=False).reset_index(drop=True)
+    def _tipo_id(_s):
+        _s = str(_s).upper().strip()
+        if _s.startswith('SFE'): return 'SFE'
+        if _s.startswith('XM'): return 'XT-M'
+        if _s.startswith('M'): return 'XT-100'
+        return 'Otro'
+    _res.insert(1, 'Tipo', _res['Tren'].map(_tipo_id))
     _flota = _pivk.sum(axis=0, min_count=1).reset_index()
     _flota.columns = ['Fecha', 'Km flota']
     return _res, _flota, _pivk
@@ -1199,9 +1206,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             for j in range(1,len(df_raw.columns)):
                                 v_f=pd.to_datetime(df_raw.iloc[i,j],errors='coerce')
                                 if pd.notna(v_f) and start_date<=v_f.date()<=end_date:
-                                    for k in range(i+3,min(i+50,len(df_raw))):
+                                    for k in range(i+3,min(i+100,len(df_raw))):
                                         t=str(df_raw.iloc[k,0]).strip().upper()
-                                        if re.match(r'^(M|XM)',t):
+                                        if re.match(r'^(M|XM|SFE)',t):
                                             all_tr.append({"Tren":t,"Fecha":v_f.normalize(),"Valor":parse_latam_number(df_raw.iloc[k,j])})
             except Exception as e: _errores_proc[f.name]=f"UMR: {e}"
             
@@ -1760,12 +1767,12 @@ if _seccion == _SECCIONES[2]:
             _c4.metric("Tren más usado", str(_res_tr.iloc[0]['Tren']), f"{_ncl(_res_tr.iloc[0]['Km recorridos'], 0)} km")
             st.markdown("#### Km recorridos por tren")
             _fig_kt = px.bar(_res_tr, x='Km recorridos', y='Tren', orientation='h', text='Km recorridos',
-                             color_discrete_sequence=['#005195'])
+                             color='Tipo', color_discrete_map={'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Otro': '#888888'})
             _fig_kt.update_layout(height=max(340, 20 * len(_res_tr)), margin=dict(t=10, b=0, l=0, r=0),
                                   yaxis=dict(autorange='reversed', title=''), title='')
             _fig_kt.update_traces(textposition='outside', cliponaxis=False)
             st.plotly_chart(_fig_kt, use_container_width=True, config={'locale': 'es'})
-            st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Los trenes en 0 estuvieron detenidos o en mantención.")
+            st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención.")
             if not _flota_tr.empty:
                 st.markdown("#### Km diario de la flota")
                 _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
