@@ -796,6 +796,38 @@ def _filtra_fecha_op(df, fecha):
         return df
     return df[pd.to_datetime(df['Fecha_Op'], errors='coerce').dt.date == fecha]
 
+def _km_por_tren(all_tr):
+    """Desde all_tr (Tren, Fecha, Valor) separa odómetro acumulado (valores grandes) y
+    kilometraje diario (valores chicos) de la hoja UMR, y resume km recorridos por tren.
+    Devuelve (resumen_por_tren, km_diario_flota, pivote_km_diario)."""
+    _vacio = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    if not all_tr:
+        return _vacio
+    _d = pd.DataFrame(all_tr)
+    if not {'Tren', 'Fecha', 'Valor'}.issubset(_d.columns):
+        return _vacio
+    _d['Fecha'] = pd.to_datetime(_d['Fecha'], errors='coerce').dt.normalize()
+    _d['Valor'] = pd.to_numeric(_d['Valor'], errors='coerce')
+    _d = _d.dropna(subset=['Fecha', 'Valor'])
+    if _d.empty:
+        return _vacio
+    _km = _d[_d['Valor'] < 50000]
+    _odo = _d[_d['Valor'] >= 50000]
+    if _km.empty:
+        return _vacio
+    _pivk = _km.pivot_table(index='Tren', columns='Fecha', values='Valor', aggfunc='mean').sort_index(axis=1)
+    _res = pd.DataFrame(index=_pivk.index)
+    _res['Km recorridos'] = _pivk.sum(axis=1, min_count=1).round(0)
+    _res['Días activos'] = (_pivk > 0).sum(axis=1)
+    _res['Km/día (prom)'] = (_res['Km recorridos'] / _res['Días activos'].replace(0, np.nan)).round(0)
+    _res['Km máx (día)'] = _pivk.max(axis=1).round(0)
+    if not _odo.empty:
+        _res['Odómetro actual'] = _odo.sort_values('Fecha').groupby('Tren')['Valor'].last()
+    _res = _res.reset_index().sort_values('Km recorridos', ascending=False).reset_index(drop=True)
+    _flota = _pivk.sum(axis=0, min_count=1).reset_index()
+    _flota.columns = ['Fecha', 'Km flota']
+    return _res, _flota, _pivk
+
 def _orden_serv_key(s):
     s = str(s)
     if '→' not in s: return (9, 99, s)
@@ -1710,11 +1742,43 @@ if _seccion == _SECCIONES[1]:
 
 if _seccion == _SECCIONES[2]:
     if all_tr:
-        st.write("### Detalle por Unidad (Tren)")
-        df_tr = pd.DataFrame(all_tr)
-        df_tr['Fecha'] = pd.to_datetime(df_tr['Fecha']).dt.strftime('%Y-%m-%d')
-        st.dataframe(make_columns_unique(df_tr), use_container_width=True)
-    else: st.info("No hay datos detallados de trenes cargados.")
+        _res_tr, _flota_tr, _pivk_tr = _km_por_tren(all_tr)
+        if _res_tr.empty:
+            st.write("### Detalle por Unidad (Tren)")
+            df_tr = pd.DataFrame(all_tr)
+            df_tr['Fecha'] = pd.to_datetime(df_tr['Fecha']).dt.strftime('%Y-%m-%d')
+            st.dataframe(make_columns_unique(df_tr), use_container_width=True)
+        else:
+            st.markdown("### 🚆 Kilometraje por tren (odómetro UMR)")
+            _km_tot_tr = float(_res_tr['Km recorridos'].sum())
+            _act_tr = _res_tr[_res_tr['Km recorridos'] > 0]
+            _n_act = int(len(_act_tr))
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            _c1.metric("Trenes con actividad", _ncl(_n_act, 0))
+            _c2.metric("Km total flota", f"{_ncl(_km_tot_tr, 0)} km")
+            _c3.metric("Km promedio/tren", f"{_ncl(_km_tot_tr / _n_act if _n_act else 0, 0)} km")
+            _c4.metric("Tren más usado", str(_res_tr.iloc[0]['Tren']), f"{_ncl(_res_tr.iloc[0]['Km recorridos'], 0)} km")
+            st.markdown("#### Km recorridos por tren")
+            _fig_kt = px.bar(_res_tr, x='Km recorridos', y='Tren', orientation='h', text='Km recorridos',
+                             color_discrete_sequence=['#005195'])
+            _fig_kt.update_layout(height=max(340, 20 * len(_res_tr)), margin=dict(t=10, b=0, l=0, r=0),
+                                  yaxis=dict(autorange='reversed', title=''), title='')
+            _fig_kt.update_traces(textposition='outside', cliponaxis=False)
+            st.plotly_chart(_fig_kt, use_container_width=True, config={'locale': 'es'})
+            st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Los trenes en 0 estuvieron detenidos o en mantención.")
+            if not _flota_tr.empty:
+                st.markdown("#### Km diario de la flota")
+                _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
+                _fig_fl.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(title='km'))
+                st.plotly_chart(_no_huecos(_fig_fl), use_container_width=True, config={'locale': 'es'})
+                st.caption("Suma de km de todos los trenes por día.")
+            st.markdown("#### Detalle por tren")
+            st.dataframe(_res_tr, use_container_width=True)
+            with st.expander("Ver kilometraje diario por tren (matriz tren × día) — mostrar / ocultar", expanded=False):
+                _pk_show = _pivk_tr.copy()
+                _pk_show.columns = [pd.to_datetime(_c).strftime('%d-%m') for _c in _pk_show.columns]
+                st.dataframe(_pk_show, use_container_width=True)
+    else: st.info("No hay datos de odómetro (UMR) cargados para el análisis por tren.")
 
 if _seccion == _SECCIONES[3]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
