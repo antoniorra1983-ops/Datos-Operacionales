@@ -1162,6 +1162,7 @@ df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame()
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
+all_kmserv=[]
 _errores_proc={}
 
 if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('_do_load'):
@@ -1173,6 +1174,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     all_fact_full=st.session_state['all_fact_full']
     all_prmte_full=st.session_state['all_prmte_full']
     all_prmte_2025=st.session_state.get('all_prmte_2025',[])
+    all_kmserv=st.session_state.get('all_kmserv',[])
     df_carga_v1=st.session_state.get('df_carga_v1', pd.DataFrame())
     df_carga_v2=st.session_state.get('df_carga_v2', pd.DataFrame())
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
@@ -1210,6 +1212,15 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                                         t=str(df_raw.iloc[k,0]).strip().upper()
                                         if re.match(r'^(M|XM|SFE)',t):
                                             all_tr.append({"Tren":t,"Fecha":v_f.normalize(),"Valor":parse_latam_number(df_raw.iloc[k,j])})
+                    if 'SERV' in sn.upper() and 'KM' in sn.upper():
+                        _fe_kms = pd.to_datetime(df_raw.iloc[4:, 0], errors='coerce').ffill()
+                        for _ri in range(4, len(df_raw)):
+                            _od = df_raw.iloc[_ri, 5]
+                            _fe = _fe_kms.get(_ri)
+                            if pd.notna(_od) and pd.notna(_fe) and re.match(r'^[A-Z]{2,3}-[A-Z]{2,3}$', str(_od).strip().upper()) and start_date <= _fe.date() <= end_date:
+                                all_kmserv.append({"Fecha": _fe.normalize(),
+                                                   "KmsxTrenes": parse_latam_number(df_raw.iloc[_ri, 9]),
+                                                   "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22])})
             except Exception as e: _errores_proc[f.name]=f"UMR: {e}"
             
     if f_seat_all:
@@ -1380,7 +1391,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
-                              'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,
+                              'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo})
     st.session_state['_do_load'] = False
 
@@ -1471,6 +1482,7 @@ if not df_ops.empty and _seccion != _SECCIONES[7]:
     all_fact_full = _filt_regs(all_fact_full)
     all_tr = _filt_regs(all_tr)
     all_seat = _filt_regs(all_seat)
+    all_kmserv = _filt_regs(all_kmserv)
     _rf = []
     if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
     if _sel_m != "Todos": _rf.append(_sel_m)
@@ -1804,6 +1816,35 @@ if _seccion == _SECCIONES[2]:
                 _pk_show.columns = [pd.to_datetime(_c).strftime('%d-%m') for _c in _pk_show.columns]
                 st.dataframe(_pk_show, use_container_width=True)
     else: st.info("No hay datos de odómetro (UMR) cargados para el análisis por tren.")
+    if all_kmserv:
+        _dks = pd.DataFrame(all_kmserv)
+        _dks['Fecha'] = pd.to_datetime(_dks['Fecha'], errors='coerce').dt.normalize()
+        _dks['KmsxTrenes'] = pd.to_numeric(_dks['KmsxTrenes'], errors='coerce')
+        _dks['KmTrenR'] = pd.to_numeric(_dks['KmTrenR'], errors='coerce')
+        _dks = _dks.dropna(subset=['Fecha'])
+        _agg_ks = _dks.groupby('Fecha', as_index=False).agg(**{'Kms.xTrenes': ('KmsxTrenes', 'sum'), 'KmTren R': ('KmTrenR', 'sum')})
+        _agg_ks['Diferencia'] = (_agg_ks['Kms.xTrenes'] - _agg_ks['KmTren R']).round(2)
+        _agg_ks = _agg_ks.sort_values('Fecha').reset_index(drop=True)
+        st.divider()
+        st.markdown("### 📏 Km por servicio: teórico vs real (KM-Servicio UMR)")
+        _kt1 = float(_agg_ks['Kms.xTrenes'].sum()); _kt2 = float(_agg_ks['KmTren R'].sum()); _ktd = _kt1 - _kt2
+        _mk1, _mk2, _mk3 = st.columns(3)
+        _mk1.metric("Kms.xTrenes (total)", f"{_ncl(_kt1, 0)} km")
+        _mk2.metric("KmTren R (total)", f"{_ncl(_kt2, 0)} km")
+        _mk3.metric("Diferencia (no realizado)", f"{_ncl(_ktd, 0)} km", f"{_ncl(_ktd / _kt1 * 100 if _kt1 else 0, 2)} %")
+        _aml = _agg_ks.melt(id_vars='Fecha', value_vars=['Kms.xTrenes', 'KmTren R'], var_name='Métrica', value_name='Km')
+        _fig_ks = px.bar(_aml, x='Fecha', y='Km', color='Métrica', barmode='group',
+                         color_discrete_map={'Kms.xTrenes': '#005195', 'KmTren R': '#E85500'})
+        _fig_ks.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0))
+        st.plotly_chart(_no_huecos(_fig_ks), use_container_width=True, config={'locale': 'es'})
+        _fig_kd = px.bar(_agg_ks, x='Fecha', y='Diferencia', color_discrete_sequence=['#b91c1c'])
+        _fig_kd.update_layout(height=260, margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(title='km no realizados'))
+        st.plotly_chart(_no_huecos(_fig_kd), use_container_width=True, config={'locale': 'es'})
+        st.caption("Kms.xTrenes = km teórico (trenes × recorrido). KmTren R = km real recorrido. Diferencia = Kms.xTrenes − KmTren R (positivo: se recorrió menos de lo previsto).")
+        with st.expander("Ver tabla diaria (Kms.xTrenes, KmTren R, diferencia) — mostrar / ocultar", expanded=False):
+            _at_ks = _agg_ks.copy()
+            _at_ks['Fecha'] = _at_ks['Fecha'].dt.strftime('%d-%m-%Y')
+            st.dataframe(_at_ks, use_container_width=True, hide_index=True)
 
 if _seccion == _SECCIONES[3]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
