@@ -1765,6 +1765,24 @@ if _seccion == _SECCIONES[2]:
             _c2.metric("Km total flota", f"{_ncl(_km_tot_tr, 0)} km")
             _c3.metric("Km promedio/tren", f"{_ncl(_km_tot_tr / _n_act if _n_act else 0, 0)} km")
             _c4.metric("Tren más usado", str(_res_tr.iloc[0]['Tren']), f"{_ncl(_res_tr.iloc[0]['Km recorridos'], 0)} km")
+            _por_tipo = _res_tr.groupby('Tipo').agg(**{'Trenes': ('Tren', 'count'), 'Km total': ('Km recorridos', 'sum')}).reset_index()
+            _tot_km_tp = float(_por_tipo['Km total'].sum())
+            _por_tipo['% uso'] = (_por_tipo['Km total'] / _tot_km_tp * 100).round(1) if _tot_km_tp > 0 else 0.0
+            _por_tipo = _por_tipo.sort_values('Km total', ascending=False).reset_index(drop=True)
+            st.markdown("#### Uso por tipo de tren")
+            _ct1, _ct2 = st.columns([5, 6])
+            with _ct1:
+                _fig_tp = px.pie(_por_tipo, names='Tipo', values='Km total', hole=0.55,
+                                 color='Tipo', color_discrete_map={'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Otro': '#888888'})
+                _fig_tp.update_traces(textinfo='percent+label', sort=False)
+                _fig_tp.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0), showlegend=False)
+                st.plotly_chart(_fig_tp, use_container_width=True, config={'locale': 'es'})
+            with _ct2:
+                _tp_show = _por_tipo.copy()
+                _tp_show['Km total'] = _tp_show['Km total'].map(lambda _v: f"{_ncl(_v, 0)} km")
+                _tp_show['% uso'] = _tp_show['% uso'].map(lambda _v: f"{_ncl(_v, 1)} %")
+                st.dataframe(_tp_show, use_container_width=True, hide_index=True)
+                st.caption("% uso = participación de cada tipo en el km total de la flota.")
             st.markdown("#### Km recorridos por tren")
             _fig_kt = px.bar(_res_tr, x='Km recorridos', y='Tren', orientation='h', text='Km recorridos',
                              color='Tipo', color_discrete_map={'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Otro': '#888888'})
