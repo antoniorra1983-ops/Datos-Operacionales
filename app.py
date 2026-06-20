@@ -3026,6 +3026,25 @@ if _seccion == _SECCIONES[12]:
                                     {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}), use_container_width=True, config={'locale': 'es'})
         st.plotly_chart(_pie_sv('Tipo de servicio', 'Tipo de servicio (recorrido)'), use_container_width=True, config={'locale': 'es'})
         st.caption("Distribución de los servicios THDR del período seleccionado. Los porcentajes son sobre el total de servicios.")
+        st.markdown("#### Composición según tipo de servicio y tipo de tren")
+        def _cruce_sv(_dim, _titulo, _cmap=None):
+            _g = _det_sv.groupby(['Composicion', _dim]).size().reset_index(name='Cantidad')
+            _tc = _g.groupby('Composicion')['Cantidad'].transform('sum')
+            _g['pct'] = (_g['Cantidad'] / _tc * 100).round(1)
+            _g['pct_str'] = _g['pct'].map(lambda _v: _ncl(_v, 1))
+            _f = px.bar(_g, x='Composicion', y='Cantidad', color=_dim, barmode='stack',
+                        custom_data=['pct_str'], title=_titulo, color_discrete_map=_cmap, text='Cantidad')
+            _f.update_traces(textposition='inside',
+                             hovertemplate='<b>%{fullData.name}</b><br>%{x}: %{y} servicios (%{customdata[0]}%)<extra></extra>')
+            _f.update_layout(height=390, margin=dict(t=46, b=0, l=0, r=0), yaxis_title='Servicios', xaxis_title='', legend_title='')
+            return _f
+        _cc1, _cc2 = st.columns(2)
+        with _cc1:
+            st.plotly_chart(_cruce_sv('Tipo de servicio', 'Simple / Doble por tipo de servicio'), use_container_width=True, config={'locale': 'es'})
+        with _cc2:
+            st.plotly_chart(_cruce_sv('Tipo de tren', 'Simple / Doble por tipo de tren',
+                                      {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}), use_container_width=True, config={'locale': 'es'})
+        st.caption("Cada barra (Simple / Doble) se divide por tipo de servicio y por tipo de tren. El hover muestra la cantidad y el % dentro de esa composición.")
         with st.expander("Ver tablas con cantidades y % — mostrar / ocultar", expanded=False):
             for _cc, _tt in [('Composicion', 'Composición'), ('Tipo de tren', 'Tipo de tren'), ('Tipo de servicio', 'Tipo de servicio')]:
                 _vc = _det_sv[_cc].value_counts().reset_index()
@@ -3033,3 +3052,7 @@ if _seccion == _SECCIONES[12]:
                 _vc['%'] = (_vc['Cantidad'] / _tot_sv * 100).round(1).map(lambda _v: f"{_ncl(_v, 1)} %")
                 st.markdown(f"**{_tt}**")
                 st.dataframe(_vc, use_container_width=True, hide_index=True)
+            st.markdown("**Composición × Tipo de servicio**")
+            st.dataframe(pd.crosstab(_det_sv['Tipo de servicio'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
+            st.markdown("**Composición × Tipo de tren**")
+            st.dataframe(pd.crosstab(_det_sv['Tipo de tren'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
