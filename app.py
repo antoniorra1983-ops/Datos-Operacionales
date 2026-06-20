@@ -3059,24 +3059,66 @@ if _seccion == _SECCIONES[12]:
         _render_dist('Tipo de servicio', 'Tipo de servicio (recorrido)')
         st.caption("Distribución de los servicios THDR del período seleccionado. Los porcentajes son sobre el total de servicios.")
         st.markdown("#### Composición según tipo de servicio y tipo de tren")
-        def _cruce_sv(_dim, _titulo, _cmap=None):
+        def _render_cruce(_dim, _titulo, _cmap=None):
             _g = _det_sv.groupby(['Composicion', _dim]).size().reset_index(name='Cantidad')
             _tc = _g.groupby('Composicion')['Cantidad'].transform('sum')
             _g['pct'] = (_g['Cantidad'] / _tc * 100).round(1)
             _g['pct_str'] = _g['pct'].map(lambda _v: _ncl(_v, 1))
-            _f = px.bar(_g, x='Composicion', y='Cantidad', color=_dim, barmode='stack',
-                        custom_data=['pct_str'], title=_titulo, color_discrete_map=_cmap, text='Cantidad')
-            _f.update_traces(textposition='inside',
-                             hovertemplate='<b>%{fullData.name}</b><br>%{x}: %{y} servicios (%{customdata[0]}%)<extra></extra>')
-            _f.update_layout(height=390, margin=dict(t=46, b=0, l=0, r=0), yaxis_title='Servicios', xaxis_title='', legend_title='')
-            return _f
-        _cc1, _cc2 = st.columns(2)
-        with _cc1:
-            st.plotly_chart(_cruce_sv('Tipo de servicio', 'Simple / Doble por tipo de servicio'), use_container_width=True, config={'locale': 'es'})
-        with _cc2:
-            st.plotly_chart(_cruce_sv('Tipo de tren', 'Simple / Doble por tipo de tren',
-                                      {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}), use_container_width=True, config={'locale': 'es'})
-        st.caption("Cada barra (Simple / Doble) se divide por tipo de servicio y por tipo de tren. El hover muestra la cantidad y el % dentro de esa composición.")
+            st.markdown(f"**{_titulo}**")
+            if "Barra" in _viz:
+                _f = px.bar(_g, x='Composicion', y='Cantidad', color=_dim, barmode='stack',
+                            custom_data=['pct_str'], color_discrete_map=_cmap, text='Cantidad')
+                _f.update_traces(textposition='inside',
+                                 hovertemplate='<b>%{fullData.name}</b><br>%{x}: %{y} servicios (%{customdata[0]}%)<extra></extra>')
+                _f.update_layout(height=390, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Servicios', xaxis_title='', legend_title='')
+                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+            elif "Torta" in _viz:
+                _f = px.sunburst(_g, path=['Composicion', _dim], values='Cantidad')
+                _f.update_traces(hovertemplate='<b>%{label}</b><br>%{value} servicios<br>%{percentParent} de %{parent}<extra></extra>')
+                _f.update_layout(height=390, margin=dict(t=10, b=0, l=0, r=0))
+                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+            else:
+                _pal = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Simple': '#005195', 'Doble': '#E85500'}
+                for _comp in ['Simple', 'Doble']:
+                    _sub = _g[_g['Composicion'] == _comp].sort_values('Cantidad', ascending=False)
+                    if _sub.empty:
+                        continue
+                    st.markdown(f"*{_comp}* ({_ncl(int(_sub['Cantidad'].sum()), 0)} servicios)")
+                    _cl = st.columns(min(len(_sub), 4))
+                    for _i, (_, _r) in enumerate(_sub.iterrows()):
+                        _clr = (_cmap or {}).get(str(_r[_dim])) or _pal.get(str(_r[_dim]), '#005195')
+                        _cl[_i % len(_cl)].markdown(
+                            f'<div style="border:1px solid #e5e7eb;border-radius:12px;padding:10px 12px;background:#fff;margin-bottom:8px">'
+                            f'<div style="font-size:.74rem;color:#6b7280;font-weight:600">{_r[_dim]}</div>'
+                            f'<div style="font-size:1.4rem;font-weight:800;color:{_clr}">{_ncl(_r["Cantidad"], 0)}</div>'
+                            f'<div style="font-size:.8rem;color:#374151">{_r["pct_str"]} % de los {_comp.lower()}s</div></div>',
+                            unsafe_allow_html=True)
+        _cM = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}
+        if "Tarjetas" in _viz:
+            _render_cruce('Tipo de servicio', 'Simple / Doble por tipo de servicio')
+            _render_cruce('Tipo de tren', 'Simple / Doble por tipo de tren', _cM)
+        else:
+            _cc1, _cc2 = st.columns(2)
+            with _cc1:
+                _render_cruce('Tipo de servicio', 'Simple / Doble por tipo de servicio')
+            with _cc2:
+                _render_cruce('Tipo de tren', 'Simple / Doble por tipo de tren', _cM)
+        st.caption("Cada composición (Simple / Doble) se desglosa por tipo de servicio y por tipo de tren, con la cantidad y el % dentro de esa composición.")
+        def _excel_dist(_det):
+            _buf = BytesIO(); _t = len(_det)
+            with pd.ExcelWriter(_buf, engine='openpyxl') as _w:
+                for _c, _nm in [('Composicion', 'Composicion'), ('Tipo de tren', 'Tipo de tren'), ('Tipo de servicio', 'Tipo de servicio')]:
+                    _d = _det[_c].value_counts().reset_index(); _d.columns = [_nm, 'Cantidad']
+                    _d['%'] = (_d['Cantidad'] / _t * 100).round(1)
+                    _d.to_excel(_w, sheet_name=_nm[:31], index=False)
+                pd.crosstab(_det['Tipo de servicio'], _det['Composicion'], margins=True, margins_name='Total').to_excel(_w, sheet_name='Comp x Servicio')
+                pd.crosstab(_det['Tipo de tren'], _det['Composicion'], margins=True, margins_name='Total').to_excel(_w, sheet_name='Comp x Tren')
+                _det.to_excel(_w, sheet_name='Detalle', index=False)
+            return _buf.getvalue()
+        st.download_button("⬇️ Descargar tablas en Excel", _excel_dist(_det_sv),
+                           file_name="servicios_distribucion.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="_dl_serv_xlsx")
         with st.expander("Ver tablas con cantidades y % — mostrar / ocultar", expanded=False):
             for _cc, _tt in [('Composicion', 'Composición'), ('Tipo de tren', 'Tipo de tren'), ('Tipo de servicio', 'Tipo de servicio')]:
                 _vc = _det_sv[_cc].value_counts().reset_index()
