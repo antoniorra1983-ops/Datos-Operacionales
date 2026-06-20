@@ -3143,44 +3143,50 @@ if _seccion == _SECCIONES[13]:
         _b = df_ops.copy()
         _b['_f'] = pd.to_datetime(_b['Fecha']).dt.date
         _b['Meta km'] = _b['Odómetro [km]'] * _meta
-        _b['Δkm R'] = _b['Tren-Km [km]'] - _b['Meta km']
-        _b['Ahorro R (kWh)'] = _b['Δkm R'] * _b['IDE (kWh/km)']
+        # 1) UMR — usa el Tren-Km del dashboard (df_ops, archivo de operación)
+        _b['Δ UMR'] = _b['Tren-Km [km]'] - _b['Meta km']
+        _b['Ahorro UMR'] = _b['Δ UMR'] * _b['IDE (kWh/km)']
+        # Tren-Km R (real) y Kms.xTrenes (teórico) — de la hoja KM-Servicio del Excel
         if all_kmserv:
             _dkp = pd.DataFrame(all_kmserv)
-            _dkp['KmTrenP'] = pd.to_numeric(_dkp.get('KmTrenP'), errors='coerce')
-            _aggp = _dkp.groupby(pd.to_datetime(_dkp['Fecha']).dt.date, as_index=False).agg(_p=('KmTrenP', 'sum'))
-            _aggp.columns = ['_f', 'Tren-Km P']
+            for _c in ['KmTrenR', 'KmsxTrenes']:
+                _dkp[_c] = pd.to_numeric(_dkp.get(_c), errors='coerce')
+            _aggp = _dkp.groupby(pd.to_datetime(_dkp['Fecha']).dt.date, as_index=False).agg(_r=('KmTrenR', 'sum'), _t=('KmsxTrenes', 'sum'))
+            _aggp.columns = ['_f', 'Tren-Km R', 'Kms.xTrenes']
             _b = _b.merge(_aggp, on='_f', how='left')
         else:
-            _b['Tren-Km P'] = np.nan
-        _b['Δkm P'] = _b['Tren-Km P'] - _b['Meta km']
-        _b['Ahorro P (kWh)'] = _b['Δkm P'] * _b['IDE (kWh/km)']
-        _aR = float(_b['Ahorro R (kWh)'].sum()); _kR = float(_b['Δkm R'].sum())
-        _has_p = bool(_b['Ahorro P (kWh)'].notna().any())
-        _odo_tot = float(_b['Odómetro [km]'].sum())
-        _ide_g = (float(_b['E_Tr'].sum()) / _odo_tot) if _odo_tot > 0 else 0.0
+            _b['Tren-Km R'] = np.nan; _b['Kms.xTrenes'] = np.nan
+        # 2) Tren-Km R (real)
+        _b['Δ R'] = _b['Tren-Km R'] - _b['Meta km']
+        _b['Ahorro Tren-Km R'] = _b['Δ R'] * _b['IDE (kWh/km)']
+        # 3) Kms.xTrenes (teórico)
+        _b['Δ T'] = _b['Kms.xTrenes'] - _b['Meta km']
+        _b['Ahorro Kms.xTrenes'] = _b['Δ T'] * _b['IDE (kWh/km)']
+        _has = bool(_b['Tren-Km R'].notna().any())
         _m1, _m2, _m3 = st.columns(3)
-        _m1.metric("Ahorro real (Tren-Km R)", f"{_ncl(_aR, 0)} kWh", f"{_ncl(_kR, 0)} km vs meta")
-        if _has_p:
-            _aP = float(_b['Ahorro P (kWh)'].sum()); _kP = float(_b['Δkm P'].sum())
-            _m2.metric("Ahorro programado (Tren-Km P)", f"{_ncl(_aP, 0)} kWh", f"{_ncl(_kP, 0)} km vs meta")
+        _uR = float(_b['Ahorro UMR'].sum()); _ukm = float(_b['Δ UMR'].sum())
+        _m1.metric("Ahorro UMR (dashboard)", f"{_ncl(_uR, 0)} kWh", f"{_ncl(_ukm, 0)} km vs meta")
+        if _has:
+            _rR = float(_b['Ahorro Tren-Km R'].sum()); _rkm = float(_b['Δ R'].sum())
+            _m2.metric("Ahorro Tren-Km R (real)", f"{_ncl(_rR, 0)} kWh", f"{_ncl(_rkm, 0)} km vs meta")
+            _tR = float(_b['Ahorro Kms.xTrenes'].sum()); _tkm = float(_b['Δ T'].sum())
+            _m3.metric("Ahorro Kms.xTrenes (teórico)", f"{_ncl(_tR, 0)} kWh", f"{_ncl(_tkm, 0)} km vs meta")
         else:
-            _m2.metric("Ahorro programado (Tren-Km P)", "—",
-                       help="Carga el Excel UMR (hoja KM-Servicio) para tener el Tren-Km programado.")
-        _m3.metric("IDE global del período", f"{_ncl(_ide_g, 2)} kWh/km")
-        _vv = ['Ahorro R (kWh)'] + (['Ahorro P (kWh)'] if _has_p else [])
-        _mv = _b.melt(id_vars='Fecha', value_vars=_vv, var_name='Tipo', value_name='kWh').dropna(subset=['kWh'])
-        _fig_ah = px.bar(_mv, x='Fecha', y='kWh', color='Tipo', barmode='group',
-                         color_discrete_map={'Ahorro R (kWh)': '#005195', 'Ahorro P (kWh)': '#0a7c6e'},
-                         title="Ahorro de energía por día (kWh)")
+            _m2.metric("Ahorro Tren-Km R (real)", "—", help="Carga el Excel UMR (hoja KM-Servicio).")
+            _m3.metric("Ahorro Kms.xTrenes (teórico)", "—", help="Carga el Excel UMR (hoja KM-Servicio).")
+        _vv = ['Ahorro UMR'] + (['Ahorro Tren-Km R', 'Ahorro Kms.xTrenes'] if _has else [])
+        _mv = _b.melt(id_vars='Fecha', value_vars=_vv, var_name='Ahorro', value_name='kWh').dropna(subset=['kWh'])
+        _cmap_ah = {'Ahorro UMR': '#005195', 'Ahorro Tren-Km R': '#E85500', 'Ahorro Kms.xTrenes': '#0a7c6e'}
+        _fig_ah = px.bar(_mv, x='Fecha', y='kWh', color='Ahorro', barmode='group',
+                         color_discrete_map=_cmap_ah, title="Ahorro de energía por día (kWh) — UMR · Tren-Km R · Kms.xTrenes")
         _fig_ah.update_layout(margin=dict(t=46, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
         st.plotly_chart(_no_huecos(_fig_ah), use_container_width=True, config={'locale': 'es'})
-        st.caption(f"Ahorro = (Tren-Km − Odómetro × {_ncl(_meta, 3)}) × IDE del día. Positivo = ahorro (UMR sobre la meta); negativo = sobreconsumo (UMR bajo la meta). IDE = E_Tr ÷ Odómetro de cada día.")
+        st.caption(f"Cada ahorro = (Tren-Km − Odómetro × {_ncl(_meta, 3)}) × IDE del día. Positivo = ahorro (sobre la meta); negativo = sobreconsumo. IDE = E_Tr ÷ Odómetro de cada día. El UMR usa el Tren-Km del dashboard; Tren-Km R (real) y Kms.xTrenes (teórico) vienen de la hoja KM-Servicio del Excel.")
         with st.expander("Ver tabla diaria — mostrar / ocultar", expanded=False):
-            _cols_t = ['_f', 'Tren-Km [km]', 'Tren-Km P', 'Odómetro [km]', 'Meta km', 'IDE (kWh/km)', 'Δkm R', 'Ahorro R (kWh)', 'Δkm P', 'Ahorro P (kWh)']
+            _cols_t = ['_f', 'Odómetro [km]', 'Meta km', 'IDE (kWh/km)', 'Tren-Km [km]', 'Ahorro UMR', 'Tren-Km R', 'Ahorro Tren-Km R', 'Kms.xTrenes', 'Ahorro Kms.xTrenes']
             _tab = _b[_cols_t].copy()
-            _tab.columns = ['Fecha', 'Tren-Km R', 'Tren-Km P', 'Odómetro', 'Meta km', 'IDE', 'Δkm R', 'Ahorro R (kWh)', 'Δkm P', 'Ahorro P (kWh)']
-            for _c in ['Tren-Km R', 'Tren-Km P', 'Odómetro', 'Meta km', 'Δkm R', 'Ahorro R (kWh)', 'Δkm P', 'Ahorro P (kWh)']:
+            _tab.columns = ['Fecha', 'Odómetro', 'Meta km', 'IDE', 'Tren-Km (UMR)', 'Ahorro UMR', 'Tren-Km R', 'Ahorro Tren-Km R', 'Kms.xTrenes', 'Ahorro Kms.xTrenes']
+            for _c in ['Odómetro', 'Meta km', 'Tren-Km (UMR)', 'Ahorro UMR', 'Tren-Km R', 'Ahorro Tren-Km R', 'Kms.xTrenes', 'Ahorro Kms.xTrenes']:
                 _tab[_c] = _tab[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '—')
             _tab['IDE'] = _tab['IDE'].map(lambda _v: _ncl(_v, 3) if pd.notna(_v) else '—')
             st.dataframe(_tab, use_container_width=True, hide_index=True)
