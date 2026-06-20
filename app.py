@@ -1220,7 +1220,8 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             if pd.notna(_od) and pd.notna(_fe) and re.match(r'^[A-Z]{2,3}-[A-Z]{2,3}$', str(_od).strip().upper()) and start_date <= _fe.date() <= end_date:
                                 all_kmserv.append({"Fecha": _fe.normalize(),
                                                    "KmsxTrenes": parse_latam_number(df_raw.iloc[_ri, 9]),
-                                                   "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22])})
+                                                   "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22]),
+                                                   "KmTrenP": parse_latam_number(df_raw.iloc[_ri, 23])})
             except Exception as e: _errores_proc[f.name]=f"UMR: {e}"
             
     if f_seat_all:
@@ -1405,7 +1406,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
@@ -3130,3 +3131,56 @@ if _seccion == _SECCIONES[12]:
             st.dataframe(pd.crosstab(_det_sv['Tipo de servicio'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
             st.markdown("**Composición × Tipo de tren**")
             st.dataframe(pd.crosstab(_det_sv['Tipo de tren'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
+
+# --- Pestaña: Ahorro de energía (UMR vs meta) ---
+if _seccion == _SECCIONES[13]:
+    st.header("💡 Ahorro de energía (UMR vs meta)")
+    if df_ops is None or df_ops.empty or float(df_ops['Odómetro [km]'].sum()) <= 0:
+        st.info("No hay datos de odómetro/energía cargados en el período para calcular el ahorro.")
+    else:
+        _meta = st.number_input("Meta UMR", min_value=0.500, max_value=1.000, value=0.964, step=0.001, format="%.3f",
+                                help="UMR = Tren-Km ÷ Odómetro. La meta por defecto es 0,964 (96,4%).")
+        _b = df_ops.copy()
+        _b['_f'] = pd.to_datetime(_b['Fecha']).dt.date
+        _b['Meta km'] = _b['Odómetro [km]'] * _meta
+        _b['Δkm R'] = _b['Tren-Km [km]'] - _b['Meta km']
+        _b['Ahorro R (kWh)'] = _b['Δkm R'] * _b['IDE (kWh/km)']
+        if all_kmserv:
+            _dkp = pd.DataFrame(all_kmserv)
+            _dkp['KmTrenP'] = pd.to_numeric(_dkp.get('KmTrenP'), errors='coerce')
+            _aggp = _dkp.groupby(pd.to_datetime(_dkp['Fecha']).dt.date, as_index=False).agg(_p=('KmTrenP', 'sum'))
+            _aggp.columns = ['_f', 'Tren-Km P']
+            _b = _b.merge(_aggp, on='_f', how='left')
+        else:
+            _b['Tren-Km P'] = np.nan
+        _b['Δkm P'] = _b['Tren-Km P'] - _b['Meta km']
+        _b['Ahorro P (kWh)'] = _b['Δkm P'] * _b['IDE (kWh/km)']
+        _aR = float(_b['Ahorro R (kWh)'].sum()); _kR = float(_b['Δkm R'].sum())
+        _has_p = bool(_b['Ahorro P (kWh)'].notna().any())
+        _odo_tot = float(_b['Odómetro [km]'].sum())
+        _ide_g = (float(_b['E_Tr'].sum()) / _odo_tot) if _odo_tot > 0 else 0.0
+        _m1, _m2, _m3 = st.columns(3)
+        _m1.metric("Ahorro real (Tren-Km R)", f"{_ncl(_aR, 0)} kWh", f"{_ncl(_kR, 0)} km vs meta")
+        if _has_p:
+            _aP = float(_b['Ahorro P (kWh)'].sum()); _kP = float(_b['Δkm P'].sum())
+            _m2.metric("Ahorro programado (Tren-Km P)", f"{_ncl(_aP, 0)} kWh", f"{_ncl(_kP, 0)} km vs meta")
+        else:
+            _m2.metric("Ahorro programado (Tren-Km P)", "—",
+                       help="Carga el Excel UMR (hoja KM-Servicio) para tener el Tren-Km programado.")
+        _m3.metric("IDE global del período", f"{_ncl(_ide_g, 2)} kWh/km")
+        _vv = ['Ahorro R (kWh)'] + (['Ahorro P (kWh)'] if _has_p else [])
+        _mv = _b.melt(id_vars='Fecha', value_vars=_vv, var_name='Tipo', value_name='kWh').dropna(subset=['kWh'])
+        _fig_ah = px.bar(_mv, x='Fecha', y='kWh', color='Tipo', barmode='group',
+                         color_discrete_map={'Ahorro R (kWh)': '#005195', 'Ahorro P (kWh)': '#0a7c6e'},
+                         title="Ahorro de energía por día (kWh)")
+        _fig_ah.update_layout(margin=dict(t=46, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
+        st.plotly_chart(_no_huecos(_fig_ah), use_container_width=True, config={'locale': 'es'})
+        st.caption(f"Ahorro = (Tren-Km − Odómetro × {_ncl(_meta, 3)}) × IDE del día. Positivo = ahorro (UMR sobre la meta); negativo = sobreconsumo (UMR bajo la meta). IDE = E_Tr ÷ Odómetro de cada día.")
+        with st.expander("Ver tabla diaria — mostrar / ocultar", expanded=False):
+            _cols_t = ['_f', 'Tren-Km [km]', 'Tren-Km P', 'Odómetro [km]', 'Meta km', 'IDE (kWh/km)', 'Δkm R', 'Ahorro R (kWh)', 'Δkm P', 'Ahorro P (kWh)']
+            _tab = _b[_cols_t].copy()
+            _tab.columns = ['Fecha', 'Tren-Km R', 'Tren-Km P', 'Odómetro', 'Meta km', 'IDE', 'Δkm R', 'Ahorro R (kWh)', 'Δkm P', 'Ahorro P (kWh)']
+            for _c in ['Tren-Km R', 'Tren-Km P', 'Odómetro', 'Meta km', 'Δkm R', 'Ahorro R (kWh)', 'Δkm P', 'Ahorro P (kWh)']:
+                _tab[_c] = _tab[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '—')
+            _tab['IDE'] = _tab['IDE'].map(lambda _v: _ncl(_v, 3) if pd.notna(_v) else '—')
+            st.dataframe(_tab, use_container_width=True, hide_index=True)
