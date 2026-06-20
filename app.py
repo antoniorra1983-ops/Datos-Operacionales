@@ -1405,7 +1405,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
@@ -2991,3 +2991,45 @@ if _seccion == _SECCIONES[11]:
             st.dataframe(make_columns_unique(tabla), use_container_width=True)
     else:
         st.info("📂 Sube archivos desde el panel lateral para generar el diagnóstico.")
+
+
+if _seccion == _SECCIONES[12]:
+    _det_sv = detalle_servicios(df_thdr_v1, df_thdr_v2, None)
+    if _det_sv is None or _det_sv.empty:
+        st.info("No hay datos de servicios (THDR) en el rango seleccionado. Sube archivos THDR desde el panel lateral.")
+    else:
+        st.markdown("### 📈 Distribución de servicios")
+        _tot_sv = len(_det_sv)
+        _n_simp = int((_det_sv['Composicion'] == 'Simple').sum())
+        _n_dob = int((_det_sv['Composicion'] == 'Doble').sum())
+        _ma, _mb, _mc = st.columns(3)
+        _ma.metric("Total de servicios", _ncl(_tot_sv, 0))
+        _mb.metric("Simples", _ncl(_n_simp, 0), f"{_ncl(_n_simp / _tot_sv * 100 if _tot_sv else 0, 1)} %")
+        _mc.metric("Dobles", _ncl(_n_dob, 0), f"{_ncl(_n_dob / _tot_sv * 100 if _tot_sv else 0, 1)} %")
+        def _pie_sv(_col, _titulo, _cmap=None):
+            _vc = _det_sv[_col].value_counts().reset_index()
+            _vc.columns = [_col, 'Cantidad']
+            if _cmap:
+                _f = px.pie(_vc, names=_col, values='Cantidad', hole=0.5, title=_titulo, color=_col, color_discrete_map=_cmap)
+            else:
+                _f = px.pie(_vc, names=_col, values='Cantidad', hole=0.5, title=_titulo)
+            _f.update_traces(textinfo='percent+label', sort=False,
+                             hovertemplate='%{label}: %{value} servicios (%{percent})<extra></extra>')
+            _f.update_layout(height=340, margin=dict(t=46, b=0, l=0, r=0), showlegend=False)
+            return _f
+        _pc1, _pc2 = st.columns(2)
+        with _pc1:
+            st.plotly_chart(_pie_sv('Composicion', 'Cantidad de trenes (simple / doble)',
+                                    {'Simple': '#005195', 'Doble': '#E85500'}), use_container_width=True, config={'locale': 'es'})
+        with _pc2:
+            st.plotly_chart(_pie_sv('Tipo de tren', 'Tipos de tren (XT-100 / XT-M / SFE)',
+                                    {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}), use_container_width=True, config={'locale': 'es'})
+        st.plotly_chart(_pie_sv('Tipo de servicio', 'Tipo de servicio (recorrido)'), use_container_width=True, config={'locale': 'es'})
+        st.caption("Distribución de los servicios THDR del período seleccionado. Los porcentajes son sobre el total de servicios.")
+        with st.expander("Ver tablas con cantidades y % — mostrar / ocultar", expanded=False):
+            for _cc, _tt in [('Composicion', 'Composición'), ('Tipo de tren', 'Tipo de tren'), ('Tipo de servicio', 'Tipo de servicio')]:
+                _vc = _det_sv[_cc].value_counts().reset_index()
+                _vc.columns = [_tt, 'Cantidad']
+                _vc['%'] = (_vc['Cantidad'] / _tot_sv * 100).round(1).map(lambda _v: f"{_ncl(_v, 1)} %")
+                st.markdown(f"**{_tt}**")
+                st.dataframe(_vc, use_container_width=True, hide_index=True)
