@@ -3006,25 +3006,57 @@ if _seccion == _SECCIONES[12]:
         _ma.metric("Total de servicios", _ncl(_tot_sv, 0))
         _mb.metric("Simples", _ncl(_n_simp, 0), f"{_ncl(_n_simp / _tot_sv * 100 if _tot_sv else 0, 1)} %")
         _mc.metric("Dobles", _ncl(_n_dob, 0), f"{_ncl(_n_dob / _tot_sv * 100 if _tot_sv else 0, 1)} %")
-        def _pie_sv(_col, _titulo, _cmap=None):
+        _viz_opts = ["🍩 Torta", "📊 Barra", "🪪 Tarjetas"]
+        try:
+            if hasattr(st, "segmented_control"):
+                _viz = st.segmented_control("Ver como", _viz_opts, default=_viz_opts[0], key="_sv_viz")
+            elif hasattr(st, "pills"):
+                _viz = st.pills("Ver como", _viz_opts, default=_viz_opts[0], key="_sv_viz")
+            else:
+                _viz = st.radio("Ver como", _viz_opts, horizontal=True, key="_sv_viz")
+        except Exception:
+            _viz = st.radio("Ver como", _viz_opts, horizontal=True, key="_sv_viz2")
+        if not _viz:
+            _viz = _viz_opts[0]
+        def _render_dist(_col, _titulo, _cmap=None):
             _vc = _det_sv[_col].value_counts().reset_index()
             _vc.columns = [_col, 'Cantidad']
-            if _cmap:
-                _f = px.pie(_vc, names=_col, values='Cantidad', hole=0.5, title=_titulo, color=_col, color_discrete_map=_cmap)
+            _vc['pct'] = (_vc['Cantidad'] / _tot_sv * 100).round(1)
+            st.markdown(f"#### {_titulo}")
+            if "Torta" in _viz:
+                if _cmap:
+                    _f = px.pie(_vc, names=_col, values='Cantidad', hole=0.5, color=_col, color_discrete_map=_cmap)
+                else:
+                    _f = px.pie(_vc, names=_col, values='Cantidad', hole=0.5)
+                _f.update_traces(textinfo='percent+label', sort=False,
+                                 hovertemplate='%{label}: %{value} servicios (%{percent})<extra></extra>')
+                _f.update_layout(height=330, margin=dict(t=10, b=0, l=0, r=0), showlegend=False)
+                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+            elif "Barra" in _viz:
+                if _cmap:
+                    _f = px.bar(_vc, x='Cantidad', y=_col, orientation='h', text='Cantidad', color=_col, color_discrete_map=_cmap)
+                else:
+                    _f = px.bar(_vc, x='Cantidad', y=_col, orientation='h', text='Cantidad', color_discrete_sequence=['#005195'])
+                _f.update_traces(textposition='outside', cliponaxis=False, customdata=_vc[['pct']],
+                                 hovertemplate='%{y}: %{x} servicios (%{customdata[0]}%)<extra></extra>')
+                _f.update_layout(height=max(220, 48 * len(_vc)), margin=dict(t=10, b=0, l=0, r=0),
+                                 yaxis=dict(autorange='reversed', title=''), xaxis_title='Servicios', showlegend=False)
+                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
             else:
-                _f = px.pie(_vc, names=_col, values='Cantidad', hole=0.5, title=_titulo)
-            _f.update_traces(textinfo='percent+label', sort=False,
-                             hovertemplate='%{label}: %{value} servicios (%{percent})<extra></extra>')
-            _f.update_layout(height=340, margin=dict(t=46, b=0, l=0, r=0), showlegend=False)
-            return _f
-        _pc1, _pc2 = st.columns(2)
-        with _pc1:
-            st.plotly_chart(_pie_sv('Composicion', 'Cantidad de trenes (simple / doble)',
-                                    {'Simple': '#005195', 'Doble': '#E85500'}), use_container_width=True, config={'locale': 'es'})
-        with _pc2:
-            st.plotly_chart(_pie_sv('Tipo de tren', 'Tipos de tren (XT-100 / XT-M / SFE)',
-                                    {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}), use_container_width=True, config={'locale': 'es'})
-        st.plotly_chart(_pie_sv('Tipo de servicio', 'Tipo de servicio (recorrido)'), use_container_width=True, config={'locale': 'es'})
+                _pal = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Simple': '#005195', 'Doble': '#E85500'}
+                _cl = st.columns(min(len(_vc), 4))
+                for _i, (_, _r) in enumerate(_vc.iterrows()):
+                    _clr = (_cmap or {}).get(str(_r[_col])) or _pal.get(str(_r[_col]), '#005195')
+                    _cl[_i % len(_cl)].markdown(
+                        f'<div style="border:1px solid #e5e7eb;border-radius:12px;padding:12px 14px;background:#fff;margin-bottom:8px">'
+                        f'<div style="font-size:.78rem;color:#6b7280;font-weight:600">{_r[_col]}</div>'
+                        f'<div style="font-size:1.6rem;font-weight:800;color:{_clr}">{_ncl(_r["Cantidad"], 0)}</div>'
+                        f'<div style="font-size:.85rem;color:#374151">{_ncl(_r["pct"], 1)} % del total</div></div>',
+                        unsafe_allow_html=True)
+        _CM_TREN = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}
+        _render_dist('Composicion', 'Cantidad de trenes (simple / doble)', {'Simple': '#005195', 'Doble': '#E85500'})
+        _render_dist('Tipo de tren', 'Tipos de tren (XT-100 / XT-M / SFE)', _CM_TREN)
+        _render_dist('Tipo de servicio', 'Tipo de servicio (recorrido)')
         st.caption("Distribución de los servicios THDR del período seleccionado. Los porcentajes son sobre el total de servicios.")
         st.markdown("#### Composición según tipo de servicio y tipo de tren")
         def _cruce_sv(_dim, _titulo, _cmap=None):
