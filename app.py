@@ -1406,7 +1406,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
@@ -3225,3 +3225,60 @@ if _seccion == _SECCIONES[13]:
                 _tab[_c] = _tab[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '—')
             _tab['IDE'] = _tab['IDE'].map(lambda _v: _ncl(_v, 3) if pd.notna(_v) else '—')
             st.dataframe(_tab, use_container_width=True, hide_index=True)
+
+# --- Pestaña: Fuentes de energía (Factura vs PRMTE vs SEAT) ---
+if _seccion == _SECCIONES[14]:
+    st.header("⚖️ Comparación de fuentes de energía: Factura · PRMTE · SEAT")
+    _fcols = [c for c in ['E_Fact', 'E_Prmte', 'E_Seat_T'] if c in df_ops.columns] if (df_ops is not None and not df_ops.empty) else []
+    _renf = {'E_Fact': 'Factura', 'E_Prmte': 'PRMTE', 'E_Seat_T': 'SEAT'}
+    if not _fcols:
+        st.info("No hay datos de energía cargados. Sube los archivos de Facturación/PRMTE y de SEAT.")
+    else:
+        _cmp = df_ops[['Fecha'] + _fcols].rename(columns=_renf)
+        _srcs = [_renf[c] for c in _fcols]
+        _cmp = _cmp[_cmp[_srcs].sum(axis=1) > 0]
+        if _cmp.empty:
+            st.info("No hay datos de fuentes (Factura/PRMTE/SEAT) en el período seleccionado.")
+        else:
+            _cmap_f = {'Factura': '#7c3aed', 'PRMTE': '#0891b2', 'SEAT': '#ca8a04'}
+            st.caption("Las tres fuentes miden la misma energía por métodos distintos: factura eléctrica, medidor PRMTE (cada 15 min) y reporte SEAT. Lo ideal es que coincidan; las diferencias revelan discrepancias de medición o de cobertura de días.")
+            _kc = st.columns(len(_srcs))
+            for _i, _s in enumerate(_srcs):
+                _tot = float(_cmp[_s].sum()); _dias = int((_cmp[_s] > 0).sum())
+                _prom = (_tot / _dias) if _dias > 0 else 0.0
+                _kc[_i].metric(_s, f"{_ncl(_tot, 0)} kWh", f"{_dias} días · prom {_ncl(_prom, 0)} kWh/día", delta_color="off")
+            _g1, _g2 = st.columns([1, 2])
+            with _g1:
+                _tot_df = pd.DataFrame({'Fuente': _srcs, 'kWh': [float(_cmp[_s].sum()) for _s in _srcs]})
+                _fb = px.bar(_tot_df, x='Fuente', y='kWh', color='Fuente', text='kWh', color_discrete_map=_cmap_f)
+                _fb.update_traces(texttemplate='%{text:,.0f}', textposition='outside', cliponaxis=False)
+                _fb.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', showlegend=False, title="Total por fuente")
+                st.plotly_chart(_fb, use_container_width=True, config={'locale': 'es'})
+            with _g2:
+                _mvf = _cmp.melt(id_vars='Fecha', value_vars=_srcs, var_name='Fuente', value_name='kWh')
+                _mvf = _mvf[_mvf['kWh'] > 0]
+                _ff = px.line(_mvf, x='Fecha', y='kWh', color='Fuente', markers=True, color_discrete_map=_cmap_f)
+                _ff.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='', title="Evolución diaria por fuente")
+                st.plotly_chart(_no_huecos(_ff), use_container_width=True, config={'locale': 'es'})
+            _multi = _cmp[(_cmp[_srcs] > 0).sum(axis=1) >= 2].copy()
+            if not _multi.empty and len(_srcs) >= 2:
+                _ref = _srcs[0]
+                _difcols = []
+                for _s in _srcs[1:]:
+                    _cd = f"Δ {_s} − {_ref}"
+                    _multi[_cd] = np.where((_multi[_s] > 0) & (_multi[_ref] > 0), _multi[_s] - _multi[_ref], np.nan)
+                    _difcols.append(_cd)
+                _mvd = _multi.melt(id_vars='Fecha', value_vars=_difcols, var_name='Comparación', value_name='kWh').dropna(subset=['kWh'])
+                if not _mvd.empty:
+                    _fd = px.bar(_mvd, x='Fecha', y='kWh', color='Comparación', barmode='group')
+                    _fd.update_layout(height=320, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia respecto a {_ref} (días con 2+ fuentes)")
+                    st.plotly_chart(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
+                    st.caption(f"Diferencia = fuente − {_ref}. Cerca de 0 = coinciden; positivo = la fuente mide más que {_ref}.")
+            else:
+                st.caption("No hay días con 2 o más fuentes simultáneas para calcular diferencias.")
+            with st.expander("Ver tabla comparativa por día — mostrar / ocultar", expanded=False):
+                _tc = _cmp.copy()
+                _tc['Fecha'] = _tc['Fecha'].dt.strftime('%d-%m-%Y')
+                for _s in _srcs:
+                    _tc[_s] = _tc[_s].map(lambda _v: _ncl(_v, 0) if _v > 0 else '—')
+                st.dataframe(_tc, use_container_width=True, hide_index=True)
