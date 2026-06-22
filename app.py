@@ -2787,7 +2787,10 @@ if _seccion == _SECCIONES[9]:
             dv_c2['Fecha'] = dv_c2['Fecha'].dt.strftime('%Y-%m-%d')
             st.dataframe(make_columns_unique(dv_c2.head(100)), use_container_width=True)
             
-    elif df_viajes.empty: st.info("No se han procesado datos de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
+    elif df_viajes.empty:
+        st.info("No se han procesado datos de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
+    else:
+        st.info("Arriba está el total de **Viajes por Contrato**. Para ver también la **carga a bordo por estación** (Vía 1 / Vía 2), cargá los archivos **Carga Pasajeros V1 / V2** (uploaders 6 y 7).")
 
 if _seccion == _SECCIONES[10]:
     st.markdown("### 📝 Análisis Ejecutivo Automático")
