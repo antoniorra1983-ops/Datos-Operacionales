@@ -3263,17 +3263,28 @@ if _seccion == _SECCIONES[14]:
             _multi = _cmp[(_cmp[_srcs] > 0).sum(axis=1) >= 2].copy()
             if not _multi.empty and len(_srcs) >= 2:
                 _ref = _srcs[0]
-                _difcols = []
+                _difcols = []; _pctcols = []
                 for _s in _srcs[1:]:
                     _cd = f"Δ {_s} − {_ref}"
-                    _multi[_cd] = np.where((_multi[_s] > 0) & (_multi[_ref] > 0), _multi[_s] - _multi[_ref], np.nan)
-                    _difcols.append(_cd)
+                    _cp = f"% {_s} vs {_ref}"
+                    _ok = (_multi[_s] > 0) & (_multi[_ref] > 0)
+                    _multi[_cd] = np.where(_ok, _multi[_s] - _multi[_ref], np.nan)
+                    _multi[_cp] = np.where(_ok, (_multi[_s] - _multi[_ref]) / _multi[_ref] * 100, np.nan)
+                    _difcols.append(_cd); _pctcols.append(_cp)
                 _mvd = _multi.melt(id_vars='Fecha', value_vars=_difcols, var_name='Comparación', value_name='kWh').dropna(subset=['kWh'])
+                _mvp = _multi.melt(id_vars='Fecha', value_vars=_pctcols, var_name='Comparación', value_name='%').dropna(subset=['%'])
                 if not _mvd.empty:
-                    _fd = px.bar(_mvd, x='Fecha', y='kWh', color='Comparación', barmode='group')
-                    _fd.update_layout(height=320, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia respecto a {_ref} (días con 2+ fuentes)")
-                    st.plotly_chart(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
-                    st.caption(f"Diferencia = fuente − {_ref}. Cerca de 0 = coinciden; positivo = la fuente mide más que {_ref}.")
+                    _dd1, _dd2 = st.columns(2)
+                    with _dd1:
+                        _fd = px.bar(_mvd, x='Fecha', y='kWh', color='Comparación', barmode='group')
+                        _fd.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (kWh)")
+                        st.plotly_chart(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
+                    with _dd2:
+                        _fp = px.bar(_mvp, x='Fecha', y='%', color='Comparación', barmode='group')
+                        _fp.update_traces(hovertemplate='%{x}: %{y:.2f}%<extra></extra>')
+                        _fp.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='% (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (%)")
+                        st.plotly_chart(_no_huecos(_fp), use_container_width=True, config={'locale': 'es'})
+                    st.caption(f"Diferencia = fuente − {_ref}, en kWh y en % sobre {_ref}. Cerca de 0 = coinciden; positivo = la fuente mide más que {_ref}.")
             else:
                 st.caption("No hay días con 2 o más fuentes simultáneas para calcular diferencias.")
             with st.expander("Ver tabla comparativa por día — mostrar / ocultar", expanded=False):
