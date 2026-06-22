@@ -3221,7 +3221,7 @@ if _seccion == _SECCIONES[12]:
 
 # --- Pestaña: Ahorro de energía (UMR vs meta) ---
 if _seccion == _SECCIONES[13]:
-    st.header("💡 Ahorro de energía (UMR vs meta)")
+    st.header("💡 Ahorro de energía")
     if df_ops is None or df_ops.empty or float(df_ops['Odómetro [km]'].sum()) <= 0:
         st.info("No hay datos de odómetro/energía cargados en el período para calcular el ahorro.")
     else:
@@ -3230,52 +3230,85 @@ if _seccion == _SECCIONES[13]:
         _b = df_ops.copy()
         _b['_f'] = pd.to_datetime(_b['Fecha']).dt.date
         _b['Meta km'] = _b['Odómetro [km]'] * _meta
-        # 1) UMR — usa el Tren-Km del dashboard (df_ops, archivo de operación)
-        _b['Δ UMR'] = _b['Tren-Km [km]'] - _b['Meta km']
-        _b['Ahorro UMR'] = _b['Δ UMR'] * _b['IDE (kWh/km)']
-        # Tren-Km R (real) y Kms.xTrenes (teórico) — de la hoja KM-Servicio del Excel
+        _ide = _b['IDE (kWh/km)']
         if all_kmserv:
             _dkp = pd.DataFrame(all_kmserv)
             for _c in ['KmTrenR', 'KmsxTrenes']:
                 _dkp[_c] = pd.to_numeric(_dkp.get(_c), errors='coerce')
             _aggp = _dkp.groupby(pd.to_datetime(_dkp['Fecha']).dt.date, as_index=False).agg(_r=('KmTrenR', 'sum'), _t=('KmsxTrenes', 'sum'))
-            _aggp.columns = ['_f', 'Tren-Km R', 'Kms.xTrenes']
+            _aggp.columns = ['_f', 'KmTrenR', 'KmsxTrenes']
             _b = _b.merge(_aggp, on='_f', how='left')
         else:
-            _b['Tren-Km R'] = np.nan; _b['Kms.xTrenes'] = np.nan
-        # 2) Tren-Km R (real)
-        _b['Δ R'] = _b['Tren-Km R'] - _b['Meta km']
-        _b['Ahorro Tren-Km R'] = _b['Δ R'] * _b['IDE (kWh/km)']
-        # 3) Kms.xTrenes (teórico)
-        _b['Δ T'] = _b['Kms.xTrenes'] - _b['Meta km']
-        _b['Ahorro Kms.xTrenes'] = _b['Δ T'] * _b['IDE (kWh/km)']
-        _has = bool(_b['Tren-Km R'].notna().any())
-        _m1, _m2, _m3 = st.columns(3)
-        _uR = float(_b['Ahorro UMR'].sum()); _ukm = float(_b['Δ UMR'].sum())
-        _m1.metric("Ahorro UMR (dashboard)", f"{_ncl(_uR, 0)} kWh", f"{_ncl(_ukm, 0)} km vs meta")
+            _b['KmTrenR'] = np.nan; _b['KmsxTrenes'] = np.nan
+        _has = bool(_b['KmTrenR'].notna().any())
+
+        # ===== 1) Gestión de Flota por Corte y Acople =====
+        st.markdown("#### 🚆 Gestión de Flota por Corte y Acople")
         if _has:
-            _rR = float(_b['Ahorro Tren-Km R'].sum()); _rkm = float(_b['Δ R'].sum())
-            _m2.metric("Ahorro Tren-Km R (real)", f"{_ncl(_rR, 0)} kWh", f"{_ncl(_rkm, 0)} km vs meta")
-            _tR = float(_b['Ahorro Kms.xTrenes'].sum()); _tkm = float(_b['Δ T'].sum())
-            _m3.metric("Ahorro Kms.xTrenes (teórico)", f"{_ncl(_tR, 0)} kWh", f"{_ncl(_tkm, 0)} km vs meta")
+            _b['Δ CA'] = _b['KmsxTrenes'] - _b['KmTrenR']
+            _b['Ahorro CA'] = _b['Δ CA'] * _ide
+            _caR = float(_b['Ahorro CA'].sum()); _cakm = float(_b['Δ CA'].sum())
+            _c1, _c2 = st.columns(2)
+            _c1.metric("Ahorro por Corte y Acople", f"{_ncl(_caR, 0)} kWh", f"{_ncl(_cakm, 0)} km")
+            _c2.metric("Km (Kms.xTrenes − KmTren R)", f"{_ncl(_cakm, 0)} km")
+            _fca = px.bar(_b, x='Fecha', y='Ahorro CA', color_discrete_sequence=['#0a7c6e'])
+            _fca.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
+            _fca.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='')
+            st.plotly_chart(_no_huecos(_fca), use_container_width=True, config={'locale': 'es'})
+            st.caption("Ahorro = (Kms.xTrenes teórico − KmTren R real) × IDE del día. Energía ahorrada al cortar/acoplar composiciones según la demanda: el real recorre menos km-tren que el teórico de composición completa.")
         else:
-            _m2.metric("Ahorro Tren-Km R (real)", "—", help="Carga el Excel UMR (hoja KM-Servicio).")
-            _m3.metric("Ahorro Kms.xTrenes (teórico)", "—", help="Carga el Excel UMR (hoja KM-Servicio).")
-        _vv = ['Ahorro UMR'] + (['Ahorro Tren-Km R', 'Ahorro Kms.xTrenes'] if _has else [])
-        _mv = _b.melt(id_vars='Fecha', value_vars=_vv, var_name='Ahorro', value_name='kWh').dropna(subset=['kWh'])
-        _cmap_ah = {'Ahorro UMR': '#005195', 'Ahorro Tren-Km R': '#E85500', 'Ahorro Kms.xTrenes': '#0a7c6e'}
-        _fig_ah = px.bar(_mv, x='Fecha', y='kWh', color='Ahorro', barmode='group',
-                         color_discrete_map=_cmap_ah, title="Ahorro de energía por día (kWh) — UMR · Tren-Km R · Kms.xTrenes")
-        _fig_ah.update_layout(margin=dict(t=46, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
-        st.plotly_chart(_no_huecos(_fig_ah), use_container_width=True, config={'locale': 'es'})
-        st.caption(f"Cada ahorro = (Tren-Km − Odómetro × {_ncl(_meta, 3)}) × IDE del día. Positivo = ahorro (sobre la meta); negativo = sobreconsumo. IDE = E_Tr ÷ Odómetro de cada día. El UMR usa el Tren-Km del dashboard; Tren-Km R (real) y Kms.xTrenes (teórico) vienen de la hoja KM-Servicio del Excel.")
+            st.info("Carga el Excel UMR (hoja KM-Servicio) para calcular Corte y Acople.")
+        st.divider()
+
+        # ===== 2) Ahorro Energía Tracción Vacío =====
+        st.markdown("#### 🪫 Ahorro Energía Tracción Vacío")
+        if _has:
+            _b['Vacío real km'] = _b['Odómetro [km]'] - _b['KmTrenR']
+            _b['Odo meta'] = _b['KmTrenR'] / _meta
+            _b['Vacío meta km'] = _b['Odo meta'] - _b['KmTrenR']
+            _b['E Vacío real'] = _b['Vacío real km'] * _ide
+            _b['E Vacío meta'] = _b['Vacío meta km'] * _ide
+            _b['Ahorro Vacío'] = (_b['Vacío meta km'] - _b['Vacío real km']) * _ide
+            _vr = float(_b['E Vacío real'].sum()); _vm = float(_b['E Vacío meta'].sum()); _av = float(_b['Ahorro Vacío'].sum())
+            _v1, _v2, _v3 = st.columns(3)
+            _v1.metric("Energía vacío real", f"{_ncl(_vr, 0)} kWh", f"{_ncl(float(_b['Vacío real km'].sum()), 0)} km vacío")
+            _v2.metric("Energía vacío meta", f"{_ncl(_vm, 0)} kWh", f"{_ncl(float(_b['Vacío meta km'].sum()), 0)} km permitido")
+            _v3.metric("Ahorro vacío (meta − real)", f"{_ncl(_av, 0)} kWh")
+            _mvv = _b.melt(id_vars='Fecha', value_vars=['E Vacío real', 'E Vacío meta'], var_name='Tipo', value_name='kWh').dropna(subset=['kWh'])
+            _mvv['Tipo'] = _mvv['Tipo'].map({'E Vacío real': 'Vacío real', 'E Vacío meta': 'Vacío meta'})
+            _fv = px.bar(_mvv, x='Fecha', y='kWh', color='Tipo', barmode='group',
+                         color_discrete_map={'Vacío real': '#E85500', 'Vacío meta': '#9aa0a6'})
+            _fv.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
+            st.plotly_chart(_no_huecos(_fv), use_container_width=True, config={'locale': 'es'})
+            st.caption(f"Km vacío = Odómetro − KmTren R (recorrido sin servicio). Vacío meta = (KmTren R ÷ {_ncl(_meta, 3)}) − KmTren R (vacío permitido por la meta UMR). Cada uno × IDE del día. Ahorro = (vacío meta − vacío real) × IDE: positivo si circulaste menos en vacío que lo permitido.")
+        else:
+            st.info("Carga el Excel UMR (hoja KM-Servicio) para calcular Tracción Vacío.")
+        st.divider()
+
+        # ===== 3) Ahorro UMR (referencia) =====
+        _b['Δ UMR'] = _b['Tren-Km [km]'] - _b['Meta km']
+        _b['Ahorro UMR'] = _b['Δ UMR'] * _ide
+        st.markdown("#### 📊 Ahorro UMR (vs meta)")
+        _u1, _u2 = st.columns(2)
+        _uR = float(_b['Ahorro UMR'].sum()); _ukm = float(_b['Δ UMR'].sum())
+        _u1.metric("Ahorro UMR", f"{_ncl(_uR, 0)} kWh", f"{_ncl(_ukm, 0)} km vs meta")
+        _u2.metric("Meta UMR", f"{_ncl(_meta * 100, 1)} %")
+        _fu = px.bar(_b, x='Fecha', y='Ahorro UMR', color_discrete_sequence=['#005195'])
+        _fu.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
+        _fu.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='')
+        st.plotly_chart(_no_huecos(_fu), use_container_width=True, config={'locale': 'es'})
+        st.caption(f"Ahorro UMR = (Tren-Km del dashboard − Odómetro × {_ncl(_meta, 3)}) × IDE del día.")
+
         with st.expander("Ver tabla diaria — mostrar / ocultar", expanded=False):
-            _cols_t = ['_f', 'Odómetro [km]', 'Meta km', 'IDE (kWh/km)', 'Tren-Km [km]', 'Ahorro UMR', 'Tren-Km R', 'Ahorro Tren-Km R', 'Kms.xTrenes', 'Ahorro Kms.xTrenes']
+            _cols_t = ['_f', 'Odómetro [km]', 'IDE (kWh/km)', 'KmTrenR', 'KmsxTrenes', 'Ahorro CA', 'Vacío real km', 'Vacío meta km', 'Ahorro Vacío', 'Ahorro UMR']
+            _cols_t = [c for c in _cols_t if c in _b.columns]
             _tab = _b[_cols_t].copy()
-            _tab.columns = ['Fecha', 'Odómetro', 'Meta km', 'IDE', 'Tren-Km (UMR)', 'Ahorro UMR', 'Tren-Km R', 'Ahorro Tren-Km R', 'Kms.xTrenes', 'Ahorro Kms.xTrenes']
-            for _c in ['Odómetro', 'Meta km', 'Tren-Km (UMR)', 'Ahorro UMR', 'Tren-Km R', 'Ahorro Tren-Km R', 'Kms.xTrenes', 'Ahorro Kms.xTrenes']:
-                _tab[_c] = _tab[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '—')
-            _tab['IDE'] = _tab['IDE'].map(lambda _v: _ncl(_v, 3) if pd.notna(_v) else '—')
+            _tab = _tab.rename(columns={'_f': 'Fecha', 'Odómetro [km]': 'Odómetro', 'IDE (kWh/km)': 'IDE', 'KmTrenR': 'KmTren R', 'KmsxTrenes': 'Kms.xTrenes', 'Ahorro CA': 'Ahorro Corte/Acople', 'Vacío real km': 'Vacío real (km)', 'Vacío meta km': 'Vacío meta (km)'})
+            for _c in _tab.columns:
+                if _c == 'Fecha':
+                    continue
+                _dec = 3 if _c == 'IDE' else 2
+                _tab[_c] = _tab[_c].map(lambda _v, _d=_dec: _ncl(_v, _d) if pd.notna(_v) else '—')
             st.dataframe(_tab, use_container_width=True, hide_index=True)
 
 # --- Pestaña: Fuentes de energía (Factura vs PRMTE vs SEAT) ---
