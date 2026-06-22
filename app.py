@@ -1849,17 +1849,52 @@ if _seccion == _SECCIONES[2]:
 
 if _seccion == _SECCIONES[3]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
-        st.write("### Consumo de Energía por Tipo")
-        fig_e = go.Figure()
-        fig_e.add_trace(go.Bar(x=df_ops['Fecha'], y=df_ops['E_Tr'], name='Tracción', marker_color='#E85500'))
-        fig_e.add_trace(go.Bar(x=df_ops['Fecha'], y=df_ops['E_12'], name='12 kV', marker_color='#005195'))
-        fig_e.update_layout(barmode='stack', title="Consumo Energético: Tracción vs Servicios Auxiliares (12kV)", xaxis_title="Fecha", yaxis_title="Consumo (kWh)")
-        st.plotly_chart(_no_huecos(fig_e), use_container_width=True)
-        
-        st.write("### Desglose Detallado")
-        dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
-        dv_ener['Fecha'] = dv_ener['Fecha'].dt.strftime('%Y-%m-%d')
-        st.dataframe(make_columns_unique(dv_ener), use_container_width=True)
+        st.header("🔋 Comparación de energías: Total · Tracción · 12 kV")
+        _de = df_ops[df_ops['E_Total'] > 0].copy()
+        _et = float(_de['E_Total'].sum()); _etr = float(_de['E_Tr'].sum()); _e12 = float(_de['E_12'].sum())
+        _ptr = (_etr / _et * 100) if _et > 0 else 0.0
+        _p12 = (_e12 / _et * 100) if _et > 0 else 0.0
+        _k1, _k2, _k3 = st.columns(3)
+        _k1.metric("Energía Total", f"{_ncl(_et, 0)} kWh")
+        _k2.metric("Tracción", f"{_ncl(_etr, 0)} kWh", f"{_ncl(_ptr, 1)} % del total")
+        _k3.metric("12 kV (auxiliares)", f"{_ncl(_e12, 0)} kWh", f"{_ncl(_p12, 1)} % del total")
+        _cc1, _cc2 = st.columns([1, 2])
+        with _cc1:
+            _fcomp = px.pie(names=['Tracción', '12 kV'], values=[_etr, _e12], hole=0.55,
+                            color=['Tracción', '12 kV'], color_discrete_map={'Tracción': '#E85500', '12 kV': '#005195'})
+            _fcomp.update_traces(textinfo='percent+label', sort=False,
+                                 hovertemplate='%{label}: %{value:,.0f} kWh (%{percent})<extra></extra>')
+            _fcomp.update_layout(height=300, margin=dict(t=34, b=0, l=0, r=0), showlegend=False, title="Composición Tracción vs 12 kV")
+            st.plotly_chart(_fcomp, use_container_width=True, config={'locale': 'es'})
+        with _cc2:
+            _mv = _de.melt(id_vars='Fecha', value_vars=['E_Total', 'E_Tr', 'E_12'], var_name='Energía', value_name='kWh')
+            _mv['Energía'] = _mv['Energía'].map({'E_Total': 'Total', 'E_Tr': 'Tracción', 'E_12': '12 kV'})
+            _fevo = px.line(_mv, x='Fecha', y='kWh', color='Energía', markers=True,
+                            color_discrete_map={'Total': '#15803d', 'Tracción': '#E85500', '12 kV': '#005195'})
+            _fevo.update_layout(height=300, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='', title="Evolución diaria de las 3 energías")
+            st.plotly_chart(_no_huecos(_fevo), use_container_width=True, config={'locale': 'es'})
+        _b1, _b2 = st.columns(2)
+        with _b1:
+            fig_e = go.Figure()
+            fig_e.add_trace(go.Bar(x=_de['Fecha'], y=_de['E_Tr'], name='Tracción', marker_color='#E85500'))
+            fig_e.add_trace(go.Bar(x=_de['Fecha'], y=_de['E_12'], name='12 kV', marker_color='#005195'))
+            fig_e.update_layout(barmode='stack', height=330, margin=dict(t=40, b=0, l=0, r=0),
+                                title="Tracción + 12 kV apiladas (kWh)", yaxis_title="kWh", xaxis_title='', legend_title='')
+            st.plotly_chart(_no_huecos(fig_e), use_container_width=True)
+        with _b2:
+            _d2 = _de.copy()
+            _d2['% Tracción'] = _d2['E_Tr'] / _d2['E_Total'] * 100
+            _d2['% 12 kV'] = _d2['E_12'] / _d2['E_Total'] * 100
+            _fpct = px.bar(_d2, x='Fecha', y=['% Tracción', '% 12 kV'], barmode='stack',
+                           color_discrete_map={'% Tracción': '#E85500', '% 12 kV': '#005195'})
+            _fpct.update_layout(height=330, margin=dict(t=40, b=0, l=0, r=0), title="Proporción diaria (%)",
+                                yaxis_title="%", xaxis_title='', legend_title='')
+            st.plotly_chart(_no_huecos(_fpct), use_container_width=True, config={'locale': 'es'})
+        st.caption("Total = Tracción + 12 kV. Tracción = energía para mover los trenes; 12 kV = servicios auxiliares (iluminación, climatización, señalización, etc.).")
+        with st.expander("Ver desglose diario — mostrar / ocultar", expanded=False):
+            dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
+            dv_ener['Fecha'] = dv_ener['Fecha'].dt.strftime('%d-%m-%Y')
+            st.dataframe(make_columns_unique(dv_ener), use_container_width=True, hide_index=True)
     else: st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
 
 if _seccion == _SECCIONES[4]:
