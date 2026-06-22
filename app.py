@@ -812,8 +812,12 @@ def _km_por_tren(all_tr):
     _d = _d.dropna(subset=['Fecha', 'Valor'])
     if _d.empty:
         return _vacio
-    _km = _d[_d['Valor'] < 50000]
-    _odo = _d[_d['Valor'] >= 50000]
+    if 'Clase' in _d.columns and _d['Clase'].notna().any():
+        _km = _d[_d['Clase'] == 'km']
+        _odo = _d[_d['Clase'] == 'odo']
+    else:
+        _km = _d[_d['Valor'] < 50000]
+        _odo = _d[_d['Valor'] >= 50000]
     if _km.empty:
         return _vacio
     _pivk = _km.pivot_table(index='Tren', columns='Fecha', values='Valor', aggfunc='mean').sort_index(axis=1)
@@ -1231,14 +1235,29 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                                                 "Odómetro [km]":parse_latam_number(r[c_o]),
                                                 "Tren-Km [km]":parse_latam_number(r[c_t]) if c_t else 0.0})
                     if any(k in sn.upper() for k in ['KIL','ODO']):
-                        for i in range(len(df_raw)-2):
-                            for j in range(1,len(df_raw.columns)):
-                                v_f=pd.to_datetime(df_raw.iloc[i,j],errors='coerce')
-                                if pd.notna(v_f) and start_date<=v_f.date()<=end_date:
-                                    for k in range(i+3,min(i+100,len(df_raw))):
-                                        t=str(df_raw.iloc[k,0]).strip().upper()
-                                        if re.match(r'^(M|XM|SFE)',t):
-                                            all_tr.append({"Tren":t,"Fecha":v_f.normalize(),"Valor":parse_latam_number(df_raw.iloc[k,j])})
+                        # Distinguir el bloque "Odómetro" (acumulado) del "Kilometraje Diario"
+                        # por el encabezado, NO por la magnitud: los SFE/trenes nuevos pueden
+                        # tener odómetro acumulado bajo y se confundirían con km diario.
+                        _clase = None; _fcols = {}
+                        for i in range(len(df_raw)):
+                            _txt = ' '.join(str(x).upper() for x in df_raw.iloc[i].tolist()[:4] if pd.notna(x))
+                            if 'DIARIO' in _txt:
+                                _clase = 'km'
+                            elif ('OD' in _txt and 'METR' in _txt) or 'ODOMETR' in _txt:
+                                _clase = 'odo'
+                            _ff = {}
+                            for j in range(1, len(df_raw.columns)):
+                                _vf = pd.to_datetime(df_raw.iloc[i, j], errors='coerce')
+                                if pd.notna(_vf) and 2020 <= _vf.year <= 2035:
+                                    _ff[j] = _vf
+                            if len(_ff) >= 3:
+                                _fcols = _ff
+                            _t = str(df_raw.iloc[i, 0]).strip().upper()
+                            if _clase and _fcols and re.match(r'^(M|XM|SFE)', _t):
+                                for j, _fe in _fcols.items():
+                                    if start_date <= _fe.date() <= end_date:
+                                        all_tr.append({"Tren": _t, "Fecha": _fe.normalize(),
+                                                       "Valor": parse_latam_number(df_raw.iloc[i, j]), "Clase": _clase})
                     if 'SERV' in sn.upper() and 'KM' in sn.upper():
                         _fe_kms = pd.to_datetime(df_raw.iloc[4:, 0], errors='coerce').ffill()
                         for _ri in range(4, len(df_raw)):
