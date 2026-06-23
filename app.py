@@ -535,6 +535,40 @@ def _click_set_filtro(_modo, _xval, _scope):
         return
     st.rerun()
 
+def _key_fig(_fig):
+    """Key estable derivado del contenido del gráfico (título, eje Y, trazas y sección).
+    Es estable entre reruns de la misma sesión, así Streamlit rastrea bien el on_select
+    en CUALQUIER pestaña (no depende del orden de ejecución como un contador)."""
+    _parts = []
+    try:
+        _ti = getattr(getattr(_fig.layout, 'title', None), 'text', None)
+        if _ti: _parts.append(str(_ti))
+    except Exception:
+        pass
+    try:
+        _yt = getattr(getattr(getattr(_fig.layout, 'yaxis', None), 'title', None), 'text', None)
+        if _yt: _parts.append(str(_yt))
+    except Exception:
+        pass
+    try:
+        _parts.append('~'.join(str(getattr(_tr, 'name', '') or '') for _tr in _fig.data))
+    except Exception:
+        pass
+    try:
+        _parts.append(str(_seccion) if '_seccion' in globals() else '')
+    except Exception:
+        pass
+    _base = '|'.join(p for p in _parts if p) or 'fig'
+    _key = f"_pcf_{abs(hash(_base)) % (10 ** 12)}"
+    _used = st.session_state.get('_pcf_used')
+    if not isinstance(_used, set):
+        _used = set(); st.session_state['_pcf_used'] = _used
+    _k = _key; _i = 1
+    while _k in _used:
+        _k = f"{_key}_{_i}"; _i += 1
+    _used.add(_k)
+    return _k
+
 def _pc(_fig, key=None, **kw):
     """Reemplazo de st.plotly_chart con click-to-filter automático.
     Si el gráfico es de barras con eje día/mes/año, al pulsar una barra filtra el dashboard
@@ -546,8 +580,7 @@ def _pc(_fig, key=None, **kw):
     if not _modo:
         return st.plotly_chart(_fig, **kw)
     _scope = 'thdr' if ('_SECCIONES' in globals() and '_seccion' in globals() and _seccion == _SECCIONES[7]) else 'global'
-    st.session_state['_pcf_ctr'] = st.session_state.get('_pcf_ctr', 0) + 1
-    _kk = key or f"_pcf_auto_{st.session_state['_pcf_ctr']}"
+    _kk = key or _key_fig(_fig)
     _ev = st.plotly_chart(_fig, on_select="rerun", key=_kk, **kw)
     try:
         _sel = _ev['selection'] if isinstance(_ev, dict) else getattr(_ev, 'selection', None)
@@ -1574,7 +1607,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
               "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
-st.session_state['_pcf_ctr'] = 0
+st.session_state['_pcf_used'] = set()
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
@@ -1599,7 +1632,12 @@ if not df_ops.empty and _seccion != _SECCIONES[7]:
         st.session_state['_f_sig'] = _sig
         for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
     with st.container(border=True):
-        st.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
+        _ct1, _ct2 = st.columns([5, 1])
+        _ct1.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
+        if _ct2.button("🔄 Limpiar", key="_btn_limpiar_f", use_container_width=True, help="Quitar todos los filtros (incluye los aplicados al pulsar barras)"):
+            for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
+            for _k in [k for k in list(st.session_state.keys()) if str(k).startswith('_clk_')]: st.session_state.pop(_k, None)
+            st.rerun()
         _cf1, _cfm, _cf2, _cf3, _cf4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
         with _cf1:
             _op_anio = ["Todos"] + [str(a) for a in _anios]
