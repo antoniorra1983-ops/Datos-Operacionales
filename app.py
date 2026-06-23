@@ -475,6 +475,94 @@ def _no_huecos(_fig, _fmt='%d-%m-%y'):
     except Exception:
         pass
     return _fig
+
+# ===== Click-to-filter: las barras con eje temporal (día/mes/año) filtran el dashboard al pulsarlas =====
+_MESNUM_CLK = {m: i + 1 for i, m in enumerate(["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"])}
+_MES_CAP_CLK = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+def _modo_x_temporal(_fig):
+    """Inspecciona las trazas de barra y devuelve 'dia' | 'mes' | 'anio' | None según el eje X."""
+    try:
+        for _tr in _fig.data:
+            if getattr(_tr, 'type', None) != 'bar':
+                continue
+            _xs = getattr(_tr, 'x', None)
+            if _xs is None:
+                continue
+            for _v in list(_xs):
+                if _v is None or (isinstance(_v, str) and _v.strip() == ''):
+                    continue
+                if isinstance(_v, str):
+                    _vl = _v.strip().lower()
+                    if _vl in _MESNUM_CLK:
+                        return 'mes'
+                    if re.fullmatch(r'(19|20)\d{2}', _vl):
+                        return 'anio'
+                    if re.search(r'\d{1,4}[-/]\d{1,2}', _vl) and pd.notna(pd.to_datetime(_v, dayfirst=True, errors='coerce')):
+                        return 'dia'
+                    return None
+                if isinstance(_v, (pd.Timestamp, datetime, date)):
+                    return 'dia'
+                if isinstance(_v, (int, float, np.integer, np.floating)) and 1990 <= float(_v) <= 2100:
+                    return 'anio'
+                return None
+    except Exception:
+        return None
+    return None
+
+def _click_set_filtro(_modo, _xval, _scope):
+    """Aplica el valor clickeado al filtro (global o THDR) y refresca."""
+    _kfec = '_t_fec' if _scope == 'thdr' else '_f_fecha'
+    _kmes = '_t_mes' if _scope == 'thdr' else '_f_mes'
+    _kanio = '_t_anio' if _scope == 'thdr' else '_f_anio'
+    try:
+        if _modo == 'dia':
+            _d = pd.to_datetime(_xval, dayfirst=True, errors='coerce')
+            if pd.isna(_d):
+                return
+            _dd = _d.date()
+            st.session_state[_kfec] = (_dd, _dd)
+        elif _modo == 'mes':
+            _vl = str(_xval).strip().lower()
+            if _vl not in _MESNUM_CLK:
+                return
+            st.session_state[_kmes] = _MES_CAP_CLK[_MESNUM_CLK[_vl] - 1]
+        elif _modo == 'anio':
+            st.session_state[_kanio] = str(int(float(_xval)))
+        else:
+            return
+    except Exception:
+        return
+    st.rerun()
+
+def _pc(_fig, key=None, **kw):
+    """Reemplazo de st.plotly_chart con click-to-filter automático.
+    Si el gráfico es de barras con eje día/mes/año, al pulsar una barra filtra el dashboard
+    por ese día/mes/año. Para cualquier otro gráfico se comporta como st.plotly_chart normal."""
+    kw.pop('on_select', None)
+    if 'use_container_width' not in kw:
+        kw['use_container_width'] = True
+    _modo = _modo_x_temporal(_fig)
+    if not _modo:
+        return st.plotly_chart(_fig, **kw)
+    _scope = 'thdr' if ('_SECCIONES' in globals() and '_seccion' in globals() and _seccion == _SECCIONES[7]) else 'global'
+    st.session_state['_pcf_ctr'] = st.session_state.get('_pcf_ctr', 0) + 1
+    _kk = key or f"_pcf_auto_{st.session_state['_pcf_ctr']}"
+    _ev = st.plotly_chart(_fig, on_select="rerun", key=_kk, **kw)
+    try:
+        _sel = _ev['selection'] if isinstance(_ev, dict) else getattr(_ev, 'selection', None)
+        _pts = (_sel['points'] if isinstance(_sel, dict) else getattr(_sel, 'points', None)) or []
+    except Exception:
+        _pts = []
+    if _pts:
+        _p0 = _pts[0]
+        _x = _p0.get('x') if isinstance(_p0, dict) else getattr(_p0, 'x', None)
+        _lk = f"_clk_{_kk}"
+        if _x is not None and st.session_state.get(_lk) != _x:
+            st.session_state[_lk] = _x
+            _click_set_filtro(_modo, _x, _scope)
+    return _ev
+
 try:
     import plotly.io as _pio
     for _tn in ("plotly", "plotly_white", "simple_white", "none", "ggplot2", "seaborn", "plotly_dark", "presentation"):
@@ -1486,6 +1574,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
               "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
+st.session_state['_pcf_ctr'] = 0
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
@@ -1704,7 +1793,7 @@ if _seccion == _SECCIONES[0]:
                 fig_serv = px.bar(_st, x='Fecha', y='Servicios', color='Tipo_Servicio', barmode='stack',
                                   color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
                 _layout_tipo(fig_serv)
-                ev_serv = st.plotly_chart(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
+                ev_serv = _pc(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
             else:
                 st.info("Sin datos de servicios (THDR) para el filtro actual.")
             _tarjeta_por_via(_st, 'Servicios', _fmt_int, "Total Servicios")
@@ -1733,7 +1822,7 @@ if _seccion == _SECCIONES[0]:
                     _fig_tren = px.bar(_ppd, x='Fecha', y='Servicios', color='Tren · Comp', barmode='stack')
                     _fig_tren.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=320,
                                             legend=dict(orientation='h', y=1.18, x=0, font=dict(size=10)), xaxis_title=None)
-                    st.plotly_chart(_no_huecos(_fig_tren), use_container_width=True, config={'locale': 'es'})
+                    _pc(_no_huecos(_fig_tren), use_container_width=True, config={'locale': 'es'})
             st.caption("Tipo de servicio = patrón Origen→Destino de la malla. XT-100 = M01-M27 · XT-M = XM28-XM35 · SFE = otras unidades (siempre simple).")
 
             st.divider()
@@ -1744,7 +1833,7 @@ if _seccion == _SECCIONES[0]:
                 fig_pax = px.bar(_pt, x='Fecha', y='PAX', color='Tipo_Servicio', barmode='stack',
                                  color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
                 _layout_tipo(fig_pax)
-                ev_pax = st.plotly_chart(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
+                ev_pax = _pc(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
             else:
                 st.info("Sin datos de pasajeros cruzables con la malla THDR para el filtro actual.")
             _tarjeta_por_via(_pt, 'PAX', _fmt_int, "Total PAX")
@@ -1757,7 +1846,7 @@ if _seccion == _SECCIONES[0]:
                 fig_tk = px.bar(_st, x='Fecha', y='TrenKm', color='Tipo_Servicio', barmode='stack',
                                 color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
                 _layout_tipo(fig_tk)
-                ev_tk = st.plotly_chart(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+                ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
             else:
                 st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
             _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
@@ -1774,7 +1863,7 @@ if _seccion == _SECCIONES[0]:
                 fig_odo.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_odo = st.plotly_chart(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
+                ev_odo = _pc(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 st.metric("Odómetro Total", f"{_ncl(df_resumen['Odómetro [km]'].sum(), 2)} km")
@@ -1790,7 +1879,7 @@ if _seccion == _SECCIONES[0]:
                 fig_umr.update_traces(texttemplate='%{_ncl(y, 2)}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_umr = st.plotly_chart(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
+                ev_umr = _pc(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 _tot_tk_umr = df_resumen['Tren-Km [km]'].sum()
@@ -1812,7 +1901,7 @@ if _seccion == _SECCIONES[0]:
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                        legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                        bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_ener = st.plotly_chart(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
+                ev_ener = _pc(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
             with c_card:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.metric("Total Tracción", f"{_ncl(df_plot_ener['Tracción'].sum(), 2)} kWh")
@@ -1829,7 +1918,7 @@ if _seccion == _SECCIONES[0]:
                 fig_ide_bar.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                           bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_ide_bar = st.plotly_chart(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
+                ev_ide_bar = _pc(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
                 _tot_tr_ide = df_resumen['E_Tr'].sum()
@@ -1837,20 +1926,6 @@ if _seccion == _SECCIONES[0]:
                 ide_global = (_tot_tr_ide / _tot_odo_ide) if _tot_odo_ide > 0 else 0
                 st.metric("IDE Global", f"{_ncl(ide_global, 2)} kWh/km")
 
-            chart_events = [ev_serv, ev_pax, ev_tk, ev_odo, ev_umr, ev_ener, ev_ide_bar]
-            
-            for ev in chart_events:
-                if ev and isinstance(ev, dict) and ev.get('selection') and ev['selection'].get('points'):
-                    clicked_x = ev['selection']['points'][0].get('x')
-                    if clicked_x:
-                        try:
-                            clicked_dt = pd.to_datetime(clicked_x, dayfirst=True).normalize()
-                            if st.session_state.drilldown_date != clicked_dt:
-                                st.session_state.drilldown_date = clicked_dt
-                                st.rerun()
-                        except Exception:
-                            pass
-            
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 if _seccion == _SECCIONES[1]:
@@ -1890,7 +1965,7 @@ if _seccion == _SECCIONES[2]:
                                  color='Tipo', color_discrete_map={'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Otro': '#888888'})
                 _fig_tp.update_traces(textinfo='percent+label', sort=False)
                 _fig_tp.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0), showlegend=False)
-                st.plotly_chart(_fig_tp, use_container_width=True, config={'locale': 'es'})
+                _pc(_fig_tp, use_container_width=True, config={'locale': 'es'})
             with _ct2:
                 _tp_show = _por_tipo.copy()
                 _tp_show['Km total'] = _tp_show['Km total'].map(lambda _v: f"{_ncl(_v, 0)} km")
@@ -1903,13 +1978,13 @@ if _seccion == _SECCIONES[2]:
             _fig_kt.update_layout(height=max(340, 20 * len(_res_tr)), margin=dict(t=10, b=0, l=0, r=0),
                                   yaxis=dict(autorange='reversed', title=''), title='')
             _fig_kt.update_traces(textposition='outside', cliponaxis=False)
-            st.plotly_chart(_fig_kt, use_container_width=True, config={'locale': 'es'})
+            _pc(_fig_kt, use_container_width=True, config={'locale': 'es'})
             st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención.")
             if not _flota_tr.empty:
                 st.markdown("#### Km diario de la flota")
                 _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
                 _fig_fl.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(title='km'))
-                st.plotly_chart(_no_huecos(_fig_fl), use_container_width=True, config={'locale': 'es'})
+                _pc(_no_huecos(_fig_fl), use_container_width=True, config={'locale': 'es'})
                 st.caption("Suma de km de todos los trenes por día.")
             st.markdown("#### Detalle por tren")
             st.dataframe(_res_tr, use_container_width=True)
@@ -1938,10 +2013,10 @@ if _seccion == _SECCIONES[2]:
         _fig_ks = px.bar(_aml, x='Fecha', y='Km', color='Métrica', barmode='group',
                          color_discrete_map={'Kms.xTrenes': '#005195', 'KmTren R': '#E85500'})
         _fig_ks.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0))
-        st.plotly_chart(_no_huecos(_fig_ks), use_container_width=True, config={'locale': 'es'})
+        _pc(_no_huecos(_fig_ks), use_container_width=True, config={'locale': 'es'})
         _fig_kd = px.bar(_agg_ks, x='Fecha', y='Diferencia', color_discrete_sequence=['#b91c1c'])
         _fig_kd.update_layout(height=260, margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(title='km no realizados'))
-        st.plotly_chart(_no_huecos(_fig_kd), use_container_width=True, config={'locale': 'es'})
+        _pc(_no_huecos(_fig_kd), use_container_width=True, config={'locale': 'es'})
         st.caption("Kms.xTrenes = km teórico (trenes × recorrido). KmTren R = km real recorrido. Diferencia = Kms.xTrenes − KmTren R (positivo: se recorrió menos de lo previsto).")
         with st.expander("Ver tabla diaria (Kms.xTrenes, KmTren R, diferencia) — mostrar / ocultar", expanded=False):
             _at_ks = _agg_ks.copy()
@@ -1966,14 +2041,14 @@ if _seccion == _SECCIONES[3]:
             _fcomp.update_traces(textinfo='percent+label', sort=False,
                                  hovertemplate='%{label}: %{value:,.0f} kWh (%{percent})<extra></extra>')
             _fcomp.update_layout(height=300, margin=dict(t=34, b=0, l=0, r=0), showlegend=False, title="Composición Tracción vs 12 kV")
-            st.plotly_chart(_fcomp, use_container_width=True, config={'locale': 'es'})
+            _pc(_fcomp, use_container_width=True, config={'locale': 'es'})
         with _cc2:
             _mv = _de.melt(id_vars='Fecha', value_vars=['E_Total', 'E_Tr', 'E_12'], var_name='Energía', value_name='kWh')
             _mv['Energía'] = _mv['Energía'].map({'E_Total': 'Total', 'E_Tr': 'Tracción', 'E_12': '12 kV'})
             _fevo = px.line(_mv, x='Fecha', y='kWh', color='Energía', markers=True,
                             color_discrete_map={'Total': '#15803d', 'Tracción': '#E85500', '12 kV': '#005195'})
             _fevo.update_layout(height=300, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='', title="Evolución diaria de las 3 energías")
-            st.plotly_chart(_no_huecos(_fevo), use_container_width=True, config={'locale': 'es'})
+            _pc(_no_huecos(_fevo), use_container_width=True, config={'locale': 'es'})
         _b1, _b2 = st.columns(2)
         with _b1:
             fig_e = go.Figure()
@@ -1981,7 +2056,7 @@ if _seccion == _SECCIONES[3]:
             fig_e.add_trace(go.Bar(x=_de['Fecha'], y=_de['E_12'], name='12 kV', marker_color='#005195'))
             fig_e.update_layout(barmode='stack', height=330, margin=dict(t=40, b=0, l=0, r=0),
                                 title="Tracción + 12 kV apiladas (kWh)", yaxis_title="kWh", xaxis_title='', legend_title='')
-            st.plotly_chart(_no_huecos(fig_e), use_container_width=True)
+            _pc(_no_huecos(fig_e), use_container_width=True)
         with _b2:
             _d2 = _de.copy()
             _d2['% Tracción'] = _d2['E_Tr'] / _d2['E_Total'] * 100
@@ -1990,7 +2065,7 @@ if _seccion == _SECCIONES[3]:
                            color_discrete_map={'% Tracción': '#E85500', '% 12 kV': '#005195'})
             _fpct.update_layout(height=330, margin=dict(t=40, b=0, l=0, r=0), title="Proporción diaria (%)",
                                 yaxis_title="%", xaxis_title='', legend_title='')
-            st.plotly_chart(_no_huecos(_fpct), use_container_width=True, config={'locale': 'es'})
+            _pc(_no_huecos(_fpct), use_container_width=True, config={'locale': 'es'})
         st.caption("Total = Tracción + 12 kV. Tracción = energía para mover los trenes; 12 kV = servicios auxiliares (iluminación, climatización, señalización, etc.).")
         with st.expander("Ver desglose diario — mostrar / ocultar", expanded=False):
             dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
@@ -2038,7 +2113,7 @@ if _seccion == _SECCIONES[4]:
                                                    mode='markers', marker=dict(color='red', size=12, symbol='x'),
                                                    name='Posible Tren Encendido'))
                 fig_noche.update_layout(margin=dict(t=40, b=0, l=0, r=0))
-                st.plotly_chart(_no_huecos(fig_noche), use_container_width=True, config={'locale': 'es'})
+                _pc(_no_huecos(fig_noche), use_container_width=True, config={'locale': 'es'})
             
             with c_noct2:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -2068,7 +2143,7 @@ if _seccion == _SECCIONES[4]:
             height=500,
             margin=dict(t=20, b=50, l=0, r=0)
         )
-        st.plotly_chart(fig_heat, use_container_width=True)
+        _pc(fig_heat, use_container_width=True)
         
         st.divider()
 
@@ -2100,7 +2175,7 @@ if _seccion == _SECCIONES[4]:
         
         fig_curva.update_layout(xaxis_title="Hora del Día", yaxis_title="Consumo (kWh)", hovermode="x unified",
                                 margin=dict(t=30, b=0, l=0, r=0))
-        st.plotly_chart(fig_curva, use_container_width=True)
+        _pc(fig_curva, use_container_width=True)
         
         st.info("💡 **Peak Shaving:** El área sombreada celeste representa el 'consumo normal' histórico de la flota a esa hora. Si un día el consumo rompe la barrera superior, podría generar altos **cargos por potencia máxima**. Asegúrate de que los despachos de trenes (THDR) no coincidan exactamente en el mismo segundo para aplanar esta curva.")
         
@@ -2152,7 +2227,7 @@ if _seccion == _SECCIONES[5]:
                             labels={'15min': 'Franja de 15 min', 'Consumo': 'Mediana (kWh/15min)', 'Tipo': ''})
             fig15.update_layout(margin=dict(t=10, b=0, l=0, r=0),
                                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
-            st.plotly_chart(fig15, use_container_width=True, config={'locale': 'es'})
+            _pc(fig15, use_container_width=True, config={'locale': 'es'})
             st.caption("Para cada franja de 15 min, mediana del consumo de esa franja a lo largo de los días del mismo tipo.")
 
             st.divider()
@@ -2164,7 +2239,7 @@ if _seccion == _SECCIONES[5]:
             figh.update_layout(margin=dict(t=10, b=0, l=0, r=0),
                                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
             figh.add_hline(y=_base_global, line_dash="dash", line_color="#475569", annotation_text=f"Base {_suf} · {_ncl(_base_global, 0)} kWh/h", annotation_position="top left")
-            st.plotly_chart(figh, use_container_width=True, config={'locale': 'es'})
+            _pc(figh, use_container_width=True, config={'locale': 'es'})
             st.caption("Por hora se suman los cuatro tramos de 15 min de cada día (kWh/hora) y luego se toma la mediana entre días.")
 
             with st.expander("Ver tablas de medianas"):
@@ -2193,7 +2268,7 @@ if _seccion == _SECCIONES[6]:
         fig_out.add_hline(y=mean_ide - 2*std_ide, line_dash="dot", line_color="orange", annotation_text="-2 Desv. Est.")
         
         fig_out.update_layout(title="IDE Diario (Identificando días más allá de ±2 desviaciones estándar)", xaxis_title="Fecha", yaxis_title="IDE (kWh/km)")
-        st.plotly_chart(_no_huecos(fig_out), use_container_width=True)
+        _pc(_no_huecos(fig_out), use_container_width=True)
         
         atipicos = df_ops[df_ops['Es_Atípico']][['Fecha', 'IDE (kWh/km)', 'Odómetro [km]', 'E_Tr']]
         if not atipicos.empty:
@@ -2265,7 +2340,7 @@ if _seccion == _SECCIONES[7]:
                 if _figm is None:
                     st.info("Sin datos suficientes para el diagrama de cruzamientos en ese día.")
                 else:
-                    st.plotly_chart(_figm, use_container_width=True, config={'locale': 'es'})
+                    _pc(_figm, use_container_width=True, config={'locale': 'es'})
                     st.caption("Cada línea es un servicio del día elegido: las azules (vía 1) suben de Puerto a Limache y las naranjas (vía 2) bajan de Limache a Puerto. Las ✕ verdes son los cruzamientos: pasa el cursor sobre una para ver el km, el número de servicio (Viaje), el tren y el recorrido de ambos trenes.")
                     if _cruces:
                         _dfc = pd.DataFrame(_cruces)
@@ -2280,7 +2355,7 @@ if _seccion == _SECCIONES[7]:
                         _figb = px.bar(_bt, x='Cruces', y='Tramo', orientation='h', text='Cruces', color_discrete_sequence=['#15803d'])
                         _figb.update_layout(height=max(280, 24 * len(_bt)), margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(autorange='reversed', title=''))
                         _figb.update_traces(textposition='outside', cliponaxis=False)
-                        st.plotly_chart(_figb, use_container_width=True, config={'locale': 'es'})
+                        _pc(_figb, use_container_width=True, config={'locale': 'es'})
                         st.caption("Tramos donde más se cruzan los trenes: mientras más larga la barra, mayor concentración de cruzamientos en ese tramo de la línea.")
         if not _det.empty:
             st.divider()
@@ -2405,7 +2480,7 @@ if _seccion == _SECCIONES[8]:
                         color_discrete_map={'L': '#005195', 'S': '#E85500', 'D/F': '#2CA02C'})
 
                 fig_mix.update_layout(margin=dict(t=20, b=0, l=0, r=0), height=400)
-                st.plotly_chart(fig_mix, use_container_width=True)
+                _pc(fig_mix, use_container_width=True)
                 
                 st.divider()
                 
@@ -2607,7 +2682,7 @@ if _seccion == _SECCIONES[8]:
                                                     aspect="auto")
                             fig_heat_dw.update_traces(customdata=pivot_fmt_dw.values, hovertemplate="Hora Local: %{x}:00<br>Estación: %{y}<br>Detención: %{customdata}<extra></extra>")
                             fig_heat_dw.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
-                            st.plotly_chart(fig_heat_dw, use_container_width=True)
+                            _pc(fig_heat_dw, use_container_width=True)
                             
                             est_max = df_dwell_heat.loc[df_dwell_heat['Dwell'].idxmax()]
                             st.caption(f"**Insight:** Máx. detención típica en **{est_max['Estacion']}** a las **{est_max['Hora_Estacion']:02d}:00 hrs** ({minutos_a_hhmmss(est_max['Dwell'])}).")
@@ -2633,7 +2708,7 @@ if _seccion == _SECCIONES[8]:
                                                     aspect="auto")
                             fig_heat_run.update_traces(customdata=pivot_fmt_run.values, hovertemplate="Hora Local: %{x}:00<br>Tramo: %{y}<br>Tiempo: %{customdata}<extra></extra>")
                             fig_heat_run.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
-                            st.plotly_chart(fig_heat_run, use_container_width=True)
+                            _pc(fig_heat_run, use_container_width=True)
                             
                             tramo_max = df_run_heat.loc[df_run_heat['RunTime'].idxmax()]
                             st.caption(f"**Insight:** Tramo más lento **{tramo_max['Tramo']}** a las **{tramo_max['Hora_Estacion']:02d}:00 hrs** ({minutos_a_hhmmss(tramo_max['RunTime'])}).")
@@ -2662,7 +2737,7 @@ if _seccion == _SECCIONES[8]:
                                                     aspect="auto")
                             fig_heat_pax.update_traces(hovertemplate="Hora Local: %{x}:00<br>Sector: %{y}<br>Carga PAX: %{_ncl(z, 0)}<extra></extra>")
                             fig_heat_pax.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
-                            st.plotly_chart(fig_heat_pax, use_container_width=True)
+                            _pc(fig_heat_pax, use_container_width=True)
                             
                             pax_max = df_pax_heat.loc[df_pax_heat['Pax'].idxmax()]
                             st.caption(f"**Insight:** Mayor carga prom. en **{pax_max['Estacion']}** a las **{pax_max['Hora_Estacion']:02d}:00 hrs** ({_ncl(pax_max['Pax'], 0)} PAX).")
@@ -2739,7 +2814,7 @@ if _seccion == _SECCIONES[8]:
                                                     color_continuous_scale="Oranges", aspect="auto")
                             fig_heat_dw_v2.update_traces(customdata=pivot_fmt_dw_v2.values, hovertemplate="Hora Local: %{x}:00<br>Estación: %{y}<br>Detención: %{customdata}<extra></extra>")
                             fig_heat_dw_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
-                            st.plotly_chart(fig_heat_dw_v2, use_container_width=True)
+                            _pc(fig_heat_dw_v2, use_container_width=True)
                             est_max_v2 = df_dwell_heat_v2.loc[df_dwell_heat_v2['Dwell'].idxmax()]
                             st.caption(f"**Insight:** Máx. detención típica en **{est_max_v2['Estacion']}** a las **{est_max_v2['Hora_Estacion']:02d}:00 hrs** ({minutos_a_hhmmss(est_max_v2['Dwell'])}).")
                         else:
@@ -2760,7 +2835,7 @@ if _seccion == _SECCIONES[8]:
                                                     color_continuous_scale="Purples", aspect="auto")
                             fig_heat_run_v2.update_traces(customdata=pivot_fmt_run_v2.values, hovertemplate="Hora Local: %{x}:00<br>Tramo: %{y}<br>Tiempo: %{customdata}<extra></extra>")
                             fig_heat_run_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
-                            st.plotly_chart(fig_heat_run_v2, use_container_width=True)
+                            _pc(fig_heat_run_v2, use_container_width=True)
                             tramo_max_v2 = df_run_heat_v2.loc[df_run_heat_v2['RunTime'].idxmax()]
                             st.caption(f"**Insight:** Tramo más lento **{tramo_max_v2['Tramo']}** a las **{tramo_max_v2['Hora_Estacion']:02d}:00 hrs** ({minutos_a_hhmmss(tramo_max_v2['RunTime'])}).")
                         else:
@@ -2785,7 +2860,7 @@ if _seccion == _SECCIONES[8]:
                                                     color_continuous_scale="Greens", aspect="auto")
                             fig_heat_pax_v2.update_traces(hovertemplate="Hora Local: %{x}:00<br>Sector: %{y}<br>Carga PAX: %{_ncl(z, 0)}<extra></extra>")
                             fig_heat_pax_v2.update_layout(margin=dict(t=20, b=20, l=0, r=0), height=500)
-                            st.plotly_chart(fig_heat_pax_v2, use_container_width=True)
+                            _pc(fig_heat_pax_v2, use_container_width=True)
                             pax_max_v2 = df_pax_heat_v2.loc[df_pax_heat_v2['Pax'].idxmax()]
                             st.caption(f"**Insight:** Mayor carga prom. en **{pax_max_v2['Estacion']}** a las **{pax_max_v2['Hora_Estacion']:02d}:00 hrs** ({_ncl(pax_max_v2['Pax'], 0)} PAX).")
                         else:
@@ -2812,7 +2887,7 @@ if _seccion == _SECCIONES[9]:
         _fvj = px.bar(_vd, x='Fecha', y='Total Viajes', color_discrete_sequence=['#0a7c6e'])
         _fvj.update_traces(hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
         _fvj.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Viajes', xaxis_title='')
-        st.plotly_chart(_no_huecos(_fvj), use_container_width=True, config={'locale': 'es'})
+        _pc(_no_huecos(_fvj), use_container_width=True, config={'locale': 'es'})
         st.caption("Total de viajes vendidos por contrato/tarifa (fuente AFT), sumando todas las tarifas de cada día en el rango seleccionado.")
         st.divider()
     if not df_carga_v1.empty or not df_carga_v2.empty:
@@ -2829,7 +2904,7 @@ if _seccion == _SECCIONES[9]:
                 fig_pas.add_trace(go.Bar(x=df_c2_agg['Fecha'], y=df_c2_agg['Total a Bordo'], name='Vía 2 (Limache->Puerto)', marker_color='#E85500'))
             
             fig_pas.update_layout(barmode='group', xaxis_title="Fecha", yaxis_title="Total Pasajeros", margin=dict(t=30))
-            st.plotly_chart(_no_huecos(fig_pas), use_container_width=True)
+            _pc(_no_huecos(fig_pas), use_container_width=True)
 
         with c_p2:
             st.write("#### Estaciones con Carga Máxima (Frecuencia)")
@@ -2844,7 +2919,7 @@ if _seccion == _SECCIONES[9]:
             if not df_est.empty:
                 fig_est = px.bar(df_est, x='Frecuencia', y='Estación', color='Vía', orientation='h', color_discrete_map={'Vía 1': '#005195', 'Vía 2': '#E85500'})
                 fig_est.update_layout(xaxis_title="Frecuencia (N° de Viajes)", yaxis_title="Estación", margin=dict(t=30))
-                st.plotly_chart(fig_est, use_container_width=True)
+                _pc(fig_est, use_container_width=True)
 
         st.write("#### Detalle de Viajes (Muestra)")
         if not df_carga_v1.empty:
@@ -3191,7 +3266,7 @@ if _seccion == _SECCIONES[12]:
                 _f.update_traces(textinfo='percent+label', sort=False,
                                  hovertemplate='%{label}: %{value} servicios (%{percent})<extra></extra>')
                 _f.update_layout(height=330, margin=dict(t=10, b=0, l=0, r=0), showlegend=False)
-                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+                _pc(_f, use_container_width=True, config={'locale': 'es'})
             elif "Barra" in _viz:
                 if _cmap:
                     _f = px.bar(_vc, x='Cantidad', y=_col, orientation='h', text='Cantidad', color=_col, color_discrete_map=_cmap)
@@ -3201,7 +3276,7 @@ if _seccion == _SECCIONES[12]:
                                  hovertemplate='%{y}: %{x} servicios (%{customdata[0]}%)<extra></extra>')
                 _f.update_layout(height=max(220, 48 * len(_vc)), margin=dict(t=10, b=0, l=0, r=0),
                                  yaxis=dict(autorange='reversed', title=''), xaxis_title='Servicios', showlegend=False)
-                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+                _pc(_f, use_container_width=True, config={'locale': 'es'})
             else:
                 _pal = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Simple': '#005195', 'Doble': '#E85500'}
                 _cl = st.columns(min(len(_vc), 4))
@@ -3231,12 +3306,12 @@ if _seccion == _SECCIONES[12]:
                 _f.update_traces(textposition='inside',
                                  hovertemplate='<b>%{fullData.name}</b><br>%{x}: %{y} servicios (%{customdata[0]}%)<extra></extra>')
                 _f.update_layout(height=390, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Servicios', xaxis_title='', legend_title='')
-                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+                _pc(_f, use_container_width=True, config={'locale': 'es'})
             elif "Torta" in _viz:
                 _f = px.sunburst(_g, path=['Composicion', _dim], values='Cantidad')
                 _f.update_traces(hovertemplate='<b>%{label}</b><br>%{value} servicios<br>%{percentParent} de %{parent}<extra></extra>')
                 _f.update_layout(height=390, margin=dict(t=10, b=0, l=0, r=0))
-                st.plotly_chart(_f, use_container_width=True, config={'locale': 'es'})
+                _pc(_f, use_container_width=True, config={'locale': 'es'})
             else:
                 _pal = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Simple': '#005195', 'Doble': '#E85500'}
                 for _comp in ['Simple', 'Doble']:
@@ -3326,7 +3401,7 @@ if _seccion == _SECCIONES[13]:
             _fca = px.bar(_b, x='Fecha', y='Ahorro CA', color_discrete_sequence=['#0a7c6e'])
             _fca.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
             _fca.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='')
-            st.plotly_chart(_no_huecos(_fca), use_container_width=True, config={'locale': 'es'})
+            _pc(_no_huecos(_fca), use_container_width=True, config={'locale': 'es'})
             st.caption("Ahorro = (Kms.xTrenes teórico − KmTren R real) × IDE del día. Energía ahorrada al cortar/acoplar composiciones según la demanda: el real recorre menos km-tren que el teórico de composición completa.")
         else:
             st.info("Carga el Excel UMR (hoja KM-Servicio) para calcular Corte y Acople.")
@@ -3351,7 +3426,7 @@ if _seccion == _SECCIONES[13]:
             _fv = px.bar(_mvv, x='Fecha', y='kWh', color='Tipo', barmode='group',
                          color_discrete_map={'Vacío real': '#E85500', 'Vacío meta': '#9aa0a6'})
             _fv.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
-            st.plotly_chart(_no_huecos(_fv), use_container_width=True, config={'locale': 'es'})
+            _pc(_no_huecos(_fv), use_container_width=True, config={'locale': 'es'})
             st.caption(f"Km vacío = Odómetro − KmTren R (recorrido sin servicio). Vacío meta = (KmTren R ÷ {_ncl(_meta, 3)}) − KmTren R (vacío permitido por la meta UMR). Cada uno × IDE del día. Ahorro = (vacío meta − vacío real) × IDE: positivo si circulaste menos en vacío que lo permitido.")
         else:
             st.info("Carga el Excel UMR (hoja KM-Servicio) para calcular Tracción Vacío.")
@@ -3368,7 +3443,7 @@ if _seccion == _SECCIONES[13]:
         _fu = px.bar(_b, x='Fecha', y='Ahorro UMR', color_discrete_sequence=['#005195'])
         _fu.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
         _fu.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='')
-        st.plotly_chart(_no_huecos(_fu), use_container_width=True, config={'locale': 'es'})
+        _pc(_no_huecos(_fu), use_container_width=True, config={'locale': 'es'})
         st.caption(f"Ahorro UMR = (Tren-Km del dashboard − Odómetro × {_ncl(_meta, 3)}) × IDE del día.")
 
         with st.expander("Ver tabla diaria — mostrar / ocultar", expanded=False):
@@ -3410,13 +3485,13 @@ if _seccion == _SECCIONES[14]:
                 _fb = px.bar(_tot_df, x='Fuente', y='kWh', color='Fuente', text='kWh', color_discrete_map=_cmap_f)
                 _fb.update_traces(texttemplate='%{text:,.0f}', textposition='outside', cliponaxis=False)
                 _fb.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', showlegend=False, title="Total por fuente")
-                st.plotly_chart(_fb, use_container_width=True, config={'locale': 'es'})
+                _pc(_fb, use_container_width=True, config={'locale': 'es'})
             with _g2:
                 _mvf = _cmp.melt(id_vars='Fecha', value_vars=_srcs, var_name='Fuente', value_name='kWh')
                 _mvf = _mvf[_mvf['kWh'] > 0]
                 _ff = px.line(_mvf, x='Fecha', y='kWh', color='Fuente', markers=True, color_discrete_map=_cmap_f)
                 _ff.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='', title="Evolución diaria por fuente")
-                st.plotly_chart(_no_huecos(_ff), use_container_width=True, config={'locale': 'es'})
+                _pc(_no_huecos(_ff), use_container_width=True, config={'locale': 'es'})
             _multi = _cmp[(_cmp[_srcs] > 0).sum(axis=1) >= 2].copy()
             if not _multi.empty and len(_srcs) >= 2:
                 _ref = _srcs[0]
@@ -3435,12 +3510,12 @@ if _seccion == _SECCIONES[14]:
                     with _dd1:
                         _fd = px.bar(_mvd, x='Fecha', y='kWh', color='Comparación', barmode='group')
                         _fd.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (kWh)")
-                        st.plotly_chart(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
+                        _pc(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
                     with _dd2:
                         _fp = px.bar(_mvp, x='Fecha', y='%', color='Comparación', barmode='group')
                         _fp.update_traces(hovertemplate='%{x}: %{y:.2f}%<extra></extra>')
                         _fp.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='% (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (%)")
-                        st.plotly_chart(_no_huecos(_fp), use_container_width=True, config={'locale': 'es'})
+                        _pc(_no_huecos(_fp), use_container_width=True, config={'locale': 'es'})
                     st.caption(f"Diferencia = fuente − {_ref}, en kWh y en % sobre {_ref}. Cerca de 0 = coinciden; positivo = la fuente mide más que {_ref}.")
             else:
                 st.caption("No hay días con 2 o más fuentes simultáneas para calcular diferencias.")
