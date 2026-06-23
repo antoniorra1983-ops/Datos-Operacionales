@@ -484,34 +484,44 @@ def _modo_x_temporal(_fig):
     """Inspecciona las trazas de barra y devuelve 'dia' | 'mes' | 'anio' | None según el eje X."""
     try:
         for _tr in _fig.data:
-            if getattr(_tr, 'type', None) != 'bar':
+            if getattr(_tr, 'type', None) not in ('bar', 'scatter', 'scattergl'):
                 continue
             _xs = getattr(_tr, 'x', None)
             if _xs is None:
                 continue
-            for _v in list(_xs):
-                if _v is None or (isinstance(_v, str) and _v.strip() == ''):
-                    continue
-                if isinstance(_v, str):
-                    _vl = _v.strip().lower()
-                    if _vl in _MESNUM_CLK:
-                        return 'mes'
-                    if re.fullmatch(r'(19|20)\d{2}', _vl):
-                        return 'anio'
-                    if re.search(r'\d{1,4}[-/]\d{1,2}', _vl) and pd.notna(pd.to_datetime(_v, dayfirst=True, errors='coerce')):
-                        return 'dia'
-                    return None
-                if isinstance(_v, (pd.Timestamp, datetime, date)):
-                    return 'dia'
-                if isinstance(_v, (int, float, np.integer, np.floating)) and 1990 <= float(_v) <= 2100:
+            _xs = list(_xs)
+            _v = next((x for x in _xs if x is not None and not (isinstance(x, str) and x.strip() == '')), None)
+            if _v is None:
+                continue
+            if isinstance(_v, str):
+                _vl = _v.strip().lower()
+                if _vl in _MESNUM_CLK:
+                    return 'mes'
+                if re.fullmatch(r'(19|20)\d{2}', _vl):
                     return 'anio'
+                if re.search(r'\d{1,4}[-/]\d{1,2}', _vl) and pd.notna(pd.to_datetime(_v, dayfirst=True, errors='coerce')):
+                    return 'dia'
+                return None
+            if isinstance(_v, (int, float, np.integer, np.floating)):
+                if 1990 <= float(_v) <= 2100:
+                    return 'anio'
+                return None
+            if isinstance(_v, (pd.Timestamp, datetime, date, np.datetime64)):
+                # Fechas crudas: exigir 2+ días distintos para evitar gráficos intra-día (ej. Marey por horas)
+                try:
+                    _dts = pd.to_datetime(pd.Series(_xs), errors='coerce').dropna()
+                    if _dts.dt.normalize().nunique() >= 2:
+                        return 'dia'
+                except Exception:
+                    pass
                 return None
     except Exception:
         return None
     return None
 
 def _click_set_filtro(_modo, _xval, _scope):
-    """Aplica el valor clickeado al filtro (global o THDR) y refresca."""
+    """Aplica el valor clickeado al filtro (global o THDR). Solo refresca si el filtro CAMBIA
+    (compara contra el valor actual), evitando bucles sin depender de guards por key."""
     _kfec = '_t_fec' if _scope == 'thdr' else '_f_fecha'
     _kmes = '_t_mes' if _scope == 'thdr' else '_f_mes'
     _kanio = '_t_anio' if _scope == 'thdr' else '_f_anio'
@@ -521,14 +531,23 @@ def _click_set_filtro(_modo, _xval, _scope):
             if pd.isna(_d):
                 return
             _dd = _d.date()
+            _act = st.session_state.get(_kfec)
+            if isinstance(_act, (tuple, list)) and len(_act) == 2 and _act[0] == _dd and _act[1] == _dd:
+                return
             st.session_state[_kfec] = (_dd, _dd)
         elif _modo == 'mes':
             _vl = str(_xval).strip().lower()
             if _vl not in _MESNUM_CLK:
                 return
-            st.session_state[_kmes] = _MES_CAP_CLK[_MESNUM_CLK[_vl] - 1]
+            _mes = _MES_CAP_CLK[_MESNUM_CLK[_vl] - 1]
+            if st.session_state.get(_kmes) == _mes:
+                return
+            st.session_state[_kmes] = _mes
         elif _modo == 'anio':
-            st.session_state[_kanio] = str(int(float(_xval)))
+            _an = str(int(float(_xval)))
+            if st.session_state.get(_kanio) == _an:
+                return
+            st.session_state[_kanio] = _an
         else:
             return
     except Exception:
@@ -580,6 +599,10 @@ def _pc(_fig, key=None, **kw):
     if not _modo:
         return st.plotly_chart(_fig, **kw)
     _scope = 'thdr' if ('_SECCIONES' in globals() and '_seccion' in globals() and _seccion == _SECCIONES[7]) else 'global'
+    try:
+        _fig.update_layout(clickmode='event+select')
+    except Exception:
+        pass
     _kk = key or _key_fig(_fig)
     _ev = st.plotly_chart(_fig, on_select="rerun", key=_kk, **kw)
     try:
@@ -590,9 +613,7 @@ def _pc(_fig, key=None, **kw):
     if _pts:
         _p0 = _pts[0]
         _x = _p0.get('x') if isinstance(_p0, dict) else getattr(_p0, 'x', None)
-        _lk = f"_clk_{_kk}"
-        if _x is not None and st.session_state.get(_lk) != _x:
-            st.session_state[_lk] = _x
+        if _x is not None:
             _click_set_filtro(_modo, _x, _scope)
     return _ev
 
