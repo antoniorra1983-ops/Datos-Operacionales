@@ -157,6 +157,18 @@ def minutos_a_hhmmss(minutos_float):
 def _norm(s):
     return str(s).upper().translate(str.maketrans("ÁÉÍÓÚÜÑ", "AEIOUUN"))
 
+# Km acumulado de cada estación desde el origen (archivo "Km entre estaciones").
+# Las distancias entre estaciones son simétricas entre Vía 1 y Vía 2, así que esta
+# única tabla sirve para calcular el km recorrido de cualquier servicio (origen→destino).
+_KM_ESTACION = {
+    "PUERTO": 0.0, "BELLAVISTA": 0.72, "FRANCIA": 1.2, "BARON": 2.2, "PORTALES": 3.9,
+    "RECREO": 6.0, "MIRAMAR": 7.4, "VINA DEL MAR": 8.3, "HOSPITAL": 9.55, "CHORRILLOS": 10.55,
+    "EL SALTO": 11.71, "VALENCIA": 19.0, "QUILPUE": 21.43, "EL SOL": 23.3, "EL BELLOTO": 25.4,
+    "AMERICAS": 26.4, "LAS AMERICAS": 26.4, "LA CONCEPCION": 27.6, "VILLA ALEMANA": 28.5,
+    "SARGENTO ALDEA": 29.11, "PENABLANCA": 30.4, "LIMACHE": 43.13,
+}
+_LARGO_LINEA = 43.13  # Puerto–Limache, usado como respaldo si no se detecta el recorrido
+
 def get_col_thdr(df, estacion, tipo):
     if df is None or df.empty: return None
     est_n = _norm(estacion)
@@ -1194,7 +1206,25 @@ def procesar_thdr_eficiente(file, start_date, end_date):
             c_m2 = next((c for c in df.columns if 'Motriz 2' in str(c)), None)
             df['Unidad'] = df[c_m2].apply(lambda x: 'M' if parse_latam_number(x)>0 else 'S') if c_m2 else 'S'
             
-        df['Tren-Km'] = 43.13 * df['Unidad'].apply(lambda x: 2 if str(x).strip()=='M' else 1)
+        # Km recorrido real por servicio según las estaciones por las que pasa (archivo Km
+        # entre estaciones): distancia entre la primera y la última estación con horario.
+        # Si no se detecta el recorrido, se usa el largo de línea como respaldo.
+        _col_km = {}
+        for _c in df.columns:
+            _cs = str(_c)
+            if _cs.endswith('_min') and ('Hora Llegada' in _cs or 'Hora Salida' in _cs):
+                _est = re.sub(r'\s+', ' ', _norm(_cs.split('_Hora')[0]).strip())
+                if _est in _KM_ESTACION:
+                    _col_km[_c] = _KM_ESTACION[_est]
+        _ch = list(_col_km.keys())
+        if _ch:
+            def _km_recorrido(_row):
+                _ks = [_col_km[_c] for _c in _ch if pd.notna(_row[_c])]
+                return (max(_ks) - min(_ks)) if len(_ks) >= 2 else _LARGO_LINEA
+            df['Km_Recorrido'] = df.apply(_km_recorrido, axis=1)
+        else:
+            df['Km_Recorrido'] = _LARGO_LINEA
+        df['Tren-Km'] = df['Km_Recorrido'] * df['Unidad'].apply(lambda x: 2 if str(x).strip()=='M' else 1)
         df['Fecha_Op'] = fch_dt
         
         col_ref = next((c for c in df.columns if ('PUERTO' in str(c).upper() or 'LIMACHE' in str(c).upper()) and 'Salida' in str(c) and '_min' in str(c)), None)
@@ -1909,7 +1939,7 @@ if _seccion == _SECCIONES[0]:
             else:
                 st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
             _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
-            st.caption("Tipo de servicio = patrón Origen→Destino detectado en la malla THDR. El Tren-Km usa 43,13 km por servicio (×2 en tracción doble); los servicios cortos comparten esa base, así que su Tren-Km es una cota superior, no la distancia exacta.")
+            st.caption("Tipo de servicio = patrón Origen→Destino detectado en la malla THDR. El Tren-Km usa la distancia real de cada servicio según las estaciones por las que pasa (archivo Km entre estaciones), ×2 en tracción doble. Los servicios cortos cuentan su recorrido efectivo, no la línea completa.")
 
             st.divider()
 
