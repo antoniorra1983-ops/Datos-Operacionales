@@ -1679,130 +1679,142 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
-_logo_header()
-# Avisos de estado de carga
-if not _hay_archivos:
-    st.info("Sube archivos en la barra lateral para comenzar.")
-elif df_ops.empty and not st.session_state.get('_do_load'):
-    st.info("Configura el rango y los archivos en la barra lateral y aprieta **🔄 Cargar / actualizar datos** para procesar.")
-elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _cache_key):
-    st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
+st.markdown("""<style>
+.block-container { padding-top: 4.2rem !important; }
+.st-key-_sticky_top {
+    position: sticky;
+    top: 3.6rem;
+    z-index: 99;
+    background-color: #ffffff;
+    padding: 0.35rem 0 0.5rem 0;
+    border-bottom: 2px solid #e9e9e9;
+}
+</style>""", unsafe_allow_html=True)
+with st.container(key="_sticky_top"):
+    _logo_header()
+    # Avisos de estado de carga
+    if not _hay_archivos:
+        st.info("Sube archivos en la barra lateral para comenzar.")
+    elif df_ops.empty and not st.session_state.get('_do_load'):
+        st.info("Configura el rango y los archivos en la barra lateral y aprieta **🔄 Cargar / actualizar datos** para procesar.")
+    elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _cache_key):
+        st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
-_SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía", "🧱 Constructor de datos"]
-_seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
-st.session_state['_pcf_used'] = set()
+    _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
+                  "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía", "🧱 Constructor de datos"]
+    _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
+    st.session_state['_pcf_used'] = set()
 
-# ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
-st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
-_J_COD = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
-if not df_ops.empty and _seccion != _SECCIONES[7]:
-    _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
-    _dts_all = sorted(set(_ff.dropna().dt.date))
-    _anios = sorted({d.year for d in _dts_all}, reverse=True)
-    _MES_g = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    _mesnum_g = {_MES_g[i]: i + 1 for i in range(12)}
-    def _semmap_de(_lista):
-        _m = {}
-        if not _lista: return _m
-        _ls = sorted(_lista)
-        _iso = pd.to_datetime(pd.Series(_ls)).dt.isocalendar()
-        _wk = pd.DataFrame({'d': _ls, 'iy': _iso['year'].values, 'iw': _iso['week'].values})
-        for (_iy, _iw), _g in _wk.groupby(['iy', 'iw']):
-            _m[f"Sem {int(_iw):02d} ({_g['d'].min().strftime('%d/%m')}–{_g['d'].max().strftime('%d/%m')})"] = (int(_iy), int(_iw))
-        return _m
-    _sig = (str(min(_dts_all)), str(max(_dts_all)), ",".join(map(str, _anios)))
-    if st.session_state.get('_f_sig') != _sig:
-        st.session_state['_f_sig'] = _sig
-        for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
-    with st.container(border=True):
-        _ct1, _ct2 = st.columns([5, 1])
-        _ct1.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
-        if _ct2.button("🔄 Limpiar", key="_btn_limpiar_f", use_container_width=True, help="Quitar todos los filtros (incluye los aplicados al pulsar barras)"):
+    # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
+    st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
+    _J_COD = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
+    if not df_ops.empty and _seccion != _SECCIONES[7]:
+        _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
+        _dts_all = sorted(set(_ff.dropna().dt.date))
+        _anios = sorted({d.year for d in _dts_all}, reverse=True)
+        _MES_g = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        _mesnum_g = {_MES_g[i]: i + 1 for i in range(12)}
+        def _semmap_de(_lista):
+            _m = {}
+            if not _lista: return _m
+            _ls = sorted(_lista)
+            _iso = pd.to_datetime(pd.Series(_ls)).dt.isocalendar()
+            _wk = pd.DataFrame({'d': _ls, 'iy': _iso['year'].values, 'iw': _iso['week'].values})
+            for (_iy, _iw), _g in _wk.groupby(['iy', 'iw']):
+                _m[f"Sem {int(_iw):02d} ({_g['d'].min().strftime('%d/%m')}–{_g['d'].max().strftime('%d/%m')})"] = (int(_iy), int(_iw))
+            return _m
+        _sig = (str(min(_dts_all)), str(max(_dts_all)), ",".join(map(str, _anios)))
+        if st.session_state.get('_f_sig') != _sig:
+            st.session_state['_f_sig'] = _sig
             for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
-            for _k in [k for k in list(st.session_state.keys()) if str(k).startswith('_clk_')]: st.session_state.pop(_k, None)
-            st.rerun()
-        _cf1, _cfm, _cf2, _cf3, _cf4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
-        with _cf1:
-            _op_anio = ["Todos"] + [str(a) for a in _anios]
-            if st.session_state.get('_f_anio') not in _op_anio: st.session_state['_f_anio'] = "Todos"
-            _sel_a = st.selectbox("Año", _op_anio, key="_f_anio")
-        _dts_a = [d for d in _dts_all if _sel_a == "Todos" or d.year == int(_sel_a)]
-        with _cfm:
-            _op_mes_g = ["Todos"] + [_MES_g[mn - 1] for mn in sorted({d.month for d in _dts_a})]
-            if st.session_state.get('_f_mes') not in _op_mes_g: st.session_state['_f_mes'] = "Todos"
-            _sel_m = st.selectbox("Mes", _op_mes_g, key="_f_mes")
-        _dts_m = [d for d in _dts_a if _sel_m == "Todos" or d.month == _mesnum_g[_sel_m]]
-        with _cf2:
-            _sem_map = _semmap_de(_dts_m)
-            _op_sem = ["Todas"] + list(_sem_map.keys())
-            if st.session_state.get('_f_semana') not in _op_sem: st.session_state['_f_semana'] = "Todas"
-            _sel_s = st.selectbox("Semana", _op_sem, key="_f_semana")
-        if _sel_s != "Todas":
-            _iyw = _sem_map[_sel_s]
-            _dts_s = [d for d in _dts_m if (d.isocalendar()[0], d.isocalendar()[1]) == _iyw]
-        else:
-            _dts_s = _dts_m
-        with _cf3:
-            _opj = list(_J_COD.keys())
-            if hasattr(st, "pills"):
-                _selj = st.pills("Tipo de jornada", _opj, selection_mode="multi", default=_opj, key="_f_jornada")
+        with st.container(border=True):
+            _ct1, _ct2 = st.columns([5, 1])
+            _ct1.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
+            if _ct2.button("🔄 Limpiar", key="_btn_limpiar_f", use_container_width=True, help="Quitar todos los filtros (incluye los aplicados al pulsar barras)"):
+                for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
+                for _k in [k for k in list(st.session_state.keys()) if str(k).startswith('_clk_')]: st.session_state.pop(_k, None)
+                st.rerun()
+            _cf1, _cfm, _cf2, _cf3, _cf4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
+            with _cf1:
+                _op_anio = ["Todos"] + [str(a) for a in _anios]
+                if st.session_state.get('_f_anio') not in _op_anio: st.session_state['_f_anio'] = "Todos"
+                _sel_a = st.selectbox("Año", _op_anio, key="_f_anio")
+            _dts_a = [d for d in _dts_all if _sel_a == "Todos" or d.year == int(_sel_a)]
+            with _cfm:
+                _op_mes_g = ["Todos"] + [_MES_g[mn - 1] for mn in sorted({d.month for d in _dts_a})]
+                if st.session_state.get('_f_mes') not in _op_mes_g: st.session_state['_f_mes'] = "Todos"
+                _sel_m = st.selectbox("Mes", _op_mes_g, key="_f_mes")
+            _dts_m = [d for d in _dts_a if _sel_m == "Todos" or d.month == _mesnum_g[_sel_m]]
+            with _cf2:
+                _sem_map = _semmap_de(_dts_m)
+                _op_sem = ["Todas"] + list(_sem_map.keys())
+                if st.session_state.get('_f_semana') not in _op_sem: st.session_state['_f_semana'] = "Todas"
+                _sel_s = st.selectbox("Semana", _op_sem, key="_f_semana")
+            if _sel_s != "Todas":
+                _iyw = _sem_map[_sel_s]
+                _dts_s = [d for d in _dts_m if (d.isocalendar()[0], d.isocalendar()[1]) == _iyw]
             else:
-                _selj = st.multiselect("Tipo de jornada", _opj, default=_opj, key="_f_jornada")
-            _selj = _selj or _opj
-        with _cf4:
-            _fmin, _fmax = (min(_dts_s), max(_dts_s)) if _dts_s else (min(_dts_all), max(_dts_all))
-            def _in_rg(_v):
-                try:
-                    return all(_fmin <= _x <= _fmax for _x in _v) if isinstance(_v, (tuple, list)) else (_fmin <= _v <= _fmax)
-                except Exception:
-                    return False
-            _cur = st.session_state.get('_f_fecha')
-            if _cur is None or not _in_rg(_cur): st.session_state['_f_fecha'] = (_fmin, _fmax)
-            _rg = st.date_input("Fecha", min_value=_fmin, max_value=_fmax, key="_f_fecha")
-            _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
-    _cods = {_J_COD[j] for j in _selj}
-    def _msk_f(serie):
-        f = pd.to_datetime(serie, errors='coerce')
-        m = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
-        if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
-        if _sel_m != "Todos": m = m & (f.dt.month == _mesnum_g[_sel_m])
-        if _sel_s != "Todas":
-            _iy2, _iw2 = _sem_map[_sel_s]
-            _ic = f.dt.isocalendar()
-            m = m & (_ic['year'] == _iy2) & (_ic['week'] == _iw2)
-        if len(_cods) < 3:
-            td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None)
-            m = m & td.isin(_cods)
-        return m.values
-    def _filt_df(df, col):
-        if df is None or getattr(df, 'empty', True) or col not in df.columns: return df
-        return df[_msk_f(df[col])].reset_index(drop=True)
-    def _filt_regs(regs):
-        if not regs: return regs
-        _d = pd.DataFrame(regs)
-        if 'Fecha' not in _d.columns: return regs
-        return _d[_msk_f(_d['Fecha'])].to_dict('records')
-    df_ops = _filt_df(df_ops, 'Fecha')
-    df_thdr_v1 = _filt_df(df_thdr_v1, 'Fecha_Op')
-    df_thdr_v2 = _filt_df(df_thdr_v2, 'Fecha_Op')
-    df_carga_v1 = _filt_df(df_carga_v1, 'Fecha')
-    df_carga_v2 = _filt_df(df_carga_v2, 'Fecha')
-    df_viajes = _filt_df(df_viajes, 'Fecha')
-    df_serv_tipo = _filt_df(df_serv_tipo, 'Fecha')
-    df_pax_tipo = _filt_df(df_pax_tipo, 'Fecha')
-    all_prmte_full = _filt_regs(all_prmte_full)
-    all_fact_full = _filt_regs(all_fact_full)
-    all_tr = _filt_regs(all_tr)
-    all_seat = _filt_regs(all_seat)
-    all_kmserv = _filt_regs(all_kmserv)
-    _rf = []
-    if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
-    if _sel_m != "Todos": _rf.append(_sel_m)
-    if _sel_s != "Todas": _rf.append(_sel_s)
-    _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
-    _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
-    st.caption("Filtros activos · " + " · ".join(_rf) + f" · {_ncl(len(df_ops), 0)} día(s)")
+                _dts_s = _dts_m
+            with _cf3:
+                _opj = list(_J_COD.keys())
+                if hasattr(st, "pills"):
+                    _selj = st.pills("Tipo de jornada", _opj, selection_mode="multi", default=_opj, key="_f_jornada")
+                else:
+                    _selj = st.multiselect("Tipo de jornada", _opj, default=_opj, key="_f_jornada")
+                _selj = _selj or _opj
+            with _cf4:
+                _fmin, _fmax = (min(_dts_s), max(_dts_s)) if _dts_s else (min(_dts_all), max(_dts_all))
+                def _in_rg(_v):
+                    try:
+                        return all(_fmin <= _x <= _fmax for _x in _v) if isinstance(_v, (tuple, list)) else (_fmin <= _v <= _fmax)
+                    except Exception:
+                        return False
+                _cur = st.session_state.get('_f_fecha')
+                if _cur is None or not _in_rg(_cur): st.session_state['_f_fecha'] = (_fmin, _fmax)
+                _rg = st.date_input("Fecha", min_value=_fmin, max_value=_fmax, key="_f_fecha")
+                _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
+        _cods = {_J_COD[j] for j in _selj}
+        def _msk_f(serie):
+            f = pd.to_datetime(serie, errors='coerce')
+            m = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
+            if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
+            if _sel_m != "Todos": m = m & (f.dt.month == _mesnum_g[_sel_m])
+            if _sel_s != "Todas":
+                _iy2, _iw2 = _sem_map[_sel_s]
+                _ic = f.dt.isocalendar()
+                m = m & (_ic['year'] == _iy2) & (_ic['week'] == _iw2)
+            if len(_cods) < 3:
+                td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None)
+                m = m & td.isin(_cods)
+            return m.values
+        def _filt_df(df, col):
+            if df is None or getattr(df, 'empty', True) or col not in df.columns: return df
+            return df[_msk_f(df[col])].reset_index(drop=True)
+        def _filt_regs(regs):
+            if not regs: return regs
+            _d = pd.DataFrame(regs)
+            if 'Fecha' not in _d.columns: return regs
+            return _d[_msk_f(_d['Fecha'])].to_dict('records')
+        df_ops = _filt_df(df_ops, 'Fecha')
+        df_thdr_v1 = _filt_df(df_thdr_v1, 'Fecha_Op')
+        df_thdr_v2 = _filt_df(df_thdr_v2, 'Fecha_Op')
+        df_carga_v1 = _filt_df(df_carga_v1, 'Fecha')
+        df_carga_v2 = _filt_df(df_carga_v2, 'Fecha')
+        df_viajes = _filt_df(df_viajes, 'Fecha')
+        df_serv_tipo = _filt_df(df_serv_tipo, 'Fecha')
+        df_pax_tipo = _filt_df(df_pax_tipo, 'Fecha')
+        all_prmte_full = _filt_regs(all_prmte_full)
+        all_fact_full = _filt_regs(all_fact_full)
+        all_tr = _filt_regs(all_tr)
+        all_seat = _filt_regs(all_seat)
+        all_kmserv = _filt_regs(all_kmserv)
+        _rf = []
+        if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
+        if _sel_m != "Todos": _rf.append(_sel_m)
+        if _sel_s != "Todas": _rf.append(_sel_s)
+        _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
+        _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
+        st.caption("Filtros activos · " + " · ".join(_rf) + f" · {_ncl(len(df_ops), 0)} día(s)")
 
 if _seccion == _SECCIONES[0]:
     _ep=st.session_state.get('_errores_proc',{})
