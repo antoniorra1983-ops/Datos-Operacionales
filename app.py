@@ -1680,14 +1680,18 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
 # --- 8. TABS DE VISUALIZACIÓN ---
 st.markdown("""<style>
-.block-container { padding-top: 4.2rem !important; }
+/* Para que position:sticky enganche, ningún contenedor padre debe recortar el contenido */
+[data-testid="stMainBlockContainer"], [data-testid="stVerticalBlock"] { overflow: visible !important; }
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 1.2rem !important; }
+/* Bloque fijo: logo + pestañas + filtro */
 .st-key-_sticky_top {
-    position: sticky;
-    top: 3.6rem;
-    z-index: 99;
-    background-color: #ffffff;
-    padding: 0.35rem 0 0.5rem 0;
-    border-bottom: 2px solid #e9e9e9;
+    position: sticky !important;
+    top: 3.5rem !important;
+    z-index: 999 !important;
+    background-color: var(--background-color, #ffffff) !important;
+    padding: 0.45rem 0 0.6rem 0 !important;
+    border-bottom: 2px solid rgba(49,51,63,0.12);
+    box-shadow: 0 6px 10px -8px rgba(0,0,0,0.35);
 }
 </style>""", unsafe_allow_html=True)
 with st.container(key="_sticky_top"):
