@@ -1656,7 +1656,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
     st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
 
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía", "🧱 Constructor de datos"]
 _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 st.session_state['_pcf_used'] = set()
 
@@ -3614,3 +3614,125 @@ if _seccion == _SECCIONES[14]:
                 for _s in _srcs:
                     _tc[_s] = _tc[_s].map(lambda _v: _ncl(_v, 0) if _v > 0 else '—')
                 st.dataframe(_tc, use_container_width=True, hide_index=True)
+
+if _seccion == _SECCIONES[15]:
+    st.header("🧱 Constructor de datos por fecha")
+    st.caption("Armá tu propia tabla: elegí qué datos incluir y descargala en Excel. Una fila por fecha, respeta los filtros de arriba.")
+    if df_ops is None or df_ops.empty:
+        st.info("No hay datos cargados. Subí archivos desde el panel lateral para empezar.")
+    else:
+        _master = df_ops.copy()
+        _master['Fecha'] = pd.to_datetime(_master['Fecha'], errors='coerce').dt.normalize()
+
+        # --- Odómetro por tipo de tren (km diario desde all_tr) ---
+        _cols_odotipo = []
+        if all_tr:
+            _dt = pd.DataFrame(all_tr)
+            if {'Tren', 'Fecha', 'Valor'}.issubset(_dt.columns):
+                _dt['Fecha'] = pd.to_datetime(_dt['Fecha'], errors='coerce').dt.normalize()
+                _dt['Valor'] = pd.to_numeric(_dt['Valor'], errors='coerce')
+                if 'Clase' in _dt.columns and _dt['Clase'].notna().any():
+                    _dt = _dt[_dt['Clase'] == 'km']
+                else:
+                    _dt = _dt[_dt['Valor'] < 50000]
+                def _tt_master(_s):
+                    _s = str(_s).upper()
+                    return 'SFE' if _s.startswith('SFE') else ('XT-M' if _s.startswith('XM') else ('XT-100' if _s.startswith('M') else 'Otro'))
+                _dt = _dt.dropna(subset=['Fecha', 'Valor'])
+                if not _dt.empty:
+                    _dt['Tipo'] = _dt['Tren'].apply(_tt_master)
+                    _odt = _dt.groupby(['Fecha', 'Tipo'])['Valor'].sum().unstack(fill_value=0)
+                    _odt.columns = [f"Odo {c} [km]" for c in _odt.columns]
+                    _cols_odotipo = list(_odt.columns)
+                    _master = _master.merge(_odt.reset_index(), on='Fecha', how='left')
+
+        # --- Servicios por tipo de servicio ---
+        _cols_servtipo = []
+        if df_serv_tipo is not None and not df_serv_tipo.empty and 'Tipo_Servicio' in df_serv_tipo.columns:
+            _sp = df_serv_tipo.copy()
+            _sp['Fecha'] = pd.to_datetime(_sp['Fecha'], errors='coerce').dt.normalize()
+            _spv = _sp.pivot_table(index='Fecha', columns='Tipo_Servicio', values='Servicios', aggfunc='sum', fill_value=0)
+            _spv.columns = [f"Serv {c}" for c in _spv.columns]
+            _cols_servtipo = list(_spv.columns)
+            _master = _master.merge(_spv.reset_index(), on='Fecha', how='left')
+
+        # --- Km-Servicio (UMR: teórico, real, programado) ---
+        _cols_kmserv = []
+        if all_kmserv:
+            _dks = pd.DataFrame(all_kmserv)
+            if 'Fecha' in _dks.columns:
+                _dks['Fecha'] = pd.to_datetime(_dks['Fecha'], errors='coerce').dt.normalize()
+                _numc = [c for c in _dks.columns if c != 'Fecha' and pd.api.types.is_numeric_dtype(_dks[c])]
+                if _numc:
+                    _dksg = _dks.groupby('Fecha')[_numc].sum().reset_index()
+                    _cols_kmserv = _numc
+                    _master = _master.merge(_dksg, on='Fecha', how='left')
+
+        # --- Pasajeros: carga a bordo y viajes ---
+        _cols_pax = []
+        for _dfc, _nm in [(df_carga_v1, 'Carga a bordo V1'), (df_carga_v2, 'Carga a bordo V2')]:
+            if _dfc is not None and not _dfc.empty and 'Fecha' in _dfc.columns and 'Total a Bordo' in _dfc.columns:
+                _ca = _dfc.copy(); _ca['Fecha'] = pd.to_datetime(_ca['Fecha'], errors='coerce').dt.normalize()
+                _cag = _ca.groupby('Fecha')['Total a Bordo'].sum().reset_index().rename(columns={'Total a Bordo': _nm})
+                _cols_pax.append(_nm)
+                _master = _master.merge(_cag, on='Fecha', how='left')
+        if df_viajes is not None and not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
+            _vj = df_viajes.copy(); _vj['Fecha'] = pd.to_datetime(_vj['Fecha'], errors='coerce').dt.normalize()
+            _vjg = _vj.groupby('Fecha')['Total Viajes'].sum().reset_index()
+            _cols_pax.append('Total Viajes')
+            _master = _master.merge(_vjg, on='Fecha', how='left')
+
+        # --- grupos de columnas disponibles ---
+        def _disp_m(_cols):
+            return [c for c in _cols if c in _master.columns]
+        _GRUPOS = {
+            "📊 Operación (odómetro · tren-km · UMR · IDE)": _disp_m(['Odómetro [km]', 'Tren-Km [km]', 'UMR (%)', 'IDE (kWh/km)']),
+            "⚡ Energía (total · tracción · 12 kV)": _disp_m(['E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV']),
+            "⚖️ Fuentes de energía (Factura · PRMTE · SEAT)": _disp_m(['E_Fact', 'E_Prmte', 'E_Seat_T']),
+            "📈 Servicios (total del día)": _disp_m(['Servicios']),
+            "📈 Servicios por tipo": _cols_servtipo,
+            "🚆 Odómetro por tipo de tren": _cols_odotipo,
+            "📏 Km-Servicio (teórico · real · programado)": _cols_kmserv,
+            "👥 Pasajeros (carga a bordo · viajes)": _disp_m(['PAX']) + _cols_pax,
+            "📅 Calendario (tipo de día · feriado)": _disp_m(['Tipo Día', 'Nombre Feriado']),
+        }
+        _GRUPOS = {k: v for k, v in _GRUPOS.items() if v}
+
+        _RENOM = {'E_Tr': 'E_Tracción [kWh]', 'E_12': 'E_12kV [kWh]', 'E_Total': 'E_Total [kWh]',
+                  'E_Fact': 'E_Factura [kWh]', 'E_Prmte': 'E_PRMTE [kWh]', 'E_Seat_T': 'E_SEAT [kWh]',
+                  'Nombre Feriado': 'Feriado', 'PAX': 'Pasajeros (UMR)'}
+
+        st.markdown("**1 · Elegí qué datos incluir**")
+        _sel_grupos = st.multiselect("Grupos de datos disponibles", list(_GRUPOS.keys()),
+                                     default=list(_GRUPOS.keys())[:2], key="_cb_grupos",
+                                     help="Cada grupo agrega sus columnas a la tabla. Podés combinar los que quieras.")
+        _cols_elegidas = []
+        for _g in _sel_grupos:
+            for _c in _GRUPOS[_g]:
+                if _c not in _cols_elegidas:
+                    _cols_elegidas.append(_c)
+
+        if not _cols_elegidas:
+            st.info("Elegí al menos un grupo de datos para armar la tabla.")
+        else:
+            _tabla = _master[['Fecha'] + _cols_elegidas].sort_values('Fecha').reset_index(drop=True)
+            for _c in _cols_elegidas:
+                if pd.api.types.is_numeric_dtype(_tabla[_c]):
+                    _tabla[_c] = _tabla[_c].round(2)
+            _tabla = _tabla.rename(columns=_RENOM)
+            st.markdown(f"**2 · Tabla resultante — {len(_tabla)} fechas × {len(_tabla.columns) - 1} columnas**")
+            _tabla_disp = _tabla.copy()
+            _tabla_disp['Fecha'] = pd.to_datetime(_tabla_disp['Fecha']).dt.strftime('%d-%m-%Y')
+            st.dataframe(_tabla_disp, use_container_width=True, hide_index=True)
+
+            def _excel_master(_df):
+                _buf = BytesIO()
+                _dfx = _df.copy()
+                _dfx['Fecha'] = pd.to_datetime(_dfx['Fecha']).dt.strftime('%d-%m-%Y')
+                with pd.ExcelWriter(_buf, engine='openpyxl') as _w:
+                    _dfx.to_excel(_w, index=False, sheet_name='Datos')
+                return _buf.getvalue()
+            st.download_button("⬇️ Descargar Excel", data=_excel_master(_tabla),
+                               file_name="datos_merval.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="_dl_master")
