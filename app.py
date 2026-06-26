@@ -649,6 +649,27 @@ def _ncl(x, dec=0):
     out = ent + ("," + frac if frac else "")
     return ("-" if neg else "") + out
 
+def _st_df(_df, **kw):
+    """Reemplazo de st.dataframe que muestra los números en formato chileno (punto = miles,
+    coma = decimales) en todas las tablas, sin tener que formatear columna por columna."""
+    try:
+        _d = _df.copy()
+        for _c in _d.columns:
+            if not pd.api.types.is_numeric_dtype(_d[_c]):
+                continue
+            _cn = str(_c).strip().lower()
+            if _cn in ('año', 'ano', 'year', 'hora', 'semana', 'año iso', 'ano iso', 'iw', 'iy', 'mes nº', 'n°', 'nº'):
+                continue  # índices: no llevan separador de miles
+            if any(_k in str(_c) for _k in ['%', 'IDE', 'UMR', 'Ratio', 'ratio', 'prom', 'Prom', 'Z-Score', 'z-score', 'kWh/km']):
+                # magnitudes que siempre se muestran con 2 decimales
+                _d[_c] = _d[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '')
+            else:
+                # 2 decimales si el dato tiene decimales; sin decimales si es entero
+                _d[_c] = _d[_c].map(lambda _v: '' if pd.isna(_v) else (_ncl(_v, 2) if (float(_v) % 1 != 0) else _ncl(_v, 0)))
+        return st.dataframe(_d, **kw)
+    except Exception:
+        return st.dataframe(_df, **kw)
+
 def _tipo_tren(m1):
     n = pd.to_numeric(m1, errors='coerce')
     if pd.isna(n): return "Sin asignar"
@@ -1902,7 +1923,7 @@ if _seccion == _SECCIONES[0]:
                 _piv = _piv.reindex([t for t in ['XT-100', 'XT-M', 'SFE', 'Sin asignar'] if t in _piv.index])
                 _cta, _ctb = st.columns([1, 1.5])
                 with _cta:
-                    st.dataframe(_piv.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
+                    _st_df(_piv.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
                     st.caption(f"Total: {_ncl(int(_piv['Total'].sum()), 0)} servicios")
                 with _ctb:
                     _dd = _det_tren.copy()
@@ -2022,7 +2043,7 @@ if _seccion == _SECCIONES[1]:
         dv=df_ops.copy()
         dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
         st.write("### Datos Consolidados de Operaciones y Energía")
-        st.dataframe(make_columns_unique(dv), use_container_width=True)
+        _st_df(make_columns_unique(dv), use_container_width=True)
     else: st.info("No hay datos de operaciones en el rango seleccionado.")
 
 if _seccion == _SECCIONES[2]:
@@ -2032,7 +2053,7 @@ if _seccion == _SECCIONES[2]:
             st.write("### Detalle por Unidad (Tren)")
             df_tr = pd.DataFrame(all_tr)
             df_tr['Fecha'] = pd.to_datetime(df_tr['Fecha']).dt.strftime('%Y-%m-%d')
-            st.dataframe(make_columns_unique(df_tr), use_container_width=True)
+            _st_df(make_columns_unique(df_tr), use_container_width=True)
         else:
             st.markdown("### 🚆 Kilometraje por tren (odómetro UMR)")
             _km_tot_tr = float(_res_tr['Km recorridos'].sum())
@@ -2059,7 +2080,7 @@ if _seccion == _SECCIONES[2]:
                 _tp_show = _por_tipo.copy()
                 _tp_show['Km total'] = _tp_show['Km total'].map(lambda _v: f"{_ncl(_v, 0)} km")
                 _tp_show['% uso'] = _tp_show['% uso'].map(lambda _v: f"{_ncl(_v, 1)} %")
-                st.dataframe(_tp_show, use_container_width=True, hide_index=True)
+                _st_df(_tp_show, use_container_width=True, hide_index=True)
                 st.caption("% uso = participación de cada tipo en el km total de la flota.")
             st.markdown("#### Km recorridos por tren")
             _fig_kt = px.bar(_res_tr, x='Km recorridos', y='Tren', orientation='h', text='Km recorridos',
@@ -2076,11 +2097,11 @@ if _seccion == _SECCIONES[2]:
                 _pc(_no_huecos(_fig_fl), use_container_width=True, config={'locale': 'es'})
                 st.caption("Suma de km de todos los trenes por día.")
             st.markdown("#### Detalle por tren")
-            st.dataframe(_res_tr, use_container_width=True)
+            _st_df(_res_tr, use_container_width=True)
             with st.expander("Ver kilometraje diario por tren (matriz tren × día) — mostrar / ocultar", expanded=False):
                 _pk_show = _pivk_tr.copy()
                 _pk_show.columns = [pd.to_datetime(_c).strftime('%d-%m') for _c in _pk_show.columns]
-                st.dataframe(_pk_show, use_container_width=True)
+                _st_df(_pk_show, use_container_width=True)
     else: st.info("No hay datos de odómetro (UMR) cargados para el análisis por tren.")
     if all_kmserv:
         _dks = pd.DataFrame(all_kmserv)
@@ -2110,7 +2131,7 @@ if _seccion == _SECCIONES[2]:
         with st.expander("Ver tabla diaria (Kms.xTrenes, KmTren R, diferencia) — mostrar / ocultar", expanded=False):
             _at_ks = _agg_ks.copy()
             _at_ks['Fecha'] = _at_ks['Fecha'].dt.strftime('%d-%m-%Y')
-            st.dataframe(_at_ks, use_container_width=True, hide_index=True)
+            _st_df(_at_ks, use_container_width=True, hide_index=True)
 
 if _seccion == _SECCIONES[3]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
@@ -2159,7 +2180,7 @@ if _seccion == _SECCIONES[3]:
         with st.expander("Ver desglose diario — mostrar / ocultar", expanded=False):
             dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
             dv_ener['Fecha'] = dv_ener['Fecha'].dt.strftime('%d-%m-%Y')
-            st.dataframe(make_columns_unique(dv_ener), use_container_width=True, hide_index=True)
+            _st_df(make_columns_unique(dv_ener), use_container_width=True, hide_index=True)
     else: st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
 
 if _seccion == _SECCIONES[4]:
@@ -2333,9 +2354,9 @@ if _seccion == _SECCIONES[5]:
 
             with st.expander("Ver tablas de medianas"):
                 st.markdown("**Cada 15 min (kWh/15min)**")
-                st.dataframe(_p15.pivot(index='15min', columns='Tipo', values='Consumo').round(1), use_container_width=True)
+                _st_df(_p15.pivot(index='15min', columns='Tipo', values='Consumo').round(1), use_container_width=True)
                 st.markdown("**Por hora (kWh/hora)**")
-                st.dataframe(_ph.pivot(index='Hora', columns='Tipo', values='Consumo').round(1), use_container_width=True)
+                _st_df(_ph.pivot(index='Hora', columns='Tipo', values='Consumo').round(1), use_container_width=True)
     else:
         st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para este análisis de consumo nocturno.")
 
@@ -2363,7 +2384,7 @@ if _seccion == _SECCIONES[6]:
         if not atipicos.empty:
             st.warning("⚠️ Se han detectado los siguientes días con comportamiento anómalo en el consumo:")
             atipicos['Fecha'] = atipicos['Fecha'].dt.strftime('%Y-%m-%d')
-            st.dataframe(atipicos, use_container_width=True)
+            _st_df(atipicos, use_container_width=True)
         else: st.success("✅ No se detectaron valores atípicos significativos (Z-score > 2) en el periodo analizado.")
     else: st.info("No hay datos de IDE calculados para analizar.")
 
@@ -2453,24 +2474,24 @@ if _seccion == _SECCIONES[7]:
             _ca, _cb = st.columns(2)
             with _ca:
                 st.markdown("**Por día**")
-                st.dataframe(_det.groupby(['Fecha', 'Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
+                _st_df(_det.groupby(['Fecha', 'Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
             with _cb:
                 st.markdown("**Resumen (totales)**")
-                st.dataframe(_det.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
+                _st_df(_det.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
     st.divider()
     st.markdown("#### Datos THDR crudos")
     c_v1, c_v2 = st.columns(2)
     with c_v1:
         st.write("#### Datos THDR Vía 1")
         if not df_thdr_v1.empty:
-            st.dataframe(df_thdr_v1.head(50), use_container_width=True)
+            _st_df(df_thdr_v1.head(50), use_container_width=True)
             st.caption("Mostrando hasta 50 registros.")
         else: st.info("No se ha cargado/procesado THDR Vía 1.")
             
     with c_v2:
         st.write("#### Datos THDR Vía 2")
         if not df_thdr_v2.empty:
-            st.dataframe(df_thdr_v2.head(50), use_container_width=True)
+            _st_df(df_thdr_v2.head(50), use_container_width=True)
             st.caption("Mostrando hasta 50 registros.")
         else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
@@ -3015,13 +3036,13 @@ if _seccion == _SECCIONES[9]:
             st.caption("Vía 1 (Puerto -> Limache)")
             dv_c1 = df_carga_v1.copy()
             dv_c1['Fecha'] = dv_c1['Fecha'].dt.strftime('%Y-%m-%d')
-            st.dataframe(make_columns_unique(dv_c1.head(100)), use_container_width=True)
+            _st_df(make_columns_unique(dv_c1.head(100)), use_container_width=True)
             
         if not df_carga_v2.empty:
             st.caption("Vía 2 (Limache -> Puerto)")
             dv_c2 = df_carga_v2.copy()
             dv_c2['Fecha'] = dv_c2['Fecha'].dt.strftime('%Y-%m-%d')
-            st.dataframe(make_columns_unique(dv_c2.head(100)), use_container_width=True)
+            _st_df(make_columns_unique(dv_c2.head(100)), use_container_width=True)
             
     elif df_viajes.empty:
         st.info("No se han procesado datos de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
@@ -3245,7 +3266,7 @@ if _seccion == _SECCIONES[11]:
                     "Tracción doble %": (round(sub["Doble_pct"].median(), 0)
                                           if "Doble_pct" in sub and sub["Doble_pct"].notna().any() else None),
                 })
-            st.dataframe(pd.DataFrame(filas), use_container_width=True)
+            _st_df(pd.DataFrame(filas), use_container_width=True)
 
             anom = df_diag[df_diag["Nivel"] != "OK"].sort_values("Severidad", ascending=False)
             if anom.empty:
@@ -3312,7 +3333,7 @@ if _seccion == _SECCIONES[11]:
             for c in ["Doble_pct", "Viaje_prom", "Brecha_min"]:
                 if c in tabla.columns:
                     tabla[c] = pd.to_numeric(tabla[c], errors="coerce").round(1)
-            st.dataframe(make_columns_unique(tabla), use_container_width=True)
+            _st_df(make_columns_unique(tabla), use_container_width=True)
     else:
         st.info("📂 Sube archivos desde el panel lateral para generar el diagnóstico.")
 
@@ -3449,11 +3470,11 @@ if _seccion == _SECCIONES[12]:
                 _vc.columns = [_tt, 'Cantidad']
                 _vc['%'] = (_vc['Cantidad'] / _tot_sv * 100).round(1).map(lambda _v: f"{_ncl(_v, 1)} %")
                 st.markdown(f"**{_tt}**")
-                st.dataframe(_vc, use_container_width=True, hide_index=True)
+                _st_df(_vc, use_container_width=True, hide_index=True)
             st.markdown("**Composición × Tipo de servicio**")
-            st.dataframe(pd.crosstab(_det_sv['Tipo de servicio'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
+            _st_df(pd.crosstab(_det_sv['Tipo de servicio'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
             st.markdown("**Composición × Tipo de tren**")
-            st.dataframe(pd.crosstab(_det_sv['Tipo de tren'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
+            _st_df(pd.crosstab(_det_sv['Tipo de tren'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
 
 # --- Pestaña: Ahorro de energía (UMR vs meta) ---
 if _seccion == _SECCIONES[13]:
@@ -3545,7 +3566,7 @@ if _seccion == _SECCIONES[13]:
                     continue
                 _dec = 3 if _c == 'IDE' else 2
                 _tab[_c] = _tab[_c].map(lambda _v, _d=_dec: _ncl(_v, _d) if pd.notna(_v) else '—')
-            st.dataframe(_tab, use_container_width=True, hide_index=True)
+            _st_df(_tab, use_container_width=True, hide_index=True)
 
 # --- Pestaña: Fuentes de energía (Factura vs PRMTE vs SEAT) ---
 if _seccion == _SECCIONES[14]:
@@ -3613,7 +3634,7 @@ if _seccion == _SECCIONES[14]:
                 _tc['Fecha'] = _tc['Fecha'].dt.strftime('%d-%m-%Y')
                 for _s in _srcs:
                     _tc[_s] = _tc[_s].map(lambda _v: _ncl(_v, 0) if _v > 0 else '—')
-                st.dataframe(_tc, use_container_width=True, hide_index=True)
+                _st_df(_tc, use_container_width=True, hide_index=True)
 
 if _seccion == _SECCIONES[15]:
     st.header("🧱 Constructor de datos por fecha")
@@ -3747,7 +3768,7 @@ if _seccion == _SECCIONES[15]:
             st.markdown(f"**2 · Tabla resultante — {len(_tabla)} fechas × {len(_tabla.columns) - 1} columnas**")
             _tabla_disp = _tabla.copy()
             _tabla_disp['Fecha'] = pd.to_datetime(_tabla_disp['Fecha']).dt.strftime('%d-%m-%Y')
-            st.dataframe(_tabla_disp, use_container_width=True, hide_index=True)
+            _st_df(_tabla_disp, use_container_width=True, hide_index=True)
 
             def _excel_master(_df):
                 _buf = BytesIO()
