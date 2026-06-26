@@ -3683,34 +3683,58 @@ if _seccion == _SECCIONES[15]:
             _master = _master.merge(_vjg, on='Fecha', how='left')
 
         # --- grupos de columnas disponibles ---
-        def _disp_m(_cols):
-            return [c for c in _cols if c in _master.columns]
-        _GRUPOS = {
-            "📊 Operación (odómetro · tren-km · UMR · IDE)": _disp_m(['Odómetro [km]', 'Tren-Km [km]', 'UMR (%)', 'IDE (kWh/km)']),
-            "⚡ Energía (total · tracción · 12 kV)": _disp_m(['E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV']),
-            "⚖️ Fuentes de energía (Factura · PRMTE · SEAT)": _disp_m(['E_Fact', 'E_Prmte', 'E_Seat_T']),
-            "📈 Servicios (total del día)": _disp_m(['Servicios']),
-            "📈 Servicios por tipo": _cols_servtipo,
-            "🚆 Odómetro por tipo de tren": _cols_odotipo,
-            "📏 Km-Servicio (teórico · real · programado)": _cols_kmserv,
-            "👥 Pasajeros (carga a bordo · viajes)": _disp_m(['PAX']) + _cols_pax,
-            "📅 Calendario (tipo de día · feriado)": _disp_m(['Tipo Día', 'Nombre Feriado']),
-        }
-        _GRUPOS = {k: v for k, v in _GRUPOS.items() if v}
+        # --- catálogo de cada dato por separado: nombre legible -> columna real ---
+        _CATALOGO = {}
+        def _add_c(_legible, _real):
+            if _real in _master.columns:
+                _CATALOGO[_legible] = _real
+        _add_c("📊 Odómetro [km]", "Odómetro [km]")
+        _add_c("📊 Tren-Km [km]", "Tren-Km [km]")
+        _add_c("📊 UMR (%)", "UMR (%)")
+        _add_c("📊 IDE (kWh/km)", "IDE (kWh/km)")
+        _add_c("⚡ Energía Total [kWh]", "E_Total")
+        _add_c("⚡ Energía Tracción [kWh]", "E_Tr")
+        _add_c("⚡ Energía 12 kV [kWh]", "E_12")
+        _add_c("⚡ % Tracción", "% Tracción")
+        _add_c("⚡ % 12 kV", "% 12 kV")
+        _add_c("⚖️ Factura [kWh]", "E_Fact")
+        _add_c("⚖️ PRMTE [kWh]", "E_Prmte")
+        _add_c("⚖️ SEAT [kWh]", "E_Seat_T")
+        _add_c("📈 Servicios (total)", "Servicios")
+        for _c in _cols_servtipo:
+            _CATALOGO[f"📈 {_c}"] = _c
+        for _c in _cols_odotipo:
+            _CATALOGO[f"🚆 {_c}"] = _c
+        for _c in _cols_kmserv:
+            _CATALOGO[f"📏 {_c}"] = _c
+        _add_c("👥 Pasajeros (UMR)", "PAX")
+        for _c in _cols_pax:
+            _CATALOGO[f"👥 {_c}"] = _c
+        _add_c("📅 Tipo de día", "Tipo Día")
+        _add_c("📅 Feriado", "Nombre Feriado")
 
         _RENOM = {'E_Tr': 'E_Tracción [kWh]', 'E_12': 'E_12kV [kWh]', 'E_Total': 'E_Total [kWh]',
                   'E_Fact': 'E_Factura [kWh]', 'E_Prmte': 'E_PRMTE [kWh]', 'E_Seat_T': 'E_SEAT [kWh]',
                   'Nombre Feriado': 'Feriado', 'PAX': 'Pasajeros (UMR)'}
 
-        st.markdown("**1 · Elegí qué datos incluir**")
-        _sel_grupos = st.multiselect("Grupos de datos disponibles", list(_GRUPOS.keys()),
-                                     default=list(_GRUPOS.keys())[:2], key="_cb_grupos",
-                                     help="Cada grupo agrega sus columnas a la tabla. Podés combinar los que quieras.")
+        st.markdown("**1 · Elegí los datos que querés (cada uno por separado)**")
+        _opts_cat = list(_CATALOGO.keys())
+        if '_cb_cols' not in st.session_state:
+            st.session_state['_cb_cols'] = _opts_cat[:4]
+        else:
+            st.session_state['_cb_cols'] = [x for x in st.session_state['_cb_cols'] if x in _opts_cat]
+        _bca, _bcb, _bcc = st.columns([1.3, 1, 4])
+        if _bca.button("✅ Seleccionar todos", key="_btn_all_cols", use_container_width=True):
+            st.session_state['_cb_cols'] = _opts_cat; st.rerun()
+        if _bcb.button("🧹 Limpiar", key="_btn_none_cols", use_container_width=True):
+            st.session_state['_cb_cols'] = []; st.rerun()
+        _sel_legibles = st.multiselect("Datos disponibles", _opts_cat, key="_cb_cols",
+                                       help="Agregá los que quieras, uno por uno. El icono agrupa por tipo de dato.")
         _cols_elegidas = []
-        for _g in _sel_grupos:
-            for _c in _GRUPOS[_g]:
-                if _c not in _cols_elegidas:
-                    _cols_elegidas.append(_c)
+        for _l in _sel_legibles:
+            _r = _CATALOGO[_l]
+            if _r not in _cols_elegidas:
+                _cols_elegidas.append(_r)
 
         if not _cols_elegidas:
             st.info("Elegí al menos un grupo de datos para armar la tabla.")
