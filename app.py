@@ -1681,19 +1681,16 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 # --- 8. TABS DE VISUALIZACIÓN ---
 st.markdown("""<style>
 .st-key-_topbar {
-    position: fixed !important;
-    top: 0 !important; left: 0 !important; right: 0 !important;
-    z-index: 1000 !important;
+    position: sticky !important;
+    top: 3.5rem !important;
+    z-index: 999 !important;
     background-color: var(--background-color, #ffffff) !important;
-    padding: 0.2rem 1rem 0.3rem 1rem !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    padding: 0.3rem 0 0.45rem 0 !important;
+    box-shadow: 0 3px 8px -4px rgba(0,0,0,0.20);
     border-bottom: 1px solid rgba(49,51,63,0.15);
 }
 .st-key-_topbar [data-testid="stImage"] { margin: 0 !important; }
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
-/* dejar espacio para que el contenido y la barra lateral no queden tapados por la barra fija */
-[data-testid="stMainBlockContainer"], .block-container { padding-top: 5rem !important; }
-section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] { padding-top: 4.5rem !important; }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
               "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía", "🧱 Constructor de datos"]
