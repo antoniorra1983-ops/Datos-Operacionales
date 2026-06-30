@@ -1965,37 +1965,11 @@ if _seccion == _SECCIONES[0]:
                 fig_serv = px.bar(_stv, x='Fecha', y='Servicios', color='Vía', barmode='stack',
                                   color_discrete_map={'Vía 1': '#2563eb', 'Vía 2': '#f59e0b', 'Otros': '#94a3b8'},
                                   category_orders={'Vía': ['Vía 1', 'Vía 2', 'Otros']})
+                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', textfont=dict(color='white', size=10))
                 _layout_tipo(fig_serv)
                 ev_serv = _pc(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
             else:
                 st.info("Sin datos de servicios (THDR) para el filtro actual.")
-
-            st.divider()
-
-            # --- 1b. Servicios por tipo de tren (material rodante) ---
-            st.markdown("**Servicios por tipo de tren (XT-100 / XT-M / SFE)**")
-            _det_tren = detalle_servicios(df_thdr_v1, df_thdr_v2, df_resumen['Fecha'].unique())
-            if _det_tren.empty:
-                st.info("Sin datos de THDR (con Motriz) para el desglose por tipo de tren.")
-            else:
-                _piv = _det_tren.groupby(['Tipo de tren', 'Composicion']).size().unstack(fill_value=0)
-                for _c in ['Simple', 'Doble']:
-                    if _c not in _piv.columns: _piv[_c] = 0
-                _piv = _piv[['Simple', 'Doble']]; _piv['Total'] = _piv['Simple'] + _piv['Doble']
-                _piv = _piv.reindex([t for t in ['XT-100', 'XT-M', 'SFE', 'Sin asignar'] if t in _piv.index])
-                _cta, _ctb = st.columns([1, 1.5])
-                with _cta:
-                    _st_df(_piv.rename_axis("Tipo").reset_index(), use_container_width=True, hide_index=True)
-                    st.caption(f"Total: {_ncl(int(_piv['Total'].sum()), 0)} servicios")
-                with _ctb:
-                    _dd = _det_tren.copy()
-                    _dd['Tren · Comp'] = _dd['Tipo de tren'] + " · " + _dd['Composicion']
-                    _ppd = _dd.groupby(['Fecha', 'Tren · Comp']).size().reset_index(name='Servicios')
-                    _fig_tren = px.bar(_ppd, x='Fecha', y='Servicios', color='Tren · Comp', barmode='stack')
-                    _fig_tren.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=320,
-                                            legend=dict(orientation='h', y=1.18, x=0, font=dict(size=10)), xaxis_title=None)
-                    _pc(_no_huecos(_fig_tren), use_container_width=True, config={'locale': 'es'})
-            st.caption("Tipo de servicio = patrón Origen→Destino de la malla. XT-100 = M01-M27 · XT-M = XM28-XM35 · SFE = otras unidades (siempre simple).")
 
             st.divider()
 
@@ -2009,7 +1983,7 @@ if _seccion == _SECCIONES[0]:
                     _card_metric(_cvj[0], "Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
                     _card_metric(_cvj[1], "Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
                 fig_pax = px.bar(_vd, x='Fecha', y='Total Viajes')
-                fig_pax.update_traces(marker_color='#2563eb', hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
+                fig_pax.update_traces(marker_color='#2563eb', texttemplate='%{y:,.0f}', textposition='inside', textangle=-90, textfont=dict(color='white', size=10), hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
                 _layout_tipo(fig_pax)
                 ev_pax = _pc(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
             else:
@@ -2017,33 +1991,40 @@ if _seccion == _SECCIONES[0]:
 
             st.divider()
 
-            # --- 3. Tren-Km por tipo de servicio (THDR) ---
-            st.markdown("**Tren-Km por tipo de servicio (THDR)**")
-            _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
-            if not _st.empty and 'TrenKm' in _st.columns:
-                fig_tk = px.bar(_st, x='Fecha', y='TrenKm', color='Tipo_Servicio', barmode='stack',
-                                color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
-                _layout_tipo(fig_tk)
-                ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
-            else:
-                st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
-            st.caption("Tipo de servicio = patrón Origen→Destino detectado en la malla THDR. El Tren-Km usa la distancia real de cada servicio según las estaciones por las que pasa (archivo Km entre estaciones), ×2 en tracción doble. Los servicios cortos cuentan su recorrido efectivo, no la línea completa.")
+            # --- 3. Tren-Km (UMR) ---
+            _df_tk = df_resumen[df_resumen['Tren-Km [km]'] >= 0] if 'Tren-Km [km]' in df_resumen.columns else pd.DataFrame()
+            c_chart, c_card = st.columns([3, 1])
+            with c_chart:
+                if not _df_tk.empty:
+                    fig_tk = px.bar(_df_tk, x='Fecha', y='Tren-Km [km]', color_discrete_sequence=["#0a7d3e"],
+                                    hover_data=hover_config, title="Tren-Km Real (UMR)")
+                    fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                    fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                         bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                    ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+                else:
+                    st.info("Sin datos de Tren-Km (UMR) para el filtro actual.")
+            with c_card:
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                st.metric("Tren-Km Total", f"{_ncl(_df_tk['Tren-Km [km]'].sum() if not _df_tk.empty else 0, 1)} km")
+            st.caption("Tren-Km del archivo Resumen UMR (recorrido real comercial). Se omiten días con valor negativo (lectura errónea).")
 
             st.divider()
 
             # --- 4. Odómetro real (UMR) ---
+            _df_odo = df_resumen[df_resumen['Odómetro [km]'] >= 0] if 'Odómetro [km]' in df_resumen.columns else df_resumen
             c_chart, c_card = st.columns([3, 1])
             with c_chart:
-                fig_odo = px.bar(df_resumen, x='Fecha', y='Odómetro [km]',
+                fig_odo = px.bar(_df_odo, x='Fecha', y='Odómetro [km]',
                                  color_discrete_sequence=["#005195"],
                                  hover_data=hover_config, title="Odómetro Real (UMR)")
-                fig_odo.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_odo.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_odo = _pc(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
             with c_card:
                 st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("Odómetro Total", f"{_ncl(df_resumen['Odómetro [km]'].sum(), 2)} km")
+                st.metric("Odómetro Total", f"{_ncl(_df_odo['Odómetro [km]'].sum(), 1)} km")
 
             st.divider()
 
@@ -2053,7 +2034,7 @@ if _seccion == _SECCIONES[0]:
                 fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)',
                                  color_discrete_sequence=["#E85500"],
                                  hover_data=hover_config, title="Tasa de Acoplamiento (UMR %)")
-                fig_umr.update_traces(texttemplate='%{_ncl(y, 2)}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_umr.update_traces(texttemplate='%{y:.1f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_umr = _pc(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
@@ -2074,7 +2055,7 @@ if _seccion == _SECCIONES[0]:
                                   barmode='stack',
                                   color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                                   hover_data=hover_config, title="Consumo Energético (kWh)")
-                fig_ener.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                        legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                        bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
@@ -2092,7 +2073,7 @@ if _seccion == _SECCIONES[0]:
                 fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)',
                                      color_discrete_sequence=["#E85500"],
                                      hover_data=hover_config, title="Desempeño Energético (IDE)")
-                fig_ide_bar.update_traces(texttemplate='%{_ncl(y, 2)}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+                fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
                 fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                           bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                 ev_ide_bar = _pc(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
