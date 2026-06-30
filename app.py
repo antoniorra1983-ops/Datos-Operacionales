@@ -3816,7 +3816,7 @@ if _seccion == _SECCIONES[15]:
 
 if _seccion == _SECCIONES[16]:
     st.header("🔮 Proyección de energía")
-    st.caption("Proyecta por tipo de día (laboral, sábado, domingo, festivo) usando la mediana del histórico. Tracción y 12 kV se calculan por separado sobre el odómetro (Tren-Km programado ajustado por el UMR) y el total es la suma de ambos.")
+    st.caption("Proyecta por tipo de día (laboral, sábado, domingo, festivo) con la mediana del histórico. La tracción se calcula con su IDE sobre el odómetro (Tren-Km programado ajustado por el UMR); el 12 kV se proyecta con la mediana de kWh por día; el total es la suma de ambos.")
 
     _use_seat = ('E_Seat_T' in df_ops.columns and df_ops['E_Seat_T'].sum() > 0)
     _c_tr = 'E_Seat_Tr' if (_use_seat and 'E_Seat_Tr' in df_ops.columns) else ('E_Tr' if 'E_Tr' in df_ops.columns else None)
@@ -3833,7 +3833,7 @@ if _seccion == _SECCIONES[16]:
             wd = d.weekday()
             return 'Sábado' if wd == 5 else 'Domingo' if wd == 6 else 'Laboral'
 
-        # 1) Tren-Km por día (programado y realizado; efectivo = realizado si hay, si no programado)
+        # 1) Tren-Km por día (efectivo = realizado si hay, si no programado)
         _dk = pd.DataFrame(all_kmserv).groupby('Fecha', as_index=False).agg(
             TrenKm_Prog=('KmTrenP', 'sum'), TrenKm_Real=('KmTrenR', 'sum'))
         _dk['TrenKm_Efec'] = np.where(_dk['TrenKm_Real'] > 0, _dk['TrenKm_Real'], _dk['TrenKm_Prog'])
@@ -3846,7 +3846,6 @@ if _seccion == _SECCIONES[16]:
         _m['Tipo'] = _m['Fecha'].apply(lambda f: _tipo4(pd.to_datetime(f).date()))
         _m['UMR'] = _m['TrenKm_Efec'] / _m['Odom']
         _m['IDE_tr'] = _m['E_Tr'] / _m['Odom']
-        _m['IDE_12'] = _m['E_12'] / _m['Odom']
 
         if _m.empty:
             st.warning("No hay días con Tren-Km, odómetro y energía a la vez. Revisá que UMR y SEAT cubran las mismas fechas.")
@@ -3858,10 +3857,9 @@ if _seccion == _SECCIONES[16]:
             # Perfil por tipo de día con MEDIANA del histórico
             _perfil = _m.groupby('Tipo').agg(Dias=('Fecha', 'count'),
                     TrenKm_Prog=('TrenKm_Prog', 'median'), UMR=('UMR', 'median'),
-                    IDE_tr=('IDE_tr', 'median'), IDE_12=('IDE_12', 'median')).reset_index()
+                    IDE_tr=('IDE_tr', 'median'), E12_dia=('E_12', 'median')).reset_index()
             _perfil['Odom_proy'] = _perfil['TrenKm_Prog'] / _perfil['UMR']
             _perfil['Tracc_dia'] = _perfil['IDE_tr'] * _perfil['Odom_proy']
-            _perfil['E12_dia'] = _perfil['IDE_12'] * _perfil['Odom_proy']
             _perfil['Total_dia'] = _perfil['Tracc_dia'] + _perfil['E12_dia']
             _pmap = _perfil.set_index('Tipo').to_dict('index')
 
@@ -3881,16 +3879,16 @@ if _seccion == _SECCIONES[16]:
             _dias_fut = pd.date_range(_fi, _ff)
             _cont = pd.Series([_tipo4(d.date()) for d in _dias_fut]).value_counts()
 
-            _filas = []; _tot_tr = _tot_12 = _tot = 0.0
+            _filas = []; _tot_tr = _tot_12 = _tot_odom = 0.0
             for t in ['Laboral', 'Sábado', 'Domingo', 'Festivo']:
                 n = int(_cont.get(t, 0))
                 if n == 0:
                     continue
                 if t in _pmap:
                     p = _pmap[t]
-                    _tot_tr += n * p['Tracc_dia']; _tot_12 += n * p['E12_dia']
-                    _tot += n * (p['Tracc_dia'] if _tipo_e == "Tracción" else p['Total_dia'])
-                    fila = {'Tipo de día': t, 'Días': n, 'Tren-Km/día': round(p['TrenKm_Prog'], 1), 'UMR': round(p['UMR'] * 100, 1)}
+                    _tot_tr += n * p['Tracc_dia']; _tot_12 += n * p['E12_dia']; _tot_odom += n * p['Odom_proy']
+                    fila = {'Tipo de día': t, 'Días': n, 'Tren-Km/día': round(p['TrenKm_Prog'], 1),
+                            'UMR %': round(p['UMR'] * 100, 1), 'Odómetro proy/día': round(p['Odom_proy'], 0)}
                     if _tipo_e == "Total":
                         fila.update({'Tracción/día': round(p['Tracc_dia'], 0), '12 kV/día': round(p['E12_dia'], 0),
                                      'Total/día': round(p['Total_dia'], 0), 'Total período': round(n * p['Total_dia'], 0)})
@@ -3899,47 +3897,63 @@ if _seccion == _SECCIONES[16]:
                                      'Tracción período': round(n * p['Tracc_dia'], 0)})
                     _filas.append(fila)
                 else:
-                    _filas.append({'Tipo de día': t, 'Días': n, 'Tren-Km/día': None, 'UMR': None})
+                    _filas.append({'Tipo de día': t, 'Días': n, 'Tren-Km/día': None, 'UMR %': None, 'Odómetro proy/día': None})
             _tab = pd.DataFrame(_filas)
+            _tot_total = _tot_tr + _tot_12
+            _tot_princ = _tot_tr if _tipo_e == "Tracción" else _tot_total
+
+            # Totales reales del histórico cargado
+            _odom_real = float(_m['Odom'].sum()); _tracc_real = float(_m['E_Tr'].sum()); _e12_real = float(_m['E_12'].sum())
+            _total_real = _tracc_real + _e12_real
 
             _ndias = int(len(_dias_fut))
             if _tipo_e == "Total":
                 _k1, _k2, _k3, _k4 = st.columns(4)
-                _k1.metric(f"Energía total ({_ndias} días)", f"{_ncl(_tot, 0)} kWh")
+                _k1.metric(f"Energía total ({_ndias} días)", f"{_ncl(_tot_total, 0)} kWh")
                 _k2.metric("Tracción", f"{_ncl(_tot_tr, 0)} kWh")
                 _k3.metric("12 kV", f"{_ncl(_tot_12, 0)} kWh")
-                _k4.metric("Promedio diario", f"{_ncl(_tot / _ndias if _ndias else 0, 0)} kWh")
+                _k4.metric("Odómetro proyectado", f"{_ncl(_tot_odom, 0)} km")
             else:
                 _k1, _k2, _k3 = st.columns(3)
-                _k1.metric(f"Tracción ({_ndias} días)", f"{_ncl(_tot, 0)} kWh")
-                _k2.metric("Promedio diario", f"{_ncl(_tot / _ndias if _ndias else 0, 0)} kWh")
-                _k3.metric("Período", f"{pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}")
+                _k1.metric(f"Tracción ({_ndias} días)", f"{_ncl(_tot_tr, 0)} kWh")
+                _k2.metric("Odómetro proyectado", f"{_ncl(_tot_odom, 0)} km")
+                _k3.metric("Promedio diario", f"{_ncl(_tot_tr / _ndias if _ndias else 0, 0)} kWh")
 
             st.markdown("**Detalle por tipo de día**")
             _st_df(_tab, use_container_width=True, hide_index=True)
 
+            # Tabla resumen: Real (histórico) + Proyectado
+            st.markdown("**Real + proyectado**")
+            _resumen = pd.DataFrame({
+                'Concepto': ['Odómetro [km]', 'Tracción [kWh]', '12 kV [kWh]', 'Total [kWh]'],
+                'Real (histórico)': [round(_odom_real, 0), round(_tracc_real, 0), round(_e12_real, 0), round(_total_real, 0)],
+                'Proyectado': [round(_tot_odom, 0), round(_tot_tr, 0), round(_tot_12, 0), round(_tot_total, 0)]})
+            _resumen['Real + Proyectado'] = (_resumen['Real (histórico)'] + _resumen['Proyectado']).round(0)
+            _st_df(_resumen, use_container_width=True, hide_index=True)
+            st.caption(f"Real = {len(_m)} día(s) cargados ({pd.to_datetime(_m['Fecha']).min():%d-%m-%Y} → {pd.to_datetime(_m['Fecha']).max():%d-%m-%Y}). Proyectado = {_ndias} día(s) ({pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}).")
+
             # Gráfico histórico + proyección
-            _m['E_hist'] = _m['E_Tr'] + _m['E_12'] if _tipo_e == "Total" else _m['E_Tr']
+            _m['E_hist'] = (_m['E_Tr'] + _m['E_12']) if _tipo_e == "Total" else _m['E_Tr']
             _ms = _m.sort_values('Fecha')
             _ps = pd.DataFrame({'Fecha': _dias_fut})
             _ps['Tipo'] = [_tipo4(d.date()) for d in _dias_fut]
             _kk = 'Total_dia' if _tipo_e == "Total" else 'Tracc_dia'
             _ps['E'] = _ps['Tipo'].map(lambda t: _pmap.get(t, {}).get(_kk, np.nan))
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=_ms['Fecha'], y=_ms['E_hist'], mode='lines+markers', name='Histórico', line=dict(color='#1f4e79')))
+            fig.add_trace(go.Scatter(x=_ms['Fecha'], y=_ms['E_hist'], mode='lines+markers', name='Real', line=dict(color='#1f4e79')))
             fig.add_trace(go.Scatter(x=_ps['Fecha'], y=_ps['E'], mode='lines+markers', name='Proyección', line=dict(color='#E85500', dash='dash')))
-            fig.update_layout(title=f'Energía {_tipo_e.lower()} — histórico y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
+            fig.update_layout(title=f'Energía {_tipo_e.lower()} — real y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
             st.plotly_chart(fig, use_container_width=True, key='proj_td')
 
             with st.expander("Ver base del cálculo por tipo de día (mediana del histórico)"):
-                _pv = _perfil[['Tipo', 'Dias', 'TrenKm_Prog', 'UMR', 'Odom_proy', 'IDE_tr', 'IDE_12', 'Tracc_dia', 'E12_dia', 'Total_dia']].copy()
+                _pv = _perfil[['Tipo', 'Dias', 'TrenKm_Prog', 'UMR', 'Odom_proy', 'IDE_tr', 'Tracc_dia', 'E12_dia', 'Total_dia']].copy()
                 _pv['UMR'] = (_pv['UMR'] * 100).round(2)
-                for _c in ['TrenKm_Prog', 'Odom_proy', 'Tracc_dia', 'E12_dia', 'Total_dia']:
-                    _pv[_c] = _pv[_c].round(0)
-                _pv['IDE_tr'] = _pv['IDE_tr'].round(3); _pv['IDE_12'] = _pv['IDE_12'].round(3)
-                _pv.columns = ['Tipo', 'Días', 'Tren-Km/día', 'UMR %', 'Odóm. proy.', 'IDE tracc.', 'IDE 12kV', 'Tracción/día', '12 kV/día', 'Total/día']
+                for _col in ['TrenKm_Prog', 'Odom_proy', 'Tracc_dia', 'E12_dia', 'Total_dia']:
+                    _pv[_col] = _pv[_col].round(0)
+                _pv['IDE_tr'] = _pv['IDE_tr'].round(3)
+                _pv.columns = ['Tipo', 'Días', 'Tren-Km/día', 'UMR %', 'Odómetro proy.', 'IDE tracc.', 'Tracción/día', '12 kV/día', 'Total/día']
                 _st_df(_pv, use_container_width=True, hide_index=True)
-                st.caption("Odóm. proyectado = Tren-Km programado ÷ UMR. Tracción = IDE tracc. × odóm. · 12 kV = IDE 12kV × odóm.")
+                st.caption("Odómetro proy. = Tren-Km programado ÷ UMR · Tracción/día = IDE tracc. × odómetro · 12 kV/día = mediana de kWh de 12 kV.")
 
             _avisos = []
             _pocos = _perfil[_perfil['Dias'] < 2]['Tipo'].tolist()
@@ -3949,9 +3963,11 @@ if _seccion == _SECCIONES[16]:
                 st.caption("⚠️ " + "; ".join(_avisos) + ". Se afina al cargar más datos.")
 
             with st.expander("Descargar proyección (Excel)"):
-                def _xls(_df):
+                def _xls(_d1, _d2):
                     _b = BytesIO()
-                    with pd.ExcelWriter(_b, engine='openpyxl') as _w: _df.to_excel(_w, index=False, sheet_name='Proyeccion')
+                    with pd.ExcelWriter(_b, engine='openpyxl') as _w:
+                        _d1.to_excel(_w, index=False, sheet_name='Por tipo de día')
+                        _d2.to_excel(_w, index=False, sheet_name='Real + Proyectado')
                     return _b.getvalue()
-                st.download_button("⬇️ Descargar", data=_xls(_tab), file_name="proyeccion_energia_tipodia.xlsx",
+                st.download_button("⬇️ Descargar", data=_xls(_tab, _resumen), file_name="proyeccion_energia_tipodia.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_projtd")
