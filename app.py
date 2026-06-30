@@ -1958,11 +1958,19 @@ if _seccion == _SECCIONES[0]:
 
             # --- 1. Servicios por vía ---
             st.markdown("**Servicios por vía**")
-            _tarjeta_solo_via(_st, 'Servicios', _fmt_int, "Total Servicios")
-            if not _st.empty:
-                _stv = _st.copy(); _stv['Vía'] = _stv['Tipo_Servicio'].apply(_via_de)
-                _stv = _stv.groupby(['Fecha', 'Vía'], as_index=False)['Servicios'].sum()
-                fig_serv = px.bar(_stv, x='Fecha', y='Servicios', color='Vía', barmode='stack',
+            _stv = _st.copy()
+            if not _stv.empty:
+                _stv['Vía'] = _stv['Tipo_Servicio'].apply(_via_de)
+                _pv_s = _stv.groupby('Vía')['Servicios'].sum()
+            else:
+                _pv_s = pd.Series(dtype=float)
+            _mc = st.columns(4)
+            _mc[0].metric("Total Servicios", _fmt_int(_st['Servicios'].sum() if not _st.empty else 0))
+            _mc[1].metric("Vía 1", _fmt_int(_pv_s.get('Vía 1', 0)))
+            _mc[2].metric("Vía 2", _fmt_int(_pv_s.get('Vía 2', 0)))
+            if not _stv.empty:
+                _stg = _stv.groupby(['Fecha', 'Vía'], as_index=False)['Servicios'].sum()
+                fig_serv = px.bar(_stg, x='Fecha', y='Servicios', color='Vía', barmode='stack',
                                   color_discrete_map={'Vía 1': '#2563eb', 'Vía 2': '#f59e0b', 'Otros': '#94a3b8'},
                                   category_orders={'Vía': ['Vía 1', 'Vía 2', 'Otros']})
                 fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', textfont=dict(color='white', size=10))
@@ -1978,10 +1986,9 @@ if _seccion == _SECCIONES[0]:
             if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
                 _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
                 _dias_vj = int(_vd['Fecha'].nunique())
-                with st.container(border=True):
-                    _cvj = st.columns([1.3, 1])
-                    _card_metric(_cvj[0], "Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
-                    _card_metric(_cvj[1], "Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
+                _mc = st.columns(4)
+                _mc[0].metric("Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
+                _mc[1].metric("Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
                 fig_pax = px.bar(_vd, x='Fecha', y='Total Viajes')
                 fig_pax.update_traces(marker_color='#2563eb', texttemplate='%{y:,.0f}', textposition='inside', textangle=-90, textfont=dict(color='white', size=10), hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
                 _layout_tipo(fig_pax)
@@ -1992,98 +1999,81 @@ if _seccion == _SECCIONES[0]:
             st.divider()
 
             # --- 3. Tren-Km (UMR) ---
+            st.markdown("**Tren-Km (UMR)**")
             _df_tk = df_resumen[df_resumen['Tren-Km [km]'] >= 0] if 'Tren-Km [km]' in df_resumen.columns else pd.DataFrame()
-            c_chart, c_card = st.columns([3, 1])
-            with c_chart:
-                if not _df_tk.empty:
-                    fig_tk = px.bar(_df_tk, x='Fecha', y='Tren-Km [km]', color_discrete_sequence=["#0a7d3e"],
-                                    hover_data=hover_config, title="Tren-Km Real (UMR)")
-                    fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-                    fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                         bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                    ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
-                else:
-                    st.info("Sin datos de Tren-Km (UMR) para el filtro actual.")
-            with c_card:
-                st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("Tren-Km Total", f"{_ncl(_df_tk['Tren-Km [km]'].sum() if not _df_tk.empty else 0, 1)} km")
+            _mc = st.columns(4)
+            _mc[0].metric("Tren-Km Total", f"{_ncl(_df_tk['Tren-Km [km]'].sum() if not _df_tk.empty else 0, 1)} km")
+            if not _df_tk.empty:
+                fig_tk = px.bar(_df_tk, x='Fecha', y='Tren-Km [km]', color_discrete_sequence=["#0a7d3e"],
+                                hover_data=hover_config, title="Tren-Km Real (UMR)")
+                fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+                fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                     bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+            else:
+                st.info("Sin datos de Tren-Km (UMR) para el filtro actual.")
             st.caption("Tren-Km del archivo Resumen UMR (recorrido real comercial). Se omiten días con valor negativo (lectura errónea).")
 
             st.divider()
 
             # --- 4. Odómetro real (UMR) ---
+            st.markdown("**Odómetro real (UMR)**")
             _df_odo = df_resumen[df_resumen['Odómetro [km]'] >= 0] if 'Odómetro [km]' in df_resumen.columns else df_resumen
-            c_chart, c_card = st.columns([3, 1])
-            with c_chart:
-                fig_odo = px.bar(_df_odo, x='Fecha', y='Odómetro [km]',
-                                 color_discrete_sequence=["#005195"],
-                                 hover_data=hover_config, title="Odómetro Real (UMR)")
-                fig_odo.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-                fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_odo = _pc(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
-            with c_card:
-                st.markdown("<br><br>", unsafe_allow_html=True)
-                st.metric("Odómetro Total", f"{_ncl(_df_odo['Odómetro [km]'].sum(), 1)} km")
+            _mc = st.columns(4)
+            _mc[0].metric("Odómetro Total", f"{_ncl(_df_odo['Odómetro [km]'].sum(), 1)} km")
+            fig_odo = px.bar(_df_odo, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
+                             hover_data=hover_config, title="Odómetro Real (UMR)")
+            fig_odo.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+            fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                  bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            ev_odo = _pc(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
 
             st.divider()
 
             # --- 5. Tasa de acoplamiento (UMR %) ---
-            c_chart, c_card = st.columns([3, 1])
-            with c_chart:
-                fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)',
-                                 color_discrete_sequence=["#E85500"],
-                                 hover_data=hover_config, title="Tasa de Acoplamiento (UMR %)")
-                fig_umr.update_traces(texttemplate='%{y:.1f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
-                fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_umr = _pc(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
-            with c_card:
-                st.markdown("<br><br>", unsafe_allow_html=True)
-                _tot_tk_umr = df_resumen['Tren-Km [km]'].sum()
-                _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
-                umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
-                st.metric("Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
+            st.markdown("**Tasa de acoplamiento (UMR %)**")
+            _tot_tk_umr = df_resumen['Tren-Km [km]'].sum(); _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
+            umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
+            _mc = st.columns(4)
+            _mc[0].metric("Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
+            fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', color_discrete_sequence=["#E85500"],
+                             hover_data=hover_config, title="Tasa de Acoplamiento (UMR %)")
+            fig_umr.update_traces(texttemplate='%{y:.1f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+            fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                  bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            ev_umr = _pc(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
 
             st.divider()
 
             # --- 6. Consumo energético (Tracción + Baja Tensión) ---
+            st.markdown("**Consumo energético (kWh)**")
             df_plot_ener = df_resumen.rename(columns={'E_Tr': 'Tracción', 'E_12': 'Baja Tensión'})
-            c_chart, c_card = st.columns([3, 1])
-            with c_chart:
-                fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'],
-                                  barmode='stack',
-                                  color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
-                                  hover_data=hover_config, title="Consumo Energético (kWh)")
-                fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-                fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                       legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_ener = _pc(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
-            with c_card:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.metric("Total Tracción", f"{_ncl(df_plot_ener['Tracción'].sum(), 2)} kWh")
-                st.metric("Total Baja Tensión", f"{_ncl(df_plot_ener['Baja Tensión'].sum(), 2)} kWh")
+            _mc = st.columns(4)
+            _mc[0].metric("Total Tracción", f"{_ncl(df_plot_ener['Tracción'].sum(), 1)} kWh")
+            _mc[1].metric("Total Baja Tensión", f"{_ncl(df_plot_ener['Baja Tensión'].sum(), 1)} kWh")
+            fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
+                              color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
+                              hover_data=hover_config, title="Consumo Energético (kWh)")
+            fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
+            fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                   legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                   bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            ev_ener = _pc(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
 
             st.divider()
 
             # --- 7. Desempeño energético (IDE) ---
-            c_chart, c_card = st.columns([3, 1])
-            with c_chart:
-                fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)',
-                                     color_discrete_sequence=["#E85500"],
-                                     hover_data=hover_config, title="Desempeño Energético (IDE)")
-                fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
-                fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                          bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                ev_ide_bar = _pc(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
-            with c_card:
-                st.markdown("<br><br>", unsafe_allow_html=True)
-                _tot_tr_ide = df_resumen['E_Tr'].sum()
-                _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
-                ide_global = (_tot_tr_ide / _tot_odo_ide) if _tot_odo_ide > 0 else 0
-                st.metric("IDE Global", f"{_ncl(ide_global, 2)} kWh/km")
-
+            st.markdown("**Desempeño energético (IDE)**")
+            _tot_tr_ide = df_resumen['E_Tr'].sum(); _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
+            ide_global = (_tot_tr_ide / _tot_odo_ide) if _tot_odo_ide > 0 else 0
+            _mc = st.columns(4)
+            _mc[0].metric("IDE Global", f"{_ncl(ide_global, 2)} kWh/km")
+            fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', color_discrete_sequence=["#E85500"],
+                                 hover_data=hover_config, title="Desempeño Energético (IDE)")
+            fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
+            fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            ev_ide_bar = _pc(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 if _seccion == _SECCIONES[1]:
