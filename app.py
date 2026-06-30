@@ -3816,98 +3816,127 @@ if _seccion == _SECCIONES[15]:
 
 if _seccion == _SECCIONES[16]:
     st.header("🔮 Proyección de energía")
-    st.caption("Proyecta el consumo a futuro a partir de la energía medida por el SEAT y del uso del material rodante (UMR).")
+    st.caption("Proyecta el consumo por tipo de día (laboral, sábado, domingo, festivo): cruza el Tren-Km de la malla (hoja KM-Servicio) con el consumo por km del SEAT.")
 
-    if 'E_Seat_T' in df_ops.columns and df_ops['E_Seat_T'].sum() > 0:
-        _pb = df_ops[df_ops['E_Seat_T'] > 0].copy(); _col_e = 'E_Seat_T'; _lbl_e = 'Energía SEAT'
-    elif 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
-        _pb = df_ops[df_ops['E_Total'] > 0].copy(); _col_e = 'E_Total'; _lbl_e = 'Energía total'
-        st.info("No hay datos del SEAT cargados; se proyecta con la energía consolidada disponible.")
+    _ecol = 'E_Seat_T' if ('E_Seat_T' in df_ops.columns and df_ops['E_Seat_T'].sum() > 0) else ('E_Total' if ('E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0) else None)
+    if not all_kmserv:
+        st.warning("Carga el Excel UMR (hoja KM-Servicio) para tener el Tren-Km de la malla, y aprieta **🔄 Cargar / actualizar datos**.")
+    elif _ecol is None:
+        st.warning("Carga los datos de energía (SEAT) para calcular el consumo por km.")
     else:
-        _pb = pd.DataFrame()
+        def _tipo4(d):
+            if d is None: return None
+            if d in chile_holidays: return 'Festivo'
+            wd = d.weekday()
+            return 'Sábado' if wd == 5 else 'Domingo' if wd == 6 else 'Laboral'
 
-    if _pb.empty or len(_pb) < 2:
-        st.warning("Se necesitan al menos 2 días con energía (SEAT o consolidada) para proyectar. Sube los archivos SEAT y UMR y aprieta **🔄 Cargar / actualizar datos**.")
-    else:
-        _pb = _pb.sort_values('Fecha').reset_index(drop=True)
-        _f0 = pd.to_datetime(_pb['Fecha']).min()
-        _pb['_t'] = (pd.to_datetime(_pb['Fecha']) - _f0).dt.days
-        _umr_prom = float(_pb['UMR (%)'].mean()) if 'UMR (%)' in _pb.columns else 0.0
-        _odo_prom = float(_pb['Odómetro [km]'].mean()) if 'Odómetro [km]' in _pb.columns else 0.0
+        # 1) Tren-Km por día desde KM-Servicio (programado y realizado; efectivo = realizado si hay)
+        _dk = pd.DataFrame(all_kmserv).groupby('Fecha', as_index=False).agg(
+            TrenKm_Prog=('KmTrenP', 'sum'), TrenKm_Real=('KmTrenR', 'sum'))
+        _dk['TrenKm_Efec'] = np.where(_dk['TrenKm_Real'] > 0, _dk['TrenKm_Real'], _dk['TrenKm_Prog'])
 
-        if len(_pb) < 7:
-            st.caption(f"⚠️ Proyección preliminar: solo hay {len(_pb)} día(s) cargado(s). Mientras más historia cargues, más confiable es la proyección.")
+        # 2) Energía por día desde el SEAT (total y tracción)
+        _en = df_ops[['Fecha', _ecol]].copy().rename(columns={_ecol: 'E_Tot'})
+        _tr_src = 'E_Seat_Tr' if (_ecol == 'E_Seat_T' and 'E_Seat_Tr' in df_ops.columns) else ('E_Tr' if 'E_Tr' in df_ops.columns else None)
+        _en['E_Tr'] = df_ops[_tr_src].values if _tr_src else np.nan
 
-        _c1, _c2, _c3 = st.columns(3)
-        with _c1:
-            _met = st.selectbox("Método", ["Tendencia en el tiempo", "Energía vs kilómetros (SEAT + UMR)", "Escenario de crecimiento"], key="_proj_met")
-        with _c2:
-            _hz = int(st.number_input("Días a proyectar", min_value=1, max_value=730, value=30, step=1, key="_proj_hz"))
-        with _c3:
-            if _met == "Escenario de crecimiento":
-                _crec = float(st.number_input("Variación (% mensual)", min_value=-50.0, max_value=100.0, value=0.0, step=1.0, key="_proj_cr"))
-            elif _met.startswith("Energía vs"):
-                _umr_obj = float(st.number_input("UMR objetivo (%)", min_value=10.0, max_value=200.0, value=round(_umr_prom, 1), step=1.0, key="_proj_um"))
-            else:
-                st.caption("Extrapola la tendencia de la serie histórica.")
+        _m = _dk.merge(_en, on='Fecha', how='inner')
+        _m = _m[(_m['TrenKm_Efec'] > 0) & (_m['E_Tot'] > 0)].copy()
+        _m['Tipo'] = _m['Fecha'].apply(lambda f: _tipo4(pd.to_datetime(f).date()))
 
-        _ult = pd.to_datetime(_pb['Fecha']).max()
-        _fut = pd.date_range(_ult + pd.Timedelta(days=1), periods=_hz)
-        _tf = ((_fut - _f0).days).values.astype(float)
-
-        if _met == "Tendencia en el tiempo":
-            _co = np.polyfit(_pb['_t'].values, _pb[_col_e].values, 1)
-            _proy = np.polyval(_co, _tf); _fit = np.polyval(_co, _pb['_t'].values)
-            _desc = f"Tendencia lineal del consumo: {'+' if _co[0] >= 0 else ''}{_ncl(_co[0],1)} kWh por día."
-        elif _met.startswith("Energía vs"):
-            _km = _pb['Tren-Km [km]'].values
-            _co = np.array([0.0, float(_pb[_col_e].mean())]) if np.ptp(_km) == 0 else np.polyfit(_km, _pb[_col_e].values, 1)
-            _km_fut = (_umr_obj / 100.0) * _odo_prom
-            _proy = np.polyval(_co, np.full(_hz, _km_fut)); _fit = np.polyval(_co, _km)
-            _desc = f"≈ {_ncl(_co[0],2)} kWh por km. Con UMR objetivo {_ncl(_umr_obj,1)}% sobre {_ncl(_odo_prom,0)} km/día de odómetro → {_ncl(_km_fut,0)} km de servicio/día."
+        if _m.empty:
+            st.warning("No hay días con Tren-Km y energía a la vez. Revisá que los archivos UMR y SEAT cubran las mismas fechas.")
         else:
-            _base = float(_pb[_col_e].mean())
-            _td = (1 + _crec / 100.0) ** (1/30.0) - 1
-            _proy = _base * (1 + _td) ** np.arange(1, _hz + 1); _fit = np.full(len(_pb), _base)
-            _desc = f"Base {_ncl(_base,0)} kWh/día con {'+' if _crec >= 0 else ''}{_ncl(_crec,1)}% al mes."
+            _c1, _c2 = st.columns([1, 2])
+            with _c1:
+                _tipo_e = st.radio("Energía a proyectar", ["Total", "Tracción"], horizontal=True, key="_proj_te")
+            _ecalc = 'E_Tot' if _tipo_e == "Total" else 'E_Tr'
+            if _m[_ecalc].isna().all():
+                st.warning("No hay datos de energía de tracción cargados; usá la opción Total.")
+            else:
+                # Consumo por km (kWh/Tren-Km) por tipo de día, ponderado por el histórico cargado
+                _perfil = _m.groupby('Tipo').agg(Dias=('Fecha', 'count'),
+                        TrenKm_Prog=('TrenKm_Prog', 'mean'),
+                        E_sum=(_ecalc, 'sum'), TrenKm_sum=('TrenKm_Efec', 'sum')).reset_index()
+                _perfil['kWh_km'] = _perfil['E_sum'] / _perfil['TrenKm_sum']
+                _perfil['Energia_dia'] = _perfil['TrenKm_Prog'] * _perfil['kWh_km']
+                _pmap = _perfil.set_index('Tipo').to_dict('index')
 
-        _proy = np.clip(np.asarray(_proy, dtype=float), 0, None)
-        _ssr = float(np.sum((_pb[_col_e].values - _fit) ** 2))
-        _sst = float(np.sum((_pb[_col_e].values - _pb[_col_e].mean()) ** 2))
-        _r2 = (1 - _ssr / _sst) if _sst > 0 else 0.0
+                # Si no hay festivos en el histórico, uso el perfil de domingo (mallas casi iguales)
+                _fb_fest = False
+                if 'Festivo' not in _pmap and 'Domingo' in _pmap:
+                    _pmap['Festivo'] = _pmap['Domingo']; _fb_fest = True
 
-        _tot = float(np.sum(_proy)); _pm = float(np.mean(_proy)); _ph = float(_pb[_col_e].mean())
-        _vr = (_pm / _ph - 1) * 100 if _ph > 0 else 0.0
-        _k1, _k2, _k3, _k4 = st.columns(4)
-        _k1.metric(f"Total proyectado ({_hz} días)", f"{_ncl(_tot,0)} kWh")
-        _k2.metric("Promedio diario", f"{_ncl(_pm,0)} kWh")
-        _k3.metric("vs histórico", f"{'+' if _vr >= 0 else ''}{_ncl(_vr,1)}%")
-        _k4.metric("Ajuste (R²)", _ncl(_r2, 2))
-        st.caption(_desc)
+                # 3) Período futuro
+                _ult = pd.to_datetime(_m['Fecha']).max().date()
+                _ini_def = _ult + pd.Timedelta(days=1)
+                _fin_def = _ini_def + pd.Timedelta(days=29)
+                with _c2:
+                    _rng = st.date_input("Período a proyectar", value=(_ini_def, _fin_def), key="_proj_rng")
+                if isinstance(_rng, (list, tuple)) and len(_rng) == 2:
+                    _fi, _ff = _rng
+                else:
+                    _fi = _rng[0] if isinstance(_rng, (list, tuple)) else _rng
+                    _ff = _fi
 
-        fig_pr = go.Figure()
-        fig_pr.add_trace(go.Scatter(x=_pb['Fecha'], y=_pb[_col_e], mode='lines+markers', name=f'{_lbl_e} (histórico)', line=dict(color='#1f4e79')))
-        fig_pr.add_trace(go.Scatter(x=_fut, y=_proy, mode='lines', name='Proyección', line=dict(color='#E85500', dash='dash')))
-        fig_pr.update_layout(title=f'Proyección de {_lbl_e.lower()}', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
-        st.plotly_chart(fig_pr, use_container_width=True, key="proj_energia")
+                _dias_fut = pd.date_range(_fi, _ff)
+                _cont = pd.Series([_tipo4(d.date()) for d in _dias_fut]).value_counts()
 
-        if _met.startswith("Energía vs") and np.ptp(_pb['Tren-Km [km]'].values) > 0:
-            with st.expander("Ver relación energía vs kilómetros (modelo)"):
-                fig_rel = go.Figure()
-                fig_rel.add_trace(go.Scatter(x=_pb['Tren-Km [km]'], y=_pb[_col_e], mode='markers', name='Días', marker=dict(color='#1f4e79')))
-                _xr = np.array([float(_pb['Tren-Km [km]'].min()), float(_pb['Tren-Km [km]'].max())])
-                fig_rel.add_trace(go.Scatter(x=_xr, y=np.polyval(_co, _xr), mode='lines', name='Modelo', line=dict(color='#E85500')))
-                fig_rel.update_layout(xaxis_title='Tren-Km [km]', yaxis_title=f'{_lbl_e} [kWh]', height=380)
-                st.plotly_chart(fig_rel, use_container_width=True, key="proj_rel")
+                _orden = ['Laboral', 'Sábado', 'Domingo', 'Festivo']
+                _filas = []; _total = 0.0
+                for t in _orden:
+                    n = int(_cont.get(t, 0))
+                    if n == 0:
+                        continue
+                    if t in _pmap:
+                        tk = _pmap[t]['TrenKm_Prog']; km = _pmap[t]['kWh_km']; ed = _pmap[t]['Energia_dia']
+                        sub = n * ed; _total += sub
+                        _filas.append({'Tipo de día': t, 'Días': n, 'Tren-Km/día': round(tk, 1),
+                                       'kWh/km': round(km, 3), 'Energía/día [kWh]': round(ed, 0),
+                                       'Energía período [kWh]': round(sub, 0)})
+                    else:
+                        _filas.append({'Tipo de día': t, 'Días': n, 'Tren-Km/día': None,
+                                       'kWh/km': None, 'Energía/día [kWh]': None, 'Energía período [kWh]': None})
+                _tab = pd.DataFrame(_filas)
 
-        _tabp = pd.DataFrame({'Fecha': _fut, f'{_lbl_e} proyectada [kWh]': np.round(_proy, 1)})
-        with st.expander(f"Ver y descargar proyección ({_hz} días)"):
-            _td_disp = _tabp.copy(); _td_disp['Fecha'] = pd.to_datetime(_td_disp['Fecha']).dt.strftime('%d-%m-%Y')
-            _st_df(_td_disp, use_container_width=True, hide_index=True)
-            def _xlsx_proj(_df):
-                _b = BytesIO(); _dd = _df.copy(); _dd['Fecha'] = pd.to_datetime(_dd['Fecha']).dt.strftime('%d-%m-%Y')
-                with pd.ExcelWriter(_b, engine='openpyxl') as _w: _dd.to_excel(_w, index=False, sheet_name='Proyeccion')
-                return _b.getvalue()
-            st.download_button("⬇️ Descargar proyección (Excel)", data=_xlsx_proj(_tabp),
-                               file_name="proyeccion_energia.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_proj")
+                _ndias = int(len(_dias_fut))
+                _k1, _k2, _k3 = st.columns(3)
+                _k1.metric(f"Energía proyectada ({_ndias} días)", f"{_ncl(_total, 0)} kWh")
+                _k2.metric("Promedio diario", f"{_ncl(_total / _ndias if _ndias else 0, 0)} kWh")
+                _k3.metric("Período", f"{pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}")
+
+                st.markdown("**Detalle por tipo de día**")
+                _st_df(_tab, use_container_width=True, hide_index=True)
+
+                # Gráfico: histórico + proyección diaria
+                _ms = _m.sort_values('Fecha')
+                _ps = pd.DataFrame({'Fecha': _dias_fut})
+                _ps['Tipo'] = [_tipo4(d.date()) for d in _dias_fut]
+                _ps['Energia'] = _ps['Tipo'].map(lambda t: _pmap.get(t, {}).get('Energia_dia', np.nan))
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=_ms['Fecha'], y=_ms[_ecalc], mode='lines+markers', name='Histórico', line=dict(color='#1f4e79')))
+                fig.add_trace(go.Scatter(x=_ps['Fecha'], y=_ps['Energia'], mode='lines+markers', name='Proyección', line=dict(color='#E85500', dash='dash')))
+                fig.update_layout(title=f'Energía {_tipo_e.lower()} — histórico y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
+                st.plotly_chart(fig, use_container_width=True, key='proj_td')
+
+                # Consumo por km por tipo (referencia)
+                with st.expander("Ver consumo por km por tipo de día (base del cálculo)"):
+                    _pv = _perfil[['Tipo', 'Dias', 'TrenKm_Prog', 'kWh_km', 'Energia_dia']].copy()
+                    _pv.columns = ['Tipo de día', 'Días histór.', 'Tren-Km/día', 'kWh/km', 'Energía/día [kWh]']
+                    _pv['Tren-Km/día'] = _pv['Tren-Km/día'].round(1); _pv['kWh/km'] = _pv['kWh/km'].round(3); _pv['Energía/día [kWh]'] = _pv['Energía/día [kWh]'].round(0)
+                    _st_df(_pv, use_container_width=True, hide_index=True)
+
+                _avisos = []
+                _pocos = _perfil[_perfil['Dias'] < 2]['Tipo'].tolist()
+                if _pocos: _avisos.append("pocos días de historia en: " + ", ".join(_pocos))
+                if _fb_fest: _avisos.append("no hay festivos en el histórico, se usó el perfil de domingo para los festivos")
+                if _avisos:
+                    st.caption("⚠️ " + ". ".join(_avisos).capitalize() + ". Los valores se afinan al cargar más datos.")
+
+                with st.expander("Descargar proyección (Excel)"):
+                    def _xls(_df):
+                        _b = BytesIO()
+                        with pd.ExcelWriter(_b, engine='openpyxl') as _w: _df.to_excel(_w, index=False, sheet_name='Proyeccion')
+                        return _b.getvalue()
+                    st.download_button("⬇️ Descargar", data=_xls(_tab), file_name="proyeccion_energia_tipodia.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_projtd")
