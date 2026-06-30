@@ -1424,6 +1424,7 @@ df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
 all_kmserv=[]
+all_saf_li=[]
 _errores_proc={}
 
 if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('_do_load'):
@@ -1436,6 +1437,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     all_prmte_full=st.session_state['all_prmte_full']
     all_prmte_2025=st.session_state.get('all_prmte_2025',[])
     all_kmserv=st.session_state.get('all_kmserv',[])
+    all_saf_li=st.session_state.get('all_saf_li',[])
     df_carga_v1=st.session_state.get('df_carga_v1', pd.DataFrame())
     df_carga_v2=st.session_state.get('df_carga_v2', pd.DataFrame())
     df_viajes=st.session_state.get('df_viajes', pd.DataFrame())
@@ -1511,6 +1513,19 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                     if pd.notna(fs) and start_date<=fs.normalize().date()<=end_date:
                         all_seat.append({"Fecha":fs.normalize(),"E_Total":parse_latam_number(df_s.iloc[i,3]),
                                          "E_Tr":parse_latam_number(df_s.iloc[i,5]),"E_12":parse_latam_number(df_s.iloc[i,7])})
+                # Hoja SAFs: Limache (SAF LI: Taller=col6, TGSN=col7; Principal=Taller+TGSN)
+                try:
+                    f.seek(0); _xls_saf=pd.ExcelFile(f,engine=es)
+                    _hsaf=next((s for s in _xls_saf.sheet_names if 'saf' in s.lower()),None)
+                    if _hsaf:
+                        df_saf=pd.read_excel(_xls_saf,sheet_name=_hsaf,header=None)
+                        for i in range(len(df_saf)):
+                            fl=pd.to_datetime(df_saf.iloc[i,1],errors='coerce')
+                            if pd.notna(fl) and start_date<=fl.normalize().date()<=end_date:
+                                _tal=parse_latam_number(df_saf.iloc[i,6]); _tg=parse_latam_number(df_saf.iloc[i,7])
+                                if (_tal or 0)>0 or (_tg or 0)>0:
+                                    all_saf_li.append({"Fecha":fl.normalize(),"SAF_Taller":_tal,"SAF_TGSN":_tg})
+                except Exception: pass
             except Exception as e: _errores_proc[f.name]=f"SEAT: {e}"
             
     if f_bill_all:
@@ -1674,7 +1689,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
-                              'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,
+                              'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo})
     st.session_state['_do_load'] = False
 
@@ -1815,6 +1830,7 @@ if not df_ops.empty and _seccion != _SECCIONES[7]:
     all_tr = _filt_regs(all_tr)
     all_seat = _filt_regs(all_seat)
     all_kmserv = _filt_regs(all_kmserv)
+    all_saf_li = _filt_regs(all_saf_li)
     _rf = []
     if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
     if _sel_m != "Todos": _rf.append(_sel_m)
@@ -3816,142 +3832,162 @@ if _seccion == _SECCIONES[15]:
 
 if _seccion == _SECCIONES[16]:
     st.header("🔮 Proyección de energía")
-    st.caption("Proyecta por tipo de día (laboral, sábado, domingo, festivo) con la mediana del histórico. Dentro del período, cada día que ya tiene dato real usa el real; los días sin real usan lo proyectado (no se duplica).")
+    _fuente = st.radio("Fuente de energía", ["SEAT (tracción + 12 kV)", "Limache (SAF LI)"], horizontal=True, key="_proj_fuente")
+    _es_seat = _fuente.startswith("SEAT")
 
-    _use_seat = ('E_Seat_T' in df_ops.columns and df_ops['E_Seat_T'].sum() > 0)
-    _c_tr = 'E_Seat_Tr' if (_use_seat and 'E_Seat_Tr' in df_ops.columns) else ('E_Tr' if 'E_Tr' in df_ops.columns else None)
-    _c_12 = 'E_Seat_12' if (_use_seat and 'E_Seat_12' in df_ops.columns) else ('E_12' if 'E_12' in df_ops.columns else None)
+    def _tipo4(d):
+        if d is None: return None
+        if d in chile_holidays: return 'Festivo'
+        wd = d.weekday()
+        return 'Sábado' if wd == 5 else 'Domingo' if wd == 6 else 'Laboral'
 
-    if not all_kmserv:
-        st.warning("Carga el Excel UMR (hoja KM-Servicio) para tener el Tren-Km de la malla, y aprieta **🔄 Cargar / actualizar datos**.")
-    elif _c_tr is None or _c_12 is None or 'Odómetro [km]' not in df_ops.columns:
-        st.warning("Faltan datos de energía (SEAT: tracción y 12 kV) u odómetro para calcular la proyección.")
-    else:
-        def _tipo4(d):
-            if d is None: return None
-            if d in chile_holidays: return 'Festivo'
-            wd = d.weekday()
-            return 'Sábado' if wd == 5 else 'Domingo' if wd == 6 else 'Laboral'
+    _err = None; _m = pd.DataFrame(); _pmap = {}; _comps = []; _extra_odom = False; _pf = pd.DataFrame()
 
-        # 1) Tren-Km por día (efectivo = realizado si hay, si no programado)
-        _dk = pd.DataFrame(all_kmserv).groupby('Fecha', as_index=False).agg(
-            TrenKm_Prog=('KmTrenP', 'sum'), TrenKm_Real=('KmTrenR', 'sum'))
-        _dk['TrenKm_Efec'] = np.where(_dk['TrenKm_Real'] > 0, _dk['TrenKm_Real'], _dk['TrenKm_Prog'])
-
-        # 2) Cruce con df_ops: odómetro + energía de tracción y 12 kV del SEAT
-        _en = df_ops[['Fecha', 'Odómetro [km]', _c_tr, _c_12]].copy()
-        _en.columns = ['Fecha', 'Odom', 'E_Tr', 'E_12']
-        _m = _dk.merge(_en, on='Fecha', how='inner')
-        _m = _m[(_m['TrenKm_Efec'] > 0) & (_m['Odom'] > 0) & ((_m['E_Tr'].fillna(0) + _m['E_12'].fillna(0)) > 0)].copy()
-        _m['Tipo'] = _m['Fecha'].apply(lambda f: _tipo4(pd.to_datetime(f).date()))
-        _m['UMR'] = _m['TrenKm_Efec'] / _m['Odom']
-        _m['IDE_tr'] = _m['E_Tr'] / _m['Odom']
-
-        if _m.empty:
-            st.warning("No hay días con Tren-Km, odómetro y energía a la vez. Revisá que UMR y SEAT cubran las mismas fechas.")
+    if _es_seat:
+        _use_seat = ('E_Seat_T' in df_ops.columns and df_ops['E_Seat_T'].sum() > 0)
+        _c_tr = 'E_Seat_Tr' if (_use_seat and 'E_Seat_Tr' in df_ops.columns) else ('E_Tr' if 'E_Tr' in df_ops.columns else None)
+        _c_12 = 'E_Seat_12' if (_use_seat and 'E_Seat_12' in df_ops.columns) else ('E_12' if 'E_12' in df_ops.columns else None)
+        if not all_kmserv:
+            _err = "Carga el Excel UMR (hoja KM-Servicio) para tener el Tren-Km de la malla, y aprieta **🔄 Cargar / actualizar datos**."
+        elif _c_tr is None or _c_12 is None or 'Odómetro [km]' not in df_ops.columns:
+            _err = "Faltan datos de energía (SEAT: tracción y 12 kV) u odómetro."
         else:
-            _c1, _c2 = st.columns([1, 2])
+            _dk = pd.DataFrame(all_kmserv).groupby('Fecha', as_index=False).agg(TrenKm_Prog=('KmTrenP', 'sum'), TrenKm_Real=('KmTrenR', 'sum'))
+            _dk['TrenKm_Efec'] = np.where(_dk['TrenKm_Real'] > 0, _dk['TrenKm_Real'], _dk['TrenKm_Prog'])
+            _en = df_ops[['Fecha', 'Odómetro [km]', _c_tr, _c_12]].copy(); _en.columns = ['Fecha', 'Odom', 'Tracc', 'E12']
+            _m = _dk.merge(_en, on='Fecha', how='inner')
+            _m = _m[(_m['TrenKm_Efec'] > 0) & (_m['Odom'] > 0) & ((_m['Tracc'].fillna(0) + _m['E12'].fillna(0)) > 0)].copy()
+            if not _m.empty:
+                _m['Tipo'] = _m['Fecha'].apply(lambda f: _tipo4(pd.to_datetime(f).date()))
+                _m['UMR'] = _m['TrenKm_Efec'] / _m['Odom']; _m['IDE_tr'] = _m['Tracc'] / _m['Odom']
+                _pf = _m.groupby('Tipo').agg(Dias=('Fecha', 'count'), TrenKm_Prog=('TrenKm_Prog', 'median'),
+                        UMR=('UMR', 'median'), IDE_tr=('IDE_tr', 'median'), E12=('E12', 'median')).reset_index()
+                _pf['Odom_proy'] = _pf['TrenKm_Prog'] / _pf['UMR']; _pf['Tracc'] = _pf['IDE_tr'] * _pf['Odom_proy']
+                _pmap = _pf.set_index('Tipo').to_dict('index')
+                _comps = [('Tracción', 'Tracc', 'Tracc'), ('12 kV', 'E12', 'E12')]
+                _extra_odom = True
+    else:
+        if not all_saf_li:
+            _err = "Carga el archivo SEAT (hoja SAFs) para proyectar Limache, y aprieta **🔄 Cargar / actualizar datos**."
+        else:
+            _m = pd.DataFrame(all_saf_li).copy()
+            _m['Taller'] = _m['SAF_Taller'].fillna(0); _m['TGSN'] = _m['SAF_TGSN'].fillna(0)
+            _m = _m[(_m['Taller'] + _m['TGSN']) > 0].copy()
+            if not _m.empty:
+                _m['Tipo'] = _m['Fecha'].apply(lambda f: _tipo4(pd.to_datetime(f).date()))
+                _pf = _m.groupby('Tipo').agg(Dias=('Fecha', 'count'), Taller=('Taller', 'median'), TGSN=('TGSN', 'median')).reset_index()
+                _pmap = _pf.set_index('Tipo').to_dict('index')
+                _comps = [('Taller', 'Taller', 'Taller'), ('SAF LI TGSN', 'TGSN', 'TGSN')]
+
+    if _err:
+        st.warning(_err)
+    elif _m.empty or not _pmap:
+        st.warning("No hay días con datos suficientes para esta fuente. Revisá que los archivos cubran las mismas fechas.")
+    else:
+        if 'Festivo' not in _pmap and 'Domingo' in _pmap:
+            _pmap['Festivo'] = _pmap['Domingo']
+
+        _c1, _c2 = st.columns([1, 2])
+        if _es_seat:
             with _c1:
-                _tipo_e = st.radio("Energía a proyectar", ["Total", "Tracción"], horizontal=True, key="_proj_te")
+                _modo = st.radio("Energía a proyectar", ["Total", "Tracción"], horizontal=True, key="_proj_te")
+        else:
+            _modo = "Total"
+            with _c1:
+                st.caption("Limache (SAF LI Principal) = Taller + SAF LI TGSN")
+        _sel = [_comps[0]] if (_es_seat and _modo == "Tracción") else _comps
 
-            # Perfil por tipo de día con MEDIANA del histórico
-            _perfil = _m.groupby('Tipo').agg(Dias=('Fecha', 'count'),
-                    TrenKm_Prog=('TrenKm_Prog', 'median'), UMR=('UMR', 'median'),
-                    IDE_tr=('IDE_tr', 'median'), E12_dia=('E_12', 'median')).reset_index()
-            _perfil['Odom_proy'] = _perfil['TrenKm_Prog'] / _perfil['UMR']
-            _perfil['Tracc_dia'] = _perfil['IDE_tr'] * _perfil['Odom_proy']
-            _perfil['Total_dia'] = _perfil['Tracc_dia'] + _perfil['E12_dia']
-            _pmap = _perfil.set_index('Tipo').to_dict('index')
-            if 'Festivo' not in _pmap and 'Domingo' in _pmap:
-                _pmap['Festivo'] = _pmap['Domingo']
+        _pf_real = pd.to_datetime(_m['Fecha']).min().date()
+        _ul_real = pd.to_datetime(_m['Fecha']).max().date()
+        with _c2:
+            _rng = st.date_input("Período (real + proyección)", value=(_pf_real, _ul_real + pd.Timedelta(days=30)), key="_proj_rng")
+        if isinstance(_rng, (list, tuple)):
+            _fi = _rng[0]; _ff = _rng[1] if len(_rng) > 1 else _rng[0]
+        else:
+            _fi = _ff = _rng
 
-            # Período (puede abarcar días reales y futuros)
-            _pf_real = pd.to_datetime(_m['Fecha']).min().date()
-            _ul_real = pd.to_datetime(_m['Fecha']).max().date()
-            with _c2:
-                _rng = st.date_input("Período (real + proyección)", value=(_pf_real, _ul_real + pd.Timedelta(days=30)), key="_proj_rng")
-            if isinstance(_rng, (list, tuple)):
-                _fi = _rng[0]; _ff = _rng[1] if len(_rng) > 1 else _rng[0]
+        _mn = _m.copy(); _mn['fn'] = pd.to_datetime(_mn['Fecha']).dt.normalize()
+        _real_cols = [c[1] for c in _comps] + (['Odom'] if _extra_odom else [])
+        _rmap = _mn.set_index('fn')[_real_cols].to_dict('index')
+
+        _dias = pd.date_range(_fi, _ff)
+        _acc_r = {c[0]: 0.0 for c in _comps}; _acc_p = {c[0]: 0.0 for c in _comps}
+        _ro = _po = 0.0; _nr = _npy = 0; _serie = []
+        for d in _dias:
+            dn = pd.Timestamp(d).normalize(); t = _tipo4(d.date())
+            if dn in _rmap:
+                r = _rmap[dn]; _nr += 1
+                for (lab, rc, pk) in _comps: _acc_r[lab] += (r[rc] or 0)
+                if _extra_odom: _ro += (r['Odom'] or 0)
+                _serie.append({'Fecha': d, 'E': sum((r[c[1]] or 0) for c in _sel), 'Origen': 'Real'})
             else:
-                _fi = _ff = _rng
+                _npy += 1
+                if t in _pmap:
+                    p = _pmap[t]
+                    for (lab, rc, pk) in _comps: _acc_p[lab] += p[pk]
+                    if _extra_odom: _po += p['Odom_proy']
+                    _serie.append({'Fecha': d, 'E': sum(p[c[2]] for c in _sel), 'Origen': 'Proyectado'})
 
-            # Mapa de reales por fecha
-            _mn = _m.copy(); _mn['fn'] = pd.to_datetime(_mn['Fecha']).dt.normalize()
-            _real_map = _mn.set_index('fn')[['Odom', 'E_Tr', 'E_12']].to_dict('index')
+        _r_show = sum(_acc_r[c[0]] for c in _sel); _p_show = sum(_acc_p[c[0]] for c in _sel)
+        _g_tot = _r_show + _p_show; _ndias = int(len(_dias))
+        _lbl = "Tracción" if (_es_seat and _modo == "Tracción") else ("Total" if _es_seat else "Principal Limache")
 
-            # Recorrido día a día: real si hay, proyectado si no
-            _dias_per = pd.date_range(_fi, _ff)
-            _r_od = _r_tr = _r_12 = _p_od = _p_tr = _p_12 = 0.0
-            _n_real = _n_proy = 0
-            _serie = []
-            for d in _dias_per:
-                dn = pd.Timestamp(d).normalize(); t = _tipo4(d.date())
-                if dn in _real_map:
-                    r = _real_map[dn]; _n_real += 1
-                    _r_od += r['Odom']; _r_tr += r['E_Tr']; _r_12 += r['E_12']
-                    _serie.append({'Fecha': d, 'E_tot': r['E_Tr'] + r['E_12'], 'E_tr': r['E_Tr'], 'Origen': 'Real'})
-                else:
-                    _n_proy += 1
-                    if t in _pmap:
-                        p = _pmap[t]; _p_od += p['Odom_proy']; _p_tr += p['Tracc_dia']; _p_12 += p['E12_dia']
-                        _serie.append({'Fecha': d, 'E_tot': p['Total_dia'], 'E_tr': p['Tracc_dia'], 'Origen': 'Proyectado'})
-                    else:
-                        _serie.append({'Fecha': d, 'E_tot': np.nan, 'E_tr': np.nan, 'Origen': 'Proyectado'})
+        _k1, _k2, _k3, _k4 = st.columns(4)
+        _k1.metric(f"{_lbl} período ({_ndias} días)", f"{_ncl(_g_tot, 0)} kWh")
+        _k2.metric(f"Real ({_nr} días)", f"{_ncl(_r_show, 0)} kWh")
+        _k3.metric(f"Proyectado ({_npy} días)", f"{_ncl(_p_show, 0)} kWh")
+        _k4.metric("Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 0)} kWh")
 
-            _r_tot = _r_tr + _r_12; _p_tot = _p_tr + _p_12
-            _g_tot = (_r_tot + _p_tot) if _tipo_e == "Total" else (_r_tr + _p_tr)
-            _ndias = int(len(_dias_per))
+        st.markdown("**Real + proyectado del período**")
+        _rows = []
+        if _extra_odom: _rows.append(('Odómetro [km]', _ro, _po))
+        for c in _comps: _rows.append((c[0] + ' [kWh]', _acc_r[c[0]], _acc_p[c[0]]))
+        _rows.append((('Total' if _es_seat else 'Principal') + ' [kWh]', sum(_acc_r[c[0]] for c in _comps), sum(_acc_p[c[0]] for c in _comps)))
+        _resumen = pd.DataFrame({'Concepto': [r[0] for r in _rows],
+                                 f'Real ({_nr} d)': [round(r[1], 0) for r in _rows],
+                                 f'Proyectado ({_npy} d)': [round(r[2], 0) for r in _rows]})
+        _resumen['Total período'] = (_resumen.iloc[:, 1] + _resumen.iloc[:, 2]).round(0)
+        _st_df(_resumen, use_container_width=True, hide_index=True)
+        st.caption(f"Período {pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}. Días con dato real toman el real; el resto, lo proyectado. Hay datos reales entre {_pf_real:%d-%m-%Y} y {_ul_real:%d-%m-%Y}.")
 
-            # KPIs
-            _k1, _k2, _k3, _k4 = st.columns(4)
-            _k1.metric(f"Total período ({_ndias} días)", f"{_ncl(_g_tot, 0)} kWh")
-            _k2.metric(f"Real ({_n_real} días)", f"{_ncl(_r_tot if _tipo_e == 'Total' else _r_tr, 0)} kWh")
-            _k3.metric(f"Proyectado ({_n_proy} días)", f"{_ncl(_p_tot if _tipo_e == 'Total' else _p_tr, 0)} kWh")
-            _k4.metric("Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 0)} kWh")
-
-            # Tabla Real + Proyectado (sin duplicar: cada día cae en una sola columna)
-            st.markdown("**Real + proyectado del período**")
-            _resumen = pd.DataFrame({
-                'Concepto': ['Odómetro [km]', 'Tracción [kWh]', '12 kV [kWh]', 'Total [kWh]'],
-                f'Real ({_n_real} d)': [round(_r_od, 0), round(_r_tr, 0), round(_r_12, 0), round(_r_tot, 0)],
-                f'Proyectado ({_n_proy} d)': [round(_p_od, 0), round(_p_tr, 0), round(_p_12, 0), round(_p_tot, 0)]})
-            _resumen['Total período'] = (_resumen.iloc[:, 1] + _resumen.iloc[:, 2]).round(0)
-            _st_df(_resumen, use_container_width=True, hide_index=True)
-            st.caption(f"Período {pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}. Días con dato real toman el real; el resto, lo proyectado. Hay datos reales entre {_pf_real:%d-%m-%Y} y {_ul_real:%d-%m-%Y}.")
-
-            # Perfil por tipo de día (base del proyectado, mediana)
-            st.markdown("**Perfil por tipo de día (mediana del histórico)**")
-            _pv = _perfil[['Tipo', 'Dias', 'TrenKm_Prog', 'UMR', 'Odom_proy', 'IDE_tr', 'Tracc_dia', 'E12_dia', 'Total_dia']].copy()
-            _pv['UMR'] = (_pv['UMR'] * 100).round(2)
-            for _col in ['TrenKm_Prog', 'Odom_proy', 'Tracc_dia', 'E12_dia', 'Total_dia']:
-                _pv[_col] = _pv[_col].round(0)
+        st.markdown("**Perfil por tipo de día (mediana del histórico)**")
+        if _es_seat:
+            _pv = _pf[['Tipo', 'Dias', 'TrenKm_Prog', 'UMR', 'Odom_proy', 'IDE_tr', 'Tracc', 'E12']].copy()
+            _pv['UMR'] = (_pv['UMR'] * 100).round(2); _pv['Total'] = (_pv['Tracc'] + _pv['E12']).round(0)
+            for _col in ['TrenKm_Prog', 'Odom_proy', 'Tracc', 'E12']: _pv[_col] = _pv[_col].round(0)
             _pv['IDE_tr'] = _pv['IDE_tr'].round(3)
             _pv.columns = ['Tipo', 'Días', 'Tren-Km/día', 'UMR %', 'Odómetro/día', 'IDE tracc.', 'Tracción/día', '12 kV/día', 'Total/día']
-            _st_df(_pv, use_container_width=True, hide_index=True)
-            st.caption("Odómetro/día = Tren-Km programado ÷ UMR · Tracción/día = IDE tracc. × odómetro · 12 kV/día = mediana de kWh de 12 kV.")
+            _cap = "Odómetro/día = Tren-Km programado ÷ UMR · Tracción/día = IDE tracc. × odómetro · 12 kV/día = mediana de kWh."
+        else:
+            _pv = _pf[['Tipo', 'Dias', 'Taller', 'TGSN']].copy()
+            _pv['Principal'] = (_pv['Taller'] + _pv['TGSN']).round(1)
+            _pv['Taller'] = _pv['Taller'].round(1); _pv['TGSN'] = _pv['TGSN'].round(1)
+            _pv.columns = ['Tipo', 'Días', 'Taller/día', 'SAF LI TGSN/día', 'Principal/día']
+            _cap = "Principal/día = mediana(Taller) + mediana(SAF LI TGSN), por tipo de día."
+        _st_df(_pv, use_container_width=True, hide_index=True)
+        st.caption(_cap)
 
-            # Gráfico real + proyección
-            _sdf = pd.DataFrame(_serie)
-            _cg = 'E_tot' if _tipo_e == "Total" else 'E_tr'
-            _sr = _sdf[_sdf['Origen'] == 'Real']; _sp = _sdf[_sdf['Origen'] == 'Proyectado']
-            fig = go.Figure()
-            if not _sr.empty:
-                fig.add_trace(go.Scatter(x=_sr['Fecha'], y=_sr[_cg], mode='lines+markers', name='Real', line=dict(color='#1f4e79')))
-            if not _sp.empty:
-                fig.add_trace(go.Scatter(x=_sp['Fecha'], y=_sp[_cg], mode='lines+markers', name='Proyectado', line=dict(color='#E85500', dash='dash')))
-            fig.update_layout(title=f'Energía {_tipo_e.lower()} — real y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
-            st.plotly_chart(fig, use_container_width=True, key='proj_td')
+        _sdf = pd.DataFrame(_serie)
+        _sr = _sdf[_sdf['Origen'] == 'Real']; _sp = _sdf[_sdf['Origen'] == 'Proyectado']
+        fig = go.Figure()
+        if not _sr.empty:
+            fig.add_trace(go.Scatter(x=_sr['Fecha'], y=_sr['E'], mode='lines+markers', name='Real', line=dict(color='#1f4e79')))
+        if not _sp.empty:
+            fig.add_trace(go.Scatter(x=_sp['Fecha'], y=_sp['E'], mode='lines+markers', name='Proyectado', line=dict(color='#E85500', dash='dash')))
+        fig.update_layout(title=f'{_lbl} — real y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
+        st.plotly_chart(fig, use_container_width=True, key='proj_td')
 
-            _pocos = _perfil[_perfil['Dias'] < 2]['Tipo'].tolist()
-            if _pocos:
-                st.caption("⚠️ Pocos días de historia en " + ", ".join(_pocos) + ". Se afina al cargar más datos.")
+        _pocos = _pf[_pf['Dias'] < 2]['Tipo'].tolist()
+        if _pocos:
+            st.caption("⚠️ Pocos días de historia en " + ", ".join(_pocos) + ". Se afina al cargar más datos.")
 
-            with st.expander("Descargar (Excel)"):
-                def _xls(_d1, _d2):
-                    _b = BytesIO()
-                    with pd.ExcelWriter(_b, engine='openpyxl') as _w:
-                        _d1.to_excel(_w, index=False, sheet_name='Real + Proyectado')
-                        _d2.to_excel(_w, index=False, sheet_name='Perfil por tipo de día')
-                    return _b.getvalue()
-                st.download_button("⬇️ Descargar", data=_xls(_resumen, _pv), file_name="proyeccion_energia_tipodia.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_projtd")
+        with st.expander("Descargar (Excel)"):
+            def _xls(_d1, _d2):
+                _b = BytesIO()
+                with pd.ExcelWriter(_b, engine='openpyxl') as _w:
+                    _d1.to_excel(_w, index=False, sheet_name='Real + Proyectado')
+                    _d2.to_excel(_w, index=False, sheet_name='Perfil por tipo de día')
+                return _b.getvalue()
+            st.download_button("⬇️ Descargar", data=_xls(_resumen, _pv),
+                               file_name=f"proyeccion_{'seat' if _es_seat else 'limache'}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_projtd")
