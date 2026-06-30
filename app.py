@@ -1935,6 +1935,18 @@ if _seccion == _SECCIONES[0]:
                         _card_metric(_cols[_i + 1], _t2, _fmt(_serie[_t2]), _unit, _via_de(_t2))
             _fmt_int = lambda v: f"{_ncl(int(round(v)), 0)}"
             _fmt_km = lambda v: f"{_ncl(v, 1)}"
+            def _tarjeta_solo_via(_df, _col, _fmt, _label_total, _unit=""):
+                if not _df.empty and _col in _df.columns:
+                    _tmp = _df.copy(); _tmp['_via'] = _tmp['Tipo_Servicio'].apply(_via_de)
+                    _pv = _tmp.groupby('_via')[_col].sum(); _tot = _df[_col].sum()
+                else:
+                    _pv = pd.Series(dtype=float); _tot = 0
+                _vias = [v for v in ['Vía 1', 'Vía 2', 'Otros'] if _pv.get(v, 0) > 0]
+                with st.container(border=True):
+                    _cols = st.columns([1.3] + [1] * max(len(_vias), 1))
+                    _card_metric(_cols[0], _label_total, _fmt(_tot), _unit)
+                    for _i, _v in enumerate(_vias):
+                        _card_metric(_cols[_i + 1], _v, _fmt(_pv[_v]), _unit, _v)
             ev_serv = ev_pax = ev_tk = None
 
             def _layout_tipo(_fig):
@@ -1944,16 +1956,19 @@ if _seccion == _SECCIONES[0]:
                                    bargap=0.28, xaxis_title=None, yaxis_title=None)
                 return _fig
 
-            # --- 1. Servicios por tipo de servicio ---
-            st.markdown("**Servicios por tipo de servicio**")
+            # --- 1. Servicios por vía ---
+            st.markdown("**Servicios por vía**")
+            _tarjeta_solo_via(_st, 'Servicios', _fmt_int, "Total Servicios")
             if not _st.empty:
-                fig_serv = px.bar(_st, x='Fecha', y='Servicios', color='Tipo_Servicio', barmode='stack',
-                                  color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
+                _stv = _st.copy(); _stv['Vía'] = _stv['Tipo_Servicio'].apply(_via_de)
+                _stv = _stv.groupby(['Fecha', 'Vía'], as_index=False)['Servicios'].sum()
+                fig_serv = px.bar(_stv, x='Fecha', y='Servicios', color='Vía', barmode='stack',
+                                  color_discrete_map={'Vía 1': '#2563eb', 'Vía 2': '#f59e0b', 'Otros': '#94a3b8'},
+                                  category_orders={'Vía': ['Vía 1', 'Vía 2', 'Otros']})
                 _layout_tipo(fig_serv)
                 ev_serv = _pc(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
             else:
                 st.info("Sin datos de servicios (THDR) para el filtro actual.")
-            _tarjeta_por_via(_st, 'Servicios', _fmt_int, "Total Servicios")
 
             st.divider()
 
@@ -1984,21 +1999,27 @@ if _seccion == _SECCIONES[0]:
 
             st.divider()
 
-            # --- 2. Pasajeros por tipo de servicio ---
-            st.markdown("**Pasajeros por tipo de servicio (PAX)**")
-            if not _pt.empty:
-                fig_pax = px.bar(_pt, x='Fecha', y='PAX', color='Tipo_Servicio', barmode='stack',
-                                 color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
+            # --- 2. Pasajeros (viajes por contrato) ---
+            st.markdown("**Pasajeros (viajes por contrato)**")
+            if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
+                _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
+                _dias_vj = int(_vd['Fecha'].nunique())
+                with st.container(border=True):
+                    _cvj = st.columns([1.3, 1])
+                    _card_metric(_cvj[0], "Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
+                    _card_metric(_cvj[1], "Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
+                fig_pax = px.bar(_vd, x='Fecha', y='Total Viajes')
+                fig_pax.update_traces(marker_color='#2563eb', hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
                 _layout_tipo(fig_pax)
                 ev_pax = _pc(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
             else:
-                st.info("Sin datos de pasajeros cruzables con la malla THDR para el filtro actual.")
-            _tarjeta_por_via(_pt, 'PAX', _fmt_int, "Total PAX")
+                st.info("Sin datos de viajes por contrato. Carga el archivo **Viajes por Contrato** en la barra lateral.")
 
             st.divider()
 
             # --- 3. Tren-Km por tipo de servicio (THDR) ---
             st.markdown("**Tren-Km por tipo de servicio (THDR)**")
+            _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
             if not _st.empty and 'TrenKm' in _st.columns:
                 fig_tk = px.bar(_st, x='Fecha', y='TrenKm', color='Tipo_Servicio', barmode='stack',
                                 color_discrete_map=_cmap, category_orders={'Tipo_Servicio': _tipos})
@@ -2006,7 +2027,6 @@ if _seccion == _SECCIONES[0]:
                 ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
             else:
                 st.info("Sin datos de Tren-Km (THDR) para el filtro actual.")
-            _tarjeta_por_via(_st, 'TrenKm', _fmt_km, "Tren-Km Total", "km")
             st.caption("Tipo de servicio = patrón Origen→Destino detectado en la malla THDR. El Tren-Km usa la distancia real de cada servicio según las estaciones por las que pasa (archivo Km entre estaciones), ×2 en tracción doble. Los servicios cortos cuentan su recorrido efectivo, no la línea completa.")
 
             st.divider()
