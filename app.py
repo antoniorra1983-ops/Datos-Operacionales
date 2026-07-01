@@ -2076,15 +2076,15 @@ if _seccion == _SECCIONES[0]:
 
             st.divider()
 
-            # --- 7. Desempeño energético (kWh/km) según la fuente ---
-            st.markdown(f"**Desempeño energético (kWh/km) — {_fuente_e}**")
-            df_ener_src['kWh/km'] = df_ener_src['Total E'] / df_ener_src['Odómetro [km]'].replace(0, np.nan)
+            # --- 7. Desempeño energético (kWh/km tracción) según la fuente ---
+            st.markdown(f"**Desempeño energético (kWh/km tracción) — {_fuente_e}**")
+            df_ener_src['kWh/km'] = df_ener_src['Tracción'] / df_ener_src['Odómetro [km]'].replace(0, np.nan)
             _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
-            ide_global = (_tot_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
+            ide_global = (_tot_tr_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
             _mc = st.columns(4)
-            _mc[0].metric(f"kWh/km {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
+            _mc[0].metric(f"kWh/km tracción {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
             fig_ide_bar = px.bar(df_ener_src, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
-                                 hover_data=hover_config, title=f"Desempeño Energético — {_fuente_e} (kWh/km)")
+                                 hover_data=hover_config, title=f"Desempeño Energético — Tracción {_fuente_e} (kWh/km)")
             fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
             fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
