@@ -3843,9 +3843,19 @@ if _seccion == _SECCIONES[16]:
 
     def _tipo4(d):
         if d is None: return None
-        if d in chile_holidays: return 'Festivo'
-        wd = d.weekday()
-        return 'Sábado' if wd == 5 else 'Domingo' if wd == 6 else 'Laboral'
+        if d in chile_holidays or d.weekday() == 6: return 'Domingo/Festivo'
+        return 'Sábado' if d.weekday() == 5 else 'Laboral'
+
+    # UMR para llevar el Tren-Km a odómetro (96,4% por defecto, o manual por jornada)
+    _umr_map = {'Laboral': 0.964, 'Sábado': 0.964, 'Domingo/Festivo': 0.964}
+    if _es_seat:
+        _umr_manual = st.checkbox("Ajustar UMR manualmente por jornada", value=False, key="_proj_umr_manual",
+                                  help="Por defecto se usa 96,4% en todas las jornadas. Actívalo para fijar un UMR distinto en laboral, sábado y domingo/festivo.")
+        if _umr_manual:
+            _uc = st.columns(3)
+            _umr_map['Laboral'] = _uc[0].number_input("UMR Laboral (%)", min_value=50.0, max_value=100.0, value=96.4, step=0.1, key="_umr_lab") / 100
+            _umr_map['Sábado'] = _uc[1].number_input("UMR Sábado (%)", min_value=50.0, max_value=100.0, value=96.4, step=0.1, key="_umr_sab") / 100
+            _umr_map['Domingo/Festivo'] = _uc[2].number_input("UMR Domingo/Festivo (%)", min_value=50.0, max_value=100.0, value=96.4, step=0.1, key="_umr_df") / 100
 
     _err = None; _m = pd.DataFrame(); _pmap = {}; _comps = []; _extra_odom = False; _pf = pd.DataFrame()
 
@@ -3865,9 +3875,10 @@ if _seccion == _SECCIONES[16]:
             _m = _m[(_m['TrenKm_Efec'] > 0) & (_m['Odom'] > 0) & ((_m['Tracc'].fillna(0) + _m['E12'].fillna(0)) > 0)].copy()
             if not _m.empty:
                 _m['Tipo'] = _m['Fecha'].apply(lambda f: _tipo4(pd.to_datetime(f).date()))
-                _m['UMR'] = _m['TrenKm_Efec'] / _m['Odom']; _m['IDE_tr'] = _m['Tracc'] / _m['Odom']
+                _m['IDE_tr'] = _m['Tracc'] / _m['Odom']
                 _pf = _m.groupby('Tipo').agg(Dias=('Fecha', 'count'), TrenKm_Prog=('TrenKm_Prog', 'median'),
-                        UMR=('UMR', 'median'), IDE_tr=('IDE_tr', 'median'), E12=('E12', 'median')).reset_index()
+                        IDE_tr=('IDE_tr', 'median'), E12=('E12', 'median')).reset_index()
+                _pf['UMR'] = _pf['Tipo'].map(_umr_map).fillna(0.964)
                 _pf['Odom_proy'] = _pf['TrenKm_Prog'] / _pf['UMR']; _pf['Tracc'] = _pf['IDE_tr'] * _pf['Odom_proy']
                 _pmap = _pf.set_index('Tipo').to_dict('index')
                 _comps = [('Tracción', 'Tracc', 'Tracc'), ('12 kV', 'E12', 'E12')]
@@ -3890,9 +3901,6 @@ if _seccion == _SECCIONES[16]:
     elif _m.empty or not _pmap:
         st.warning("No hay días con datos suficientes para esta fuente. Revisá que los archivos cubran las mismas fechas.")
     else:
-        if 'Festivo' not in _pmap and 'Domingo' in _pmap:
-            _pmap['Festivo'] = _pmap['Domingo']
-
         _c1, _c2 = st.columns([1, 2])
         if _es_seat:
             with _c1:
@@ -3956,6 +3964,8 @@ if _seccion == _SECCIONES[16]:
         _st_df(_resumen, use_container_width=True, hide_index=True)
         st.caption(f"Período {pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}. Días con dato real toman el real; el resto, lo proyectado. Hay datos reales entre {_pf_real:%d-%m-%Y} y {_ul_real:%d-%m-%Y}.")
 
+        _ord_t = {'Laboral': 0, 'Sábado': 1, 'Domingo/Festivo': 2}
+        _pf = _pf.sort_values('Tipo', key=lambda s: s.map(lambda x: _ord_t.get(x, 9))).reset_index(drop=True)
         st.markdown("**Perfil por tipo de día (mediana del histórico)**")
         if _es_seat:
             _pv = _pf[['Tipo', 'Dias', 'TrenKm_Prog', 'UMR', 'Odom_proy', 'IDE_tr', 'Tracc', 'E12']].copy()
