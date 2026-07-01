@@ -2048,12 +2048,22 @@ if _seccion == _SECCIONES[0]:
             # --- 6. Consumo energético (Tracción + Baja Tensión) ---
             st.markdown("**Consumo energético (kWh)**")
             df_plot_ener = df_resumen.rename(columns={'E_Tr': 'Tracción', 'E_12': 'Baja Tensión'})
+            _tot_tr_e = df_plot_ener['Tracción'].sum(); _tot_12_e = df_plot_ener['Baja Tensión'].sum()
             _mc = st.columns(4)
-            _mc[0].metric("Total Tracción", f"{_ncl(df_plot_ener['Tracción'].sum(), 1)} kWh")
-            _mc[1].metric("Total Baja Tensión", f"{_ncl(df_plot_ener['Baja Tensión'].sum(), 1)} kWh")
-            fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
-                              color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
-                              hover_data=hover_config, title="Consumo Energético (kWh)")
+            _mc[0].metric("Total Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
+            _mc[1].metric("Total Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
+            _mc[2].metric("Total Energía", f"{_ncl(_tot_tr_e + _tot_12_e, 1)} kWh")
+            _tipo_ener = st.radio("Tipo de energía", ["Total", "Tracción", "Baja Tensión"], horizontal=True, key="_ener_tipo")
+            if _tipo_ener == "Total":
+                fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
+                                  color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
+                                  hover_data=hover_config, title="Consumo Energético — Total (kWh)")
+            elif _tipo_ener == "Tracción":
+                fig_ener = px.bar(df_plot_ener, x='Fecha', y='Tracción', color_discrete_sequence=['#E85500'],
+                                  hover_data=hover_config, title="Consumo Energético — Tracción (kWh)")
+            else:
+                fig_ener = px.bar(df_plot_ener, x='Fecha', y='Baja Tensión', color_discrete_sequence=['#005195'],
+                                  hover_data=hover_config, title="Consumo Energético — Baja Tensión (kWh)")
             fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
             fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                    legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -2062,14 +2072,22 @@ if _seccion == _SECCIONES[0]:
 
             st.divider()
 
-            # --- 7. Desempeño energético (IDE) ---
-            st.markdown("**Desempeño energético (IDE)**")
-            _tot_tr_ide = df_resumen['E_Tr'].sum(); _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
-            ide_global = (_tot_tr_ide / _tot_odo_ide) if _tot_odo_ide > 0 else 0
+            # --- 7. Desempeño energético (kWh/km) según el tipo elegido ---
+            st.markdown(f"**Desempeño energético (kWh/km) — {_tipo_ener}**")
+            if _tipo_ener == "Tracción":
+                _e_ide = df_resumen['E_Tr']
+            elif _tipo_ener == "Baja Tensión":
+                _e_ide = df_resumen['E_12']
+            else:
+                _e_ide = df_resumen['E_Tr'] + df_resumen['E_12']
+            _df_ide = df_resumen.copy()
+            _df_ide['kWh/km'] = _e_ide / _df_ide['Odómetro [km]'].replace(0, np.nan)
+            _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
+            ide_global = (_e_ide.sum() / _tot_odo_ide) if _tot_odo_ide > 0 else 0
             _mc = st.columns(4)
-            _mc[0].metric("IDE Global", f"{_ncl(ide_global, 2)} kWh/km")
-            fig_ide_bar = px.bar(df_resumen, x='Fecha', y='IDE (kWh/km)', color_discrete_sequence=["#E85500"],
-                                 hover_data=hover_config, title="Desempeño Energético (IDE)")
+            _mc[0].metric(f"kWh/km {_tipo_ener} (global)", f"{_ncl(ide_global, 2)} kWh/km")
+            fig_ide_bar = px.bar(_df_ide, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
+                                 hover_data=hover_config, title=f"Desempeño Energético — {_tipo_ener} (kWh/km)")
             fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
             fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
