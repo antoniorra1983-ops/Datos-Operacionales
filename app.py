@@ -2047,47 +2047,44 @@ if _seccion == _SECCIONES[0]:
 
             # --- 6. Consumo energético (Tracción + Baja Tensión) ---
             st.markdown("**Consumo energético (kWh)**")
-            df_plot_ener = df_resumen.rename(columns={'E_Tr': 'Tracción', 'E_12': 'Baja Tensión'})
-            _tot_tr_e = df_plot_ener['Tracción'].sum(); _tot_12_e = df_plot_ener['Baja Tensión'].sum()
+            df_ener_src = df_resumen.copy()
+            _fuentes_disp = []
+            if 'E_Seat_T' in df_ener_src.columns and df_ener_src['E_Seat_T'].sum() > 0: _fuentes_disp.append('SEAT')
+            if 'E_Prmte' in df_ener_src.columns and df_ener_src['E_Prmte'].sum() > 0: _fuentes_disp.append('PRMTE')
+            if 'E_Fact' in df_ener_src.columns and df_ener_src['E_Fact'].sum() > 0: _fuentes_disp.append('Factura')
+            if not _fuentes_disp: _fuentes_disp = ['SEAT']
+            _fuente_e = st.radio("Fuente de energía", _fuentes_disp, horizontal=True, key="_ener_fuente")
+            _col_f = {'SEAT': 'E_Seat_T', 'PRMTE': 'E_Prmte', 'Factura': 'E_Fact'}[_fuente_e]
+            df_ener_src['Total E'] = df_ener_src[_col_f] if _col_f in df_ener_src.columns else 0.0
+            df_ener_src['Tracción'] = df_ener_src['Total E'] * df_ener_src['% Tracción'] / 100
+            df_ener_src['Baja Tensión'] = df_ener_src['Total E'] * df_ener_src['% 12 kV'] / 100
+            _tot_e = df_ener_src['Total E'].sum(); _tot_tr_e = df_ener_src['Tracción'].sum(); _tot_12_e = df_ener_src['Baja Tensión'].sum()
             _mc = st.columns(4)
-            _mc[0].metric("Total Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
-            _mc[1].metric("Total Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
-            _mc[2].metric("Total Energía", f"{_ncl(_tot_tr_e + _tot_12_e, 1)} kWh")
-            _tipo_ener = st.radio("Tipo de energía", ["Total", "Tracción", "Baja Tensión"], horizontal=True, key="_ener_tipo")
-            if _tipo_ener == "Total":
-                fig_ener = px.bar(df_plot_ener, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
-                                  color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
-                                  hover_data=hover_config, title="Consumo Energético — Total (kWh)")
-            elif _tipo_ener == "Tracción":
-                fig_ener = px.bar(df_plot_ener, x='Fecha', y='Tracción', color_discrete_sequence=['#E85500'],
-                                  hover_data=hover_config, title="Consumo Energético — Tracción (kWh)")
-            else:
-                fig_ener = px.bar(df_plot_ener, x='Fecha', y='Baja Tensión', color_discrete_sequence=['#005195'],
-                                  hover_data=hover_config, title="Consumo Energético — Baja Tensión (kWh)")
+            _mc[0].metric("Total Energía", f"{_ncl(_tot_e, 1)} kWh")
+            _mc[1].metric("Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
+            _mc[2].metric("Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
+            fig_ener = px.bar(df_ener_src, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
+                              color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
+                              hover_data=hover_config, title=f"Consumo Energético — {_fuente_e} (kWh)")
             fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
             fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                    legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                    bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
             ev_ener = _pc(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
+            if _fuente_e != 'SEAT':
+                st.caption("Tracción y Baja Tensión se estiman aplicando la proporción del SEAT al total de la fuente (solo el SEAT mide el desglose).")
 
             st.divider()
 
-            # --- 7. Desempeño energético (kWh/km) según el tipo elegido ---
-            st.markdown(f"**Desempeño energético (kWh/km) — {_tipo_ener}**")
-            if _tipo_ener == "Tracción":
-                _e_ide = df_resumen['E_Tr']
-            elif _tipo_ener == "Baja Tensión":
-                _e_ide = df_resumen['E_12']
-            else:
-                _e_ide = df_resumen['E_Tr'] + df_resumen['E_12']
-            _df_ide = df_resumen.copy()
-            _df_ide['kWh/km'] = _e_ide / _df_ide['Odómetro [km]'].replace(0, np.nan)
+            # --- 7. Desempeño energético (kWh/km) según la fuente ---
+            st.markdown(f"**Desempeño energético (kWh/km) — {_fuente_e}**")
+            df_ener_src['kWh/km'] = df_ener_src['Total E'] / df_ener_src['Odómetro [km]'].replace(0, np.nan)
             _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
-            ide_global = (_e_ide.sum() / _tot_odo_ide) if _tot_odo_ide > 0 else 0
+            ide_global = (_tot_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
             _mc = st.columns(4)
-            _mc[0].metric(f"kWh/km {_tipo_ener} (global)", f"{_ncl(ide_global, 2)} kWh/km")
-            fig_ide_bar = px.bar(_df_ide, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
-                                 hover_data=hover_config, title=f"Desempeño Energético — {_tipo_ener} (kWh/km)")
+            _mc[0].metric(f"kWh/km {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
+            fig_ide_bar = px.bar(df_ener_src, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
+                                 hover_data=hover_config, title=f"Desempeño Energético — {_fuente_e} (kWh/km)")
             fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
             fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
