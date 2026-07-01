@@ -3947,10 +3947,10 @@ if _seccion == _SECCIONES[16]:
         _lbl = "Tracción" if (_es_seat and _modo == "Tracción") else ("Total" if _es_seat else "Principal Limache")
 
         _k1, _k2, _k3, _k4 = st.columns(4)
-        _k1.metric(f"{_lbl} período ({_ndias} días)", f"{_ncl(_g_tot, 0)} kWh")
-        _k2.metric(f"Real ({_nr} días)", f"{_ncl(_r_show, 0)} kWh")
-        _k3.metric(f"Proyectado ({_npy} días)", f"{_ncl(_p_show, 0)} kWh")
-        _k4.metric("Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 0)} kWh")
+        _k1.metric(f"{_lbl} período ({_ndias} días)", f"{_ncl(_g_tot, 2)} kWh")
+        _k2.metric(f"Real ({_nr} días)", f"{_ncl(_r_show, 2)} kWh")
+        _k3.metric(f"Proyectado ({_npy} días)", f"{_ncl(_p_show, 2)} kWh")
+        _k4.metric("Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 2)} kWh")
 
         st.markdown("**Real + proyectado del período**")
         _rows = []
@@ -3958,9 +3958,9 @@ if _seccion == _SECCIONES[16]:
         for c in _comps: _rows.append((c[0] + ' [kWh]', _acc_r[c[0]], _acc_p[c[0]]))
         _rows.append((('Total' if _es_seat else 'Principal') + ' [kWh]', sum(_acc_r[c[0]] for c in _comps), sum(_acc_p[c[0]] for c in _comps)))
         _resumen = pd.DataFrame({'Concepto': [r[0] for r in _rows],
-                                 f'Real ({_nr} d)': [round(r[1], 0) for r in _rows],
-                                 f'Proyectado ({_npy} d)': [round(r[2], 0) for r in _rows]})
-        _resumen['Total período'] = (_resumen.iloc[:, 1] + _resumen.iloc[:, 2]).round(0)
+                                 f'Real ({_nr} d)': [round(r[1], 2) for r in _rows],
+                                 f'Proyectado ({_npy} d)': [round(r[2], 2) for r in _rows]})
+        _resumen['Total período'] = (_resumen.iloc[:, 1] + _resumen.iloc[:, 2]).round(2)
         _st_df(_resumen, use_container_width=True, hide_index=True)
         st.caption(f"Período {pd.to_datetime(_fi):%d-%m-%Y} → {pd.to_datetime(_ff):%d-%m-%Y}. Días con dato real toman el real; el resto, lo proyectado. Hay datos reales entre {_pf_real:%d-%m-%Y} y {_ul_real:%d-%m-%Y}.")
 
@@ -3969,15 +3969,15 @@ if _seccion == _SECCIONES[16]:
         st.markdown("**Perfil por tipo de día (mediana del histórico)**")
         if _es_seat:
             _pv = _pf[['Tipo', 'Dias', 'TrenKm_Prog', 'UMR', 'Odom_proy', 'IDE_tr', 'Tracc', 'E12']].copy()
-            _pv['UMR'] = (_pv['UMR'] * 100).round(2); _pv['Total'] = (_pv['Tracc'] + _pv['E12']).round(0)
-            for _col in ['TrenKm_Prog', 'Odom_proy', 'Tracc', 'E12']: _pv[_col] = _pv[_col].round(0)
-            _pv['IDE_tr'] = _pv['IDE_tr'].round(3)
+            _pv['UMR'] = (_pv['UMR'] * 100).round(2); _pv['Total'] = (_pv['Tracc'] + _pv['E12']).round(2)
+            for _col in ['TrenKm_Prog', 'Odom_proy', 'Tracc', 'E12']: _pv[_col] = _pv[_col].round(2)
+            _pv['IDE_tr'] = _pv['IDE_tr'].round(4)
             _pv.columns = ['Tipo', 'Días', 'Tren-Km/día', 'UMR %', 'Odómetro/día', 'IDE tracc.', 'Tracción/día', '12 kV/día', 'Total/día']
             _cap = "Odómetro/día = Tren-Km programado ÷ UMR · Tracción/día = IDE tracc. × odómetro · 12 kV/día = mediana de kWh."
         else:
             _pv = _pf[['Tipo', 'Dias', 'Taller', 'TGSN']].copy()
-            _pv['Principal'] = (_pv['Taller'] + _pv['TGSN']).round(1)
-            _pv['Taller'] = _pv['Taller'].round(1); _pv['TGSN'] = _pv['TGSN'].round(1)
+            _pv['Principal'] = (_pv['Taller'] + _pv['TGSN']).round(2)
+            _pv['Taller'] = _pv['Taller'].round(2); _pv['TGSN'] = _pv['TGSN'].round(2)
             _pv.columns = ['Tipo', 'Días', 'Taller/día', 'SAF LI TGSN/día', 'Principal/día']
             _cap = "Principal/día = mediana(Taller) + mediana(SAF LI TGSN), por tipo de día."
         _st_df(_pv, use_container_width=True, hide_index=True)
