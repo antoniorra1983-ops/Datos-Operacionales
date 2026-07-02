@@ -443,7 +443,7 @@ DATA_DIRS = {
     "v1":"data/thdr_v1","v2":"data/thdr_v2","umr":"data/umr",
     "seat":"data/seat","bill":"data/facturacion",
     "carga_v1":"data/carga_v1", "carga_v2":"data/carga_v2",
-    "viajes":"data/viajes"
+    "viajes":"data/viajes", "ide_lb":"data/ide_lb"
 }
 for _d in DATA_DIRS.values(): os.makedirs(_d, exist_ok=True)
 
@@ -1371,6 +1371,7 @@ with st.sidebar:
     f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True)
     f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True)
     f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True)
+    f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True)
     st.divider()
     if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
         st.session_state["_do_load"] = True
@@ -1379,14 +1380,14 @@ with st.sidebar:
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
                     (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
                     (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
-                    (f_viajes,DATA_DIRS["viajes"])]:
+                    (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"])]:
         for uf in (_ul or []):
             dest=os.path.join(_ca,uf.name)
             if not os.path.exists(dest): guardar_archivo(uf,_ca)
             
     st.divider()
     with st.expander("🗂️ Archivos guardados"):
-        _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación", "carga_v1":"Pasajeros V1", "carga_v2":"Pasajeros V2", "viajes":"Viajes Contrato"}
+        _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación", "carga_v1":"Pasajeros V1", "carga_v2":"Pasajeros V2", "viajes":"Viajes Contrato", "ide_lb":"IDE Línea Base"}
         for _key,_carpeta in DATA_DIRS.items():
             _arch=listar_archivos(_carpeta)
             if _arch:
@@ -1405,6 +1406,7 @@ f_bill_all = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
 f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 f_viajes_all = combinar_fuentes(f_viajes, DATA_DIRS["viajes"])
+f_ide_all = combinar_fuentes(f_ide, DATA_DIRS["ide_lb"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
 _CACHE_VERSION = "v20_tipo_servicio"
@@ -1413,13 +1415,15 @@ _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
               tuple(sorted(f.name for f in f_bill_all)),
               tuple(sorted(f.name for f in f_carga_v1_all)), tuple(sorted(f.name for f in f_carga_v2_all)),
-              tuple(sorted(f.name for f in f_viajes_all)))
+              tuple(sorted(f.name for f in f_viajes_all)),
+              tuple(sorted(f.name for f in f_ide_all)))
               
-_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all,f_viajes_all])
+_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all,f_viajes_all,f_ide_all])
 _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame(); df_viajes=pd.DataFrame()
+df_ide_lb=pd.DataFrame()
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
@@ -1441,6 +1445,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_carga_v1=st.session_state.get('df_carga_v1', pd.DataFrame())
     df_carga_v2=st.session_state.get('df_carga_v2', pd.DataFrame())
     df_viajes=st.session_state.get('df_viajes', pd.DataFrame())
+    df_ide_lb=st.session_state.get('df_ide_lb', pd.DataFrame())
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
@@ -1637,6 +1642,28 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         p_vj = [d for d in p_vj if not d.empty]
         df_viajes = pd.concat(p_vj, ignore_index=True) if p_vj else pd.DataFrame()
 
+    # IDE Línea Base: kWh/km de referencia por día (col5 = trenes 100 y M, col6 = SFE)
+    if f_ide_all:
+        _ide_rows = []
+        for f in f_ide_all:
+            try:
+                _ei = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                _dfi = pd.read_excel(f, header=None, engine=_ei)
+                for _i in range(len(_dfi)):
+                    _fi = pd.to_datetime(_dfi.iloc[_i, 0], errors='coerce')
+                    if pd.isna(_fi):
+                        continue
+                    _fd = _fi.normalize().date()
+                    if start_date <= _fd <= end_date:
+                        _ide_rows.append({
+                            "Fecha": _fi.normalize(),
+                            "IDE_LB_100M": parse_latam_number(_dfi.iloc[_i, 5]),
+                            "IDE_LB_SFE": parse_latam_number(_dfi.iloc[_i, 6])})
+            except Exception as _e:
+                _errores_proc[f.name] = f"IDE LB: {_e}"
+        if _ide_rows:
+            df_ide_lb = pd.DataFrame(_ide_rows).drop_duplicates(subset='Fecha').sort_values('Fecha').reset_index(drop=True)
+
     df_serv_tipo = pd.DataFrame(columns=['Fecha', 'Tipo_Servicio', 'Servicios', 'TrenKm'])
     df_pax_tipo = pd.DataFrame(columns=['Fecha', 'Tipo_Servicio', 'PAX'])
 
@@ -1690,7 +1717,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
-                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo})
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb})
     st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
@@ -1823,6 +1850,7 @@ if not df_ops.empty and _seccion != _SECCIONES[7]:
     df_carga_v1 = _filt_df(df_carga_v1, 'Fecha')
     df_carga_v2 = _filt_df(df_carga_v2, 'Fecha')
     df_viajes = _filt_df(df_viajes, 'Fecha')
+    df_ide_lb = _filt_df(df_ide_lb, 'Fecha')
     df_serv_tipo = _filt_df(df_serv_tipo, 'Fecha')
     df_pax_tipo = _filt_df(df_pax_tipo, 'Fecha')
     all_prmte_full = _filt_regs(all_prmte_full)
@@ -1878,6 +1906,24 @@ if _seccion == _SECCIONES[0]:
                 if col in df_resumen.columns: 
                     hover_config[col] = True
             
+            # Si el rango abarca más de un mes, los gráficos se agrupan por mes
+            _multi_mes = pd.to_datetime(df_resumen['Fecha']).dt.to_period('M').nunique() > 1 if not df_resumen.empty else False
+            def _agr_mes(_df, _sum_cols, _ratios=None, _extra_group=None):
+                if not _multi_mes or _df.empty:
+                    return _df
+                _d = _df.copy()
+                _d['Fecha'] = pd.to_datetime(_d['Fecha']).dt.to_period('M').dt.to_timestamp()
+                _grp = (['Fecha'] + _extra_group) if _extra_group else ['Fecha']
+                _d = _d.groupby(_grp, as_index=False)[_sum_cols].sum()
+                if _ratios:
+                    for _col, (_num, _den, _fac) in _ratios.items():
+                        _d[_col] = _d[_num] / _d[_den].replace(0, np.nan) * _fac
+                return _d
+            def _eje_mes(_fig):
+                if _multi_mes:
+                    _fig.update_xaxes(tickformat='%b %Y', dtick='M1')
+                return _fig
+
             # ====== Gráficos por tipo de servicio (uno por fila, con su tarjeta) ======
             _fechas_ok = set(df_resumen['Fecha'])
             _st = df_serv_tipo[df_serv_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_serv_tipo.empty else df_serv_tipo
@@ -1970,11 +2016,12 @@ if _seccion == _SECCIONES[0]:
             _mc[2].metric("Vía 2", _fmt_int(_pv_s.get('Vía 2', 0)))
             if not _stv.empty:
                 _stg = _stv.groupby(['Fecha', 'Vía'], as_index=False)['Servicios'].sum()
+                _stg = _agr_mes(_stg, ['Servicios'], _extra_group=['Vía'])
                 fig_serv = px.bar(_stg, x='Fecha', y='Servicios', color='Vía', barmode='stack',
                                   color_discrete_map={'Vía 1': '#2563eb', 'Vía 2': '#f59e0b', 'Otros': '#94a3b8'},
                                   category_orders={'Vía': ['Vía 1', 'Vía 2', 'Otros']})
                 fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', textfont=dict(color='white', size=10))
-                _layout_tipo(fig_serv)
+                _layout_tipo(fig_serv); _eje_mes(fig_serv)
                 ev_serv = _pc(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
             else:
                 st.info("Sin datos de servicios (THDR) para el filtro actual.")
@@ -1989,9 +2036,10 @@ if _seccion == _SECCIONES[0]:
                 _mc = st.columns(4)
                 _mc[0].metric("Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
                 _mc[1].metric("Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
-                fig_pax = px.bar(_vd, x='Fecha', y='Total Viajes')
+                _vd_g = _agr_mes(_vd, ['Total Viajes'])
+                fig_pax = px.bar(_vd_g, x='Fecha', y='Total Viajes')
                 fig_pax.update_traces(marker_color='#2563eb', texttemplate='%{y:,.0f}', textposition='inside', textangle=-90, textfont=dict(color='white', size=10), hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
-                _layout_tipo(fig_pax)
+                _layout_tipo(fig_pax); _eje_mes(fig_pax)
                 ev_pax = _pc(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
             else:
                 st.info("Sin datos de viajes por contrato. Carga el archivo **Viajes por Contrato** en la barra lateral.")
@@ -2004,11 +2052,13 @@ if _seccion == _SECCIONES[0]:
             _mc = st.columns(4)
             _mc[0].metric("Tren-Km Total", f"{_ncl(_df_tk['Tren-Km [km]'].sum() if not _df_tk.empty else 0, 1)} km")
             if not _df_tk.empty:
-                fig_tk = px.bar(_df_tk, x='Fecha', y='Tren-Km [km]', color_discrete_sequence=["#0a7d3e"],
+                _df_tk_g = _agr_mes(_df_tk, ['Tren-Km [km]'])
+                fig_tk = px.bar(_df_tk_g, x='Fecha', y='Tren-Km [km]', color_discrete_sequence=["#0a7d3e"],
                                 hover_data=hover_config, title="Tren-Km Real (UMR)")
                 fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
                 fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+                _eje_mes(fig_tk)
                 ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
             else:
                 st.info("Sin datos de Tren-Km (UMR) para el filtro actual.")
@@ -2021,11 +2071,13 @@ if _seccion == _SECCIONES[0]:
             _df_odo = df_resumen[df_resumen['Odómetro [km]'] >= 0] if 'Odómetro [km]' in df_resumen.columns else df_resumen
             _mc = st.columns(4)
             _mc[0].metric("Odómetro Total", f"{_ncl(_df_odo['Odómetro [km]'].sum(), 1)} km")
-            fig_odo = px.bar(_df_odo, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
+            _df_odo_g = _agr_mes(_df_odo, ['Odómetro [km]'])
+            fig_odo = px.bar(_df_odo_g, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
                              hover_data=hover_config, title="Odómetro Real (UMR)")
             fig_odo.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
             fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                   bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            _eje_mes(fig_odo)
             ev_odo = _pc(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
 
             st.divider()
@@ -2036,11 +2088,13 @@ if _seccion == _SECCIONES[0]:
             umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
             _mc = st.columns(4)
             _mc[0].metric("Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
-            fig_umr = px.bar(df_resumen, x='Fecha', y='UMR (%)', color_discrete_sequence=["#E85500"],
+            _df_umr_g = _agr_mes(df_resumen, ['Tren-Km [km]', 'Odómetro [km]'], _ratios={'UMR (%)': ('Tren-Km [km]', 'Odómetro [km]', 100)})
+            fig_umr = px.bar(_df_umr_g, x='Fecha', y='UMR (%)', color_discrete_sequence=["#E85500"],
                              hover_data=hover_config, title="Tasa de Acoplamiento (UMR %)")
             fig_umr.update_traces(texttemplate='%{y:.1f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
             fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                   bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            _eje_mes(fig_umr)
             ev_umr = _pc(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
 
             st.divider()
@@ -2063,13 +2117,15 @@ if _seccion == _SECCIONES[0]:
             _mc[0].metric("Total Energía", f"{_ncl(_tot_e, 1)} kWh")
             _mc[1].metric("Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
             _mc[2].metric("Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
-            fig_ener = px.bar(df_ener_src, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
+            _de_g = _agr_mes(df_ener_src, ['Tracción', 'Baja Tensión'])
+            fig_ener = px.bar(_de_g, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
                               color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
                               hover_data=hover_config, title=f"Consumo Energético — {_fuente_e} (kWh)")
             fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
             fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                    legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                                    bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            _eje_mes(fig_ener)
             ev_ener = _pc(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
             if _fuente_e != 'SEAT':
                 st.caption("Tracción y Baja Tensión se estiman aplicando la proporción del SEAT al total de la fuente (solo el SEAT mide el desglose).")
@@ -2083,11 +2139,13 @@ if _seccion == _SECCIONES[0]:
             ide_global = (_tot_tr_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
             _mc = st.columns(4)
             _mc[0].metric(f"kWh/km tracción {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
-            fig_ide_bar = px.bar(df_ener_src, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
+            _de_ide_g = _agr_mes(df_ener_src, ['Tracción', 'Odómetro [km]'], _ratios={'kWh/km': ('Tracción', 'Odómetro [km]', 1)})
+            fig_ide_bar = px.bar(_de_ide_g, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
                                  hover_data=hover_config, title=f"Desempeño Energético — Tracción {_fuente_e} (kWh/km)")
             fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
             fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                       bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
+            _eje_mes(fig_ide_bar)
             ev_ide_bar = _pc(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
