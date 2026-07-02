@@ -3610,6 +3610,56 @@ if _seccion == _SECCIONES[13]:
             _b['KmTrenR'] = np.nan; _b['KmsxTrenes'] = np.nan
         _has = bool(_b['KmTrenR'].notna().any())
 
+        # ===== 0) IDE real vs Línea Base =====
+        st.markdown("#### 📉 IDE real vs Línea Base")
+        if df_ide_lb is None or df_ide_lb.empty:
+            st.info("Carga el archivo de **IDE Línea Base** (uploader «9. IDE Línea Base») para comparar el IDE real contra la línea base.")
+        else:
+            _lbm = df_ide_lb.copy()
+            _lbm['Fecha'] = pd.to_datetime(_lbm['Fecha']).dt.normalize()
+            _cmp_ide = _b[['Fecha', 'IDE (kWh/km)', 'Odómetro [km]']].copy()
+            _cmp_ide['Fecha'] = pd.to_datetime(_cmp_ide['Fecha']).dt.normalize()
+            _cmp_ide = _cmp_ide.merge(_lbm[['Fecha', 'IDE_LB_100M', 'IDE_LB_SFE']], on='Fecha', how='inner')
+            _cmp_ide = _cmp_ide[_cmp_ide['IDE (kWh/km)'] > 0]
+            if _cmp_ide.empty:
+                st.info("No hay días con IDE real y línea base coincidentes en el período seleccionado.")
+            else:
+                _lb_op = st.radio("Línea base de referencia", ["Trenes 100 y M", "SFE"], horizontal=True, key="_ide_lb_ref")
+                _lb_col = 'IDE_LB_100M' if _lb_op == "Trenes 100 y M" else 'IDE_LB_SFE'
+                _ide_real_prom = float(_cmp_ide['IDE (kWh/km)'].mean())
+                _ide_lb_prom = float(_cmp_ide[_lb_col].mean())
+                _desv = _ide_real_prom - _ide_lb_prom
+                _desv_pct = (_desv / _ide_lb_prom * 100) if _ide_lb_prom > 0 else 0.0
+                _cmp_ide['E_real'] = _cmp_ide['IDE (kWh/km)'] * _cmp_ide['Odómetro [km]']
+                _cmp_ide['E_LB'] = _cmp_ide[_lb_col] * _cmp_ide['Odómetro [km]']
+                _exceso = float((_cmp_ide['E_real'] - _cmp_ide['E_LB']).sum())
+                _m1, _m2, _m3, _m4 = st.columns(4)
+                _m1.metric("IDE real (prom)", f"{_ncl(_ide_real_prom, 3)} kWh/km")
+                _m2.metric(f"Línea Base {_lb_op} (prom)", f"{_ncl(_ide_lb_prom, 3)} kWh/km")
+                _m3.metric("Desvío vs línea base", f"{_ncl(_desv, 3)} kWh/km", f"{_ncl(_desv_pct, 1)} %", delta_color="inverse")
+                _m4.metric("Energía vs línea base", f"{_ncl(_exceso, 0)} kWh", "exceso" if _exceso >= 0 else "ahorro", delta_color="off")
+                _mide = _cmp_ide.rename(columns={'IDE (kWh/km)': 'IDE real', _lb_col: f'Línea Base {_lb_op}'})
+                _fide = px.line(_mide, x='Fecha', y=['IDE real', f'Línea Base {_lb_op}'], markers=True,
+                                color_discrete_map={'IDE real': '#E85500', f'Línea Base {_lb_op}': '#005195'})
+                _fide.update_traces(hovertemplate='%{x}<br>%{fullData.name}: %{y:.3f} kWh/km<extra></extra>')
+                _fide.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh/km', xaxis_title='', legend_title='')
+                _pc(_no_huecos(_fide), use_container_width=True, config={'locale': 'es'})
+                st.caption(f"IDE real = Energía de tracción ÷ Odómetro. Línea Base {_lb_op} = referencia esperada de kWh/km. Desvío positivo = consumo mayor al esperado (peor eficiencia). Energía vs línea base = tracción real − la esperada por la línea base para el odómetro recorrido (positivo = exceso, negativo = ahorro).")
+                with st.expander("Ver tabla diaria IDE vs línea base", expanded=False):
+                    _ti = _cmp_ide.copy()
+                    _ti['Desvío'] = _ti['IDE (kWh/km)'] - _ti[_lb_col]
+                    _ti['Exceso kWh'] = _ti['E_real'] - _ti['E_LB']
+                    _ti = _ti[['Fecha', 'IDE (kWh/km)', _lb_col, 'Desvío', 'Odómetro [km]', 'Exceso kWh']].copy()
+                    _ti['Fecha'] = _ti['Fecha'].dt.strftime('%d-%m-%Y')
+                    _ti = _ti.rename(columns={'IDE (kWh/km)': 'IDE real', _lb_col: f'LB {_lb_op}', 'Odómetro [km]': 'Odómetro'})
+                    for _c in _ti.columns:
+                        if _c == 'Fecha':
+                            continue
+                        _dec = 3 if _c in ('IDE real', f'LB {_lb_op}', 'Desvío') else 0
+                        _ti[_c] = _ti[_c].map(lambda _v, _d=_dec: _ncl(_v, _d) if pd.notna(_v) else '—')
+                    _st_df(_ti, use_container_width=True, hide_index=True)
+        st.divider()
+
         # ===== 1) Gestión de Flota por Corte y Acople =====
         st.markdown("#### 🚆 Gestión de Flota por Corte y Acople")
         if _has:
