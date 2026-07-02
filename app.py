@@ -2293,6 +2293,64 @@ if _seccion == _SECCIONES[3]:
             dv_ener = df_ops[['Fecha', 'E_Total', 'E_Tr', 'E_12', '% Tracción', '% 12 kV', 'Fuente']].copy()
             dv_ener['Fecha'] = dv_ener['Fecha'].dt.strftime('%d-%m-%Y')
             _st_df(make_columns_unique(dv_ener), use_container_width=True, hide_index=True)
+            _buf_e = BytesIO()
+            with pd.ExcelWriter(_buf_e, engine='openpyxl') as _w:
+                dv_ener.to_excel(_w, sheet_name='Energía diaria', index=False)
+            st.download_button("⬇️ Descargar tabla en Excel", data=_buf_e.getvalue(), file_name="energia_diaria.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # ===== Consumo PRMTE y Factura: por día y por hora =====
+        if all_prmte_full or all_fact_full:
+            st.divider()
+            st.markdown("#### ⏱️ Consumo PRMTE y Factura — por día y por hora")
+            _cmap_h = {'PRMTE': '#0891b2', 'Factura': '#7c3aed'}
+            _srcs_h = []
+            if all_prmte_full: _srcs_h.append(('PRMTE', all_prmte_full))
+            if all_fact_full: _srcs_h.append(('Factura', all_fact_full))
+            _hh = []
+            for _nm, _regs in _srcs_h:
+                _d = pd.DataFrame(_regs)
+                _d['Fecha'] = pd.to_datetime(_d['Fecha']).dt.normalize()
+                _g = _d.groupby(['Fecha', 'Hora'], as_index=False)['Consumo'].sum()
+                _g['Fuente'] = _nm
+                _hh.append(_g)
+            _hh = pd.concat(_hh, ignore_index=True)
+            _c1h, _c2h = st.columns(2)
+            with _c1h:
+                _dd = _hh.groupby(['Fecha', 'Fuente'], as_index=False)['Consumo'].sum()
+                _fdia = px.bar(_dd, x='Fecha', y='Consumo', color='Fuente', barmode='group', color_discrete_map=_cmap_h)
+                _fdia.update_traces(hovertemplate='%{x}<br>%{fullData.name}: %{y:,.0f} kWh<extra></extra>')
+                _fdia.update_layout(height=330, margin=dict(t=40, b=0, l=0, r=0), title="Consumo por día (kWh)",
+                                    yaxis_title='kWh', xaxis_title='', legend_title='')
+                _pc(_no_huecos(_fdia), use_container_width=True, config={'locale': 'es'})
+            with _c2h:
+                _dias_h = sorted(_hh['Fecha'].dt.date.unique())
+                _sel_h = st.selectbox("Perfil horario de:", ["Promedio del período"] + [d.strftime('%d-%m-%Y') for d in _dias_h], key="_ener_hora_dia")
+                if _sel_h == "Promedio del período":
+                    _ph = _hh.groupby(['Hora', 'Fuente'], as_index=False)['Consumo'].mean()
+                    _tit_h = "Consumo por hora (promedio diario, kWh)"
+                else:
+                    _fsel = pd.to_datetime(_sel_h, format='%d-%m-%Y')
+                    _ph = _hh[_hh['Fecha'] == _fsel].groupby(['Hora', 'Fuente'], as_index=False)['Consumo'].sum()
+                    _tit_h = f"Consumo por hora — {_sel_h} (kWh)"
+                _ph = _ph.sort_values('Hora')
+                _fhora = px.line(_ph, x='Hora', y='Consumo', color='Fuente', markers=True, color_discrete_map=_cmap_h)
+                _fhora.update_traces(hovertemplate='%{x}<br>%{fullData.name}: %{y:,.1f} kWh<extra></extra>')
+                _fhora.update_layout(height=330, margin=dict(t=40, b=0, l=0, r=0), title=_tit_h,
+                                     yaxis_title='kWh', xaxis_title='', legend_title='')
+                _pc(_fhora, use_container_width=True, config={'locale': 'es'})
+            st.caption("PRMTE viene en registros de 15 minutos (se suman a la hora); la Factura viene horaria. El perfil horario en «Promedio del período» muestra el kWh promedio de cada hora entre los días del rango; eligiendo una fecha se ve el detalle horario de ese día.")
+            with st.expander("Ver tabla horaria — mostrar / ocultar", expanded=False):
+                _th = _hh.pivot_table(index=['Fecha', 'Hora'], columns='Fuente', values='Consumo', aggfunc='sum').reset_index()
+                _th['Fecha'] = _th['Fecha'].dt.strftime('%d-%m-%Y')
+                _st_df(make_columns_unique(_th), use_container_width=True, hide_index=True)
+                _buf_h = BytesIO()
+                with pd.ExcelWriter(_buf_h, engine='openpyxl') as _w:
+                    _th.to_excel(_w, sheet_name='Por hora', index=False)
+                    _ddx = _dd.copy(); _ddx['Fecha'] = _ddx['Fecha'].dt.strftime('%d-%m-%Y')
+                    _ddx.to_excel(_w, sheet_name='Por día', index=False)
+                st.download_button("⬇️ Descargar horario en Excel", data=_buf_h.getvalue(), file_name="prmte_factura_horario.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else: st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
 
 if _seccion == _SECCIONES[4]:
