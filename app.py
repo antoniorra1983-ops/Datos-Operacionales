@@ -2342,7 +2342,8 @@ if _seccion == _SECCIONES[3]:
             st.caption("PRMTE viene en registros de 15 minutos (se suman a la hora); la Factura viene horaria. El perfil horario en «Promedio del período» muestra el kWh promedio de cada hora entre los días del rango; eligiendo una fecha se ve el detalle horario de ese día.")
             with st.expander("Ver tabla horaria — mostrar / ocultar", expanded=False):
                 _th = _hh.pivot_table(index=['Fecha', 'Hora'], columns='Fuente', values='Consumo', aggfunc='sum').reset_index()
-                _th['Fecha'] = _th['Fecha'].dt.strftime('%d-%m-%Y')
+                _th['Fecha'] = (pd.to_datetime(_th['Fecha']) + pd.to_timedelta(_th['Hora'].str.slice(0, 2).astype(int), unit='h')).dt.strftime('%d-%m-%y %H:%M:%S')
+                _th = _th.drop(columns=['Hora'])
                 _st_df(make_columns_unique(_th), use_container_width=True, hide_index=True)
                 _buf_h = BytesIO()
                 with pd.ExcelWriter(_buf_h, engine='openpyxl') as _w:
