@@ -1657,6 +1657,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                     if start_date <= _fd <= end_date:
                         _ide_rows.append({
                             "Fecha": _fi.normalize(),
+                            "Intercepcion": parse_latam_number(_dfi.iloc[_i, 4]),
                             "IDE_LB_100M": parse_latam_number(_dfi.iloc[_i, 5]),
                             "IDE_LB_SFE": parse_latam_number(_dfi.iloc[_i, 6])})
             except Exception as _e:
@@ -3614,48 +3615,63 @@ if _seccion == _SECCIONES[13]:
         st.markdown("#### 📉 IDE real vs Línea Base")
         if df_ide_lb is None or df_ide_lb.empty:
             st.info("Carga el archivo de **IDE Línea Base** (uploader «9. IDE Línea Base») para comparar el IDE real contra la línea base.")
+        elif 'Intercepcion' not in df_ide_lb.columns:
+            st.info("Vuelve a apretar «🔄 Cargar / actualizar datos» para recargar la línea base con la columna Intercepción.")
         else:
+            # Odómetro SFE diario (hoy solo el tren 412) desde el kilometraje por tren del UMR
+            _osfe = pd.DataFrame({'Fecha': pd.Series(dtype='datetime64[ns]'), 'Odom_SFE': pd.Series(dtype='float')})
+            if all_tr:
+                _dtr = pd.DataFrame(all_tr)
+                _dtr = _dtr[(_dtr['Clase'] == 'km') & _dtr['Tren'].astype(str).str.upper().str.startswith('SFE')]
+                if not _dtr.empty:
+                    _dtr['Fecha'] = pd.to_datetime(_dtr['Fecha']).dt.normalize()
+                    _osfe = _dtr.groupby('Fecha', as_index=False)['Valor'].sum().rename(columns={'Valor': 'Odom_SFE'})
             _lbm = df_ide_lb.copy()
             _lbm['Fecha'] = pd.to_datetime(_lbm['Fecha']).dt.normalize()
-            _cmp_ide = _b[['Fecha', 'IDE (kWh/km)', 'Odómetro [km]']].copy()
-            _cmp_ide['Fecha'] = pd.to_datetime(_cmp_ide['Fecha']).dt.normalize()
-            _cmp_ide = _cmp_ide.merge(_lbm[['Fecha', 'IDE_LB_100M', 'IDE_LB_SFE']], on='Fecha', how='inner')
-            _cmp_ide = _cmp_ide[_cmp_ide['IDE (kWh/km)'] > 0]
-            if _cmp_ide.empty:
-                st.info("No hay días con IDE real y línea base coincidentes en el período seleccionado.")
+            _ci = _b[['Fecha', 'Odómetro [km]', 'E_Tr', 'IDE (kWh/km)']].copy()
+            _ci['Fecha'] = pd.to_datetime(_ci['Fecha']).dt.normalize()
+            _ci = _ci.merge(_lbm[['Fecha', 'Intercepcion', 'IDE_LB_100M', 'IDE_LB_SFE']], on='Fecha', how='inner')
+            _ci = _ci.merge(_osfe, on='Fecha', how='left')
+            _ci['Odom_SFE'] = _ci['Odom_SFE'].fillna(0.0)
+            _ci = _ci[_ci['Odómetro [km]'] > 0]
+            if _ci.empty:
+                st.info("No hay días con odómetro y línea base coincidentes en el período seleccionado.")
             else:
-                _lb_op = st.radio("Línea base de referencia", ["Trenes 100 y M", "SFE"], horizontal=True, key="_ide_lb_ref")
-                _lb_col = 'IDE_LB_100M' if _lb_op == "Trenes 100 y M" else 'IDE_LB_SFE'
-                _ide_real_prom = float(_cmp_ide['IDE (kWh/km)'].mean())
-                _ide_lb_prom = float(_cmp_ide[_lb_col].mean())
-                _desv = _ide_real_prom - _ide_lb_prom
-                _desv_pct = (_desv / _ide_lb_prom * 100) if _ide_lb_prom > 0 else 0.0
-                _cmp_ide['E_real'] = _cmp_ide['IDE (kWh/km)'] * _cmp_ide['Odómetro [km]']
-                _cmp_ide['E_LB'] = _cmp_ide[_lb_col] * _cmp_ide['Odómetro [km]']
-                _exceso = float((_cmp_ide['E_real'] - _cmp_ide['E_LB']).sum())
+                _ci['Odom_100M'] = _ci['Odómetro [km]'] - _ci['Odom_SFE']
+                _ci['E_LB'] = _ci['Intercepcion'] + _ci['IDE_LB_100M'] * _ci['Odom_100M'] + _ci['IDE_LB_SFE'] * _ci['Odom_SFE']
+                _ci['IDE_LB'] = _ci['E_LB'] / _ci['Odómetro [km]'].replace(0, np.nan)
+                _ci['E_real'] = _ci['E_Tr'].where(_ci['E_Tr'] > 0, _ci['IDE (kWh/km)'] * _ci['Odómetro [km]'])
+                _ci['Desvío'] = _ci['IDE (kWh/km)'] - _ci['IDE_LB']
+                _ci['Exceso kWh'] = _ci['E_real'] - _ci['E_LB']
+                _odo_t = float(_ci['Odómetro [km]'].sum())
+                _ide_real_g = (float(_ci['E_real'].sum()) / _odo_t) if _odo_t > 0 else 0.0
+                _ide_lb_g = (float(_ci['E_LB'].sum()) / _odo_t) if _odo_t > 0 else 0.0
+                _desv_g = _ide_real_g - _ide_lb_g
+                _desv_pct = (_desv_g / _ide_lb_g * 100) if _ide_lb_g else 0.0
+                _exc = float(_ci['Exceso kWh'].sum())
                 _m1, _m2, _m3, _m4 = st.columns(4)
-                _m1.metric("IDE real (prom)", f"{_ncl(_ide_real_prom, 3)} kWh/km")
-                _m2.metric(f"Línea Base {_lb_op} (prom)", f"{_ncl(_ide_lb_prom, 3)} kWh/km")
-                _m3.metric("Desvío vs línea base", f"{_ncl(_desv, 3)} kWh/km", f"{_ncl(_desv_pct, 1)} %", delta_color="inverse")
-                _m4.metric("Energía vs línea base", f"{_ncl(_exceso, 0)} kWh", "exceso" if _exceso >= 0 else "ahorro", delta_color="off")
-                _mide = _cmp_ide.rename(columns={'IDE (kWh/km)': 'IDE real', _lb_col: f'Línea Base {_lb_op}'})
-                _fide = px.line(_mide, x='Fecha', y=['IDE real', f'Línea Base {_lb_op}'], markers=True,
-                                color_discrete_map={'IDE real': '#E85500', f'Línea Base {_lb_op}': '#005195'})
+                _m1.metric("IDE real (período)", f"{_ncl(_ide_real_g, 3)} kWh/km")
+                _m2.metric("IDE Línea Base (período)", f"{_ncl(_ide_lb_g, 3)} kWh/km")
+                _m3.metric("Desvío vs línea base", f"{_ncl(_desv_g, 3)} kWh/km", f"{_ncl(_desv_pct, 1)} %", delta_color="inverse")
+                _m4.metric("Energía vs línea base", f"{_ncl(_exc, 0)} kWh", "exceso" if _exc >= 0 else "ahorro", delta_color="off")
+                if float(_ci['Odom_SFE'].sum()) <= 0:
+                    st.caption("⚠️ No se encontró kilometraje de trenes SFE en el UMR del período: la línea base se calculó tratando todo el odómetro como trenes 100 y M.")
+                _mide = _ci.rename(columns={'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE Línea Base'})
+                _fide = px.line(_mide, x='Fecha', y=['IDE real', 'IDE Línea Base'], markers=True,
+                                color_discrete_map={'IDE real': '#E85500', 'IDE Línea Base': '#005195'})
                 _fide.update_traces(hovertemplate='%{x}<br>%{fullData.name}: %{y:.3f} kWh/km<extra></extra>')
                 _fide.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh/km', xaxis_title='', legend_title='')
                 _pc(_no_huecos(_fide), use_container_width=True, config={'locale': 'es'})
-                st.caption(f"IDE real = Energía de tracción ÷ Odómetro. Línea Base {_lb_op} = referencia esperada de kWh/km. Desvío positivo = consumo mayor al esperado (peor eficiencia). Energía vs línea base = tracción real − la esperada por la línea base para el odómetro recorrido (positivo = exceso, negativo = ahorro).")
+                st.caption("Energía tracción LB = Intercepción + kWh/km (100 y M) × (Odómetro total − Odómetro SFE) + kWh/km (SFE) × Odómetro SFE. IDE LB = Energía tracción LB ÷ Odómetro total. Desvío positivo = consumo real mayor al esperado por la línea base.")
                 with st.expander("Ver tabla diaria IDE vs línea base", expanded=False):
-                    _ti = _cmp_ide.copy()
-                    _ti['Desvío'] = _ti['IDE (kWh/km)'] - _ti[_lb_col]
-                    _ti['Exceso kWh'] = _ti['E_real'] - _ti['E_LB']
-                    _ti = _ti[['Fecha', 'IDE (kWh/km)', _lb_col, 'Desvío', 'Odómetro [km]', 'Exceso kWh']].copy()
+                    _ti = _ci[['Fecha', 'Odómetro [km]', 'Odom_SFE', 'Odom_100M', 'IDE (kWh/km)', 'IDE_LB', 'Desvío', 'E_real', 'E_LB', 'Exceso kWh']].copy()
                     _ti['Fecha'] = _ti['Fecha'].dt.strftime('%d-%m-%Y')
-                    _ti = _ti.rename(columns={'IDE (kWh/km)': 'IDE real', _lb_col: f'LB {_lb_op}', 'Odómetro [km]': 'Odómetro'})
+                    _ti = _ti.rename(columns={'Odómetro [km]': 'Odóm. total', 'Odom_SFE': 'Odóm. SFE', 'Odom_100M': 'Odóm. 100 y M',
+                                              'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE LB', 'E_real': 'E tracción real', 'E_LB': 'E tracción LB'})
                     for _c in _ti.columns:
                         if _c == 'Fecha':
                             continue
-                        _dec = 3 if _c in ('IDE real', f'LB {_lb_op}', 'Desvío') else 0
+                        _dec = 3 if _c in ('IDE real', 'IDE LB', 'Desvío') else 0
                         _ti[_c] = _ti[_c].map(lambda _v, _d=_dec: _ncl(_v, _d) if pd.notna(_v) else '—')
                     _st_df(_ti, use_container_width=True, hide_index=True)
         st.divider()
