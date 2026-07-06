@@ -2249,16 +2249,15 @@ if _seccion == _SECCIONES[1]:
             _pc(_fig_kt, use_container_width=True, config={'locale': 'es'})
             st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención.")
             if not _tk_tren.empty:
-                st.markdown("#### Odómetro vs Tren-Km por tren")
-                _cmpk = _res_tr.melt(id_vars=['Tren'], value_vars=['Km recorridos', 'Tren-Km THDR'], var_name='Métrica', value_name='km')
-                _cmpk['Métrica'] = _cmpk['Métrica'].map({'Km recorridos': 'Odómetro (UMR)', 'Tren-Km THDR': 'Tren-Km (THDR)'})
-                _fig_cmp = px.bar(_cmpk, x='km', y='Tren', orientation='h', color='Métrica', barmode='group',
-                                  color_discrete_map={'Odómetro (UMR)': '#005195', 'Tren-Km (THDR)': '#0a7d3e'})
-                _fig_cmp.update_layout(height=max(380, 26 * _res_tr['Tren'].nunique()), margin=dict(t=10, b=0, l=0, r=0),
-                                       yaxis=dict(autorange='reversed', title=''), legend_title='',
-                                       legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='right', x=1))
+                st.markdown("#### Tren-Km por tren")
+                _tkg = _res_tr[_res_tr['Tren-Km THDR'] > 0].sort_values('Tren-Km THDR', ascending=False)
+                _fig_cmp = px.bar(_tkg, x='Tren-Km THDR', y='Tren', orientation='h', text='Tren-Km THDR',
+                                  color='Tipo', color_discrete_map={'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Otro': '#888888'})
+                _fig_cmp.update_traces(texttemplate='%{x:,.0f}', textposition='outside', cliponaxis=False)
+                _fig_cmp.update_layout(height=max(360, 24 * len(_tkg)), margin=dict(t=10, b=0, l=0, r=0),
+                                       yaxis=dict(autorange='reversed', title=''), xaxis_title='km', legend_title='')
                 _pc(_fig_cmp, use_container_width=True, config={'locale': 'es'})
-                st.caption("Tren-Km (THDR) = km de servicios comerciales asignados a cada motriz según el tipo de servicio del THDR (en composiciones dobles el km del viaje suma a ambas motrices). La diferencia con el odómetro corresponde a movimientos sin servicio: vacío, maniobras y traslados.")
+                st.caption("Tren-Km = km de servicios comerciales asignados a cada motriz según el tipo de servicio del THDR (en composiciones dobles el km del viaje suma a ambas motrices). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja).")
             if not _flota_tr.empty:
                 st.markdown("#### Km diario de la flota")
                 _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
