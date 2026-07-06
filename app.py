@@ -2343,6 +2343,16 @@ if _seccion == _SECCIONES[1]:
             st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención.")
             if not _tk_tren.empty:
                 st.markdown("#### Tren-Km por tren")
+                _tkm_tot = float(_res_tr['Tren-Km THDR'].sum())
+                _n_srv = int((_res_tr['Tren-Km THDR'] > 0).sum())
+                _desc_tot = float(_res_tr['Desc. incidentes'].sum()) if 'Desc. incidentes' in _res_tr.columns else 0.0
+                _top_tk = _res_tr.loc[_res_tr['Tren-Km THDR'].idxmax()] if _tkm_tot > 0 else None
+                _k1, _k2, _k3, _k4 = st.columns(4)
+                _k1.metric("Trenes con servicio", _ncl(_n_srv, 0))
+                _k2.metric("Tren-Km total flota", f"{_ncl(_tkm_tot, 0)} km")
+                _k3.metric("Descuento corte/acople", f"{_ncl(_desc_tot, 0)} km")
+                _k4.metric("Tren con más servicio", str(_top_tk['Tren']) if _top_tk is not None else "—",
+                           f"{_ncl(_top_tk['Tren-Km THDR'], 0)} km" if _top_tk is not None else None)
                 _tkg = _res_tr[_res_tr['Tren-Km THDR'] > 0].sort_values('Tren-Km THDR', ascending=False)
                 _fig_cmp = px.bar(_tkg, x='Tren-Km THDR', y='Tren', orientation='h', text='Tren-Km THDR',
                                   color='Tipo', color_discrete_map={'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Otro': '#888888'})
