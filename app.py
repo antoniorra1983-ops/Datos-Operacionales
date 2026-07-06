@@ -1359,6 +1359,9 @@ with st.sidebar:
     st.header("📅 Filtro Global")
     dr = st.date_input("Rango", value=(date(2026,1,1), date(2026,1,31)))
     start_date, end_date = (dr[0],dr[1]) if isinstance(dr,tuple) and len(dr)==2 else (dr,dr)
+    if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
+        st.session_state["_do_load"] = True
+    st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
     st.divider()
     
     def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
@@ -1372,10 +1375,6 @@ with st.sidebar:
     f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True)
     f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True)
     f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True)
-    st.divider()
-    if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
-        st.session_state["_do_load"] = True
-    st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
     
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
                     (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
