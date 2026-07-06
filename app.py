@@ -1493,6 +1493,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             _t = str(df_raw.iloc[i, 0]).strip().upper()
                             if re.match(r'^4\d{2}(\.0+)?$', _t):
                                 _t = f"SFE {int(float(_t))}"
+                            _msfe = re.match(r'^SFE[\s\-_.]*0*(\d+)$', _t)
+                            if _msfe:
+                                _t = f"SFE {int(_msfe.group(1))}"
                             if _clase and _fcols and re.match(r'^(M|XM|SFE)', _t):
                                 for j, _fe in _fcols.items():
                                     if start_date <= _fe.date() <= end_date:
@@ -2187,10 +2190,19 @@ if _seccion == _SECCIONES[1]:
                             if 28 <= _n <= 35: return f"XM{_n}"
                             return f"SFE {_n}"
                         _lt['TrenTHDR'] = _lt['NMot'].map(_nom_mot)
-                        _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(' ', '', regex=False)
+                        _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
                         _tk_tren = _lt.groupby(['_key', 'TrenTHDR'], as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
             if not _tk_tren.empty:
-                _res_tr['_key'] = _res_tr['Tren'].astype(str).str.upper().str.replace(' ', '', regex=False)
+                _res_tr['_key'] = _res_tr['Tren'].astype(str).str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
+                if _res_tr['_key'].duplicated().any():
+                    _agg = {'Tren': 'first', 'Tipo': 'first'}
+                    for _c in ['Km recorridos', 'Días activos']:
+                        if _c in _res_tr.columns: _agg[_c] = 'sum'
+                    for _c in ['Km máx (día)', 'Odómetro actual']:
+                        if _c in _res_tr.columns: _agg[_c] = 'max'
+                    _res_tr = _res_tr.groupby('_key', as_index=False).agg(_agg)
+                    if {'Km recorridos', 'Días activos'}.issubset(_res_tr.columns):
+                        _res_tr['Km/día (prom)'] = (_res_tr['Km recorridos'] / _res_tr['Días activos'].replace(0, np.nan)).round(0)
                 _res_tr = _res_tr.merge(_tk_tren, on='_key', how='outer')
                 _res_tr['Tren'] = _res_tr['Tren'].fillna(_res_tr['TrenTHDR'])
                 _res_tr = _res_tr.drop(columns=['_key', 'TrenTHDR'])
