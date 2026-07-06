@@ -1491,6 +1491,8 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             if len(_ff) >= 3:
                                 _fcols = _ff
                             _t = str(df_raw.iloc[i, 0]).strip().upper()
+                            if re.match(r'^4\d{2}(\.0+)?$', _t):
+                                _t = f"SFE {int(float(_t))}"
                             if _clase and _fcols and re.match(r'^(M|XM|SFE)', _t):
                                 for j, _fe in _fcols.items():
                                     if start_date <= _fe.date() <= end_date:
@@ -2184,14 +2186,23 @@ if _seccion == _SECCIONES[1]:
                             if 1 <= _n <= 27: return f"M{_n:02d}"
                             if 28 <= _n <= 35: return f"XM{_n}"
                             return f"SFE {_n}"
-                        _lt['_key'] = _lt['NMot'].map(_nom_mot).str.upper().str.replace(' ', '', regex=False)
-                        _tk_tren = _lt.groupby('_key', as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
+                        _lt['TrenTHDR'] = _lt['NMot'].map(_nom_mot)
+                        _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(' ', '', regex=False)
+                        _tk_tren = _lt.groupby(['_key', 'TrenTHDR'], as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
             if not _tk_tren.empty:
                 _res_tr['_key'] = _res_tr['Tren'].astype(str).str.upper().str.replace(' ', '', regex=False)
-                _res_tr = _res_tr.merge(_tk_tren, on='_key', how='left').drop(columns=['_key'])
+                _res_tr = _res_tr.merge(_tk_tren, on='_key', how='outer')
+                _res_tr['Tren'] = _res_tr['Tren'].fillna(_res_tr['TrenTHDR'])
+                _res_tr = _res_tr.drop(columns=['_key', 'TrenTHDR'])
+                _res_tr['Km recorridos'] = _res_tr['Km recorridos'].fillna(0.0)
                 _res_tr['Tren-Km THDR'] = _res_tr['Tren-Km THDR'].fillna(0.0)
+                if 'Días activos' in _res_tr.columns:
+                    _res_tr['Días activos'] = _res_tr['Días activos'].fillna(0)
+                _res_tr['Tipo'] = _res_tr['Tipo'].fillna(_res_tr['Tren'].map(
+                    lambda _s: 'SFE' if str(_s).upper().startswith('SFE') else ('XT-M' if str(_s).upper().startswith('XM') else ('XT-100' if str(_s).upper().startswith('M') else 'Otro'))))
                 _res_tr['UMR tren (%)'] = np.where(_res_tr['Km recorridos'] > 0,
                                                    _res_tr['Tren-Km THDR'] / _res_tr['Km recorridos'] * 100, np.nan)
+                _res_tr = _res_tr.sort_values('Km recorridos', ascending=False).reset_index(drop=True)
             _km_tot_tr = float(_res_tr['Km recorridos'].sum())
             _act_tr = _res_tr[_res_tr['Km recorridos'] > 0]
             _n_act = int(len(_act_tr))
