@@ -621,7 +621,7 @@ def _pc(_fig, key=None, **kw):
     _modo = _modo_x_temporal(_fig)
     if not _modo:
         return st.plotly_chart(_fig, **kw)
-    _scope = 'thdr' if ('_SECCIONES' in globals() and '_seccion' in globals() and _seccion == _SECCIONES[7]) else 'global'
+    _scope = 'thdr' if ('_SECCIONES' in globals() and '_seccion' in globals() and _seccion == _SECCIONES[6]) else 'global'
     try:
         _fig.update_layout(clickmode='event+select')
     except Exception:
@@ -1735,7 +1735,7 @@ st.markdown("""<style>
 .st-key-_topbar [data-testid="stImage"] { margin: 0 !important; }
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
 </style>""", unsafe_allow_html=True)
-_SECCIONES = ["📊 Resumen", "📑 Operaciones", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
+_SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
               "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía", "🧱 Constructor de datos", "🔮 Proyección de energía"]
 
 with st.container(key="_topbar"):
@@ -1758,7 +1758,7 @@ elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
 _J_COD = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
-if not df_ops.empty and _seccion != _SECCIONES[7]:
+if not df_ops.empty and _seccion != _SECCIONES[6]:
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _dts_all = sorted(set(_ff.dropna().dt.date))
     _anios = sorted({d.year for d in _dts_all}, reverse=True)
@@ -2151,14 +2151,6 @@ if _seccion == _SECCIONES[0]:
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 if _seccion == _SECCIONES[1]:
-    if not df_ops.empty:
-        dv=df_ops.copy()
-        dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
-        st.write("### Datos Consolidados de Operaciones y Energía")
-        _st_df(make_columns_unique(dv), use_container_width=True)
-    else: st.info("No hay datos de operaciones en el rango seleccionado.")
-
-if _seccion == _SECCIONES[2]:
     if all_tr:
         _res_tr, _flota_tr, _pivk_tr = _km_por_tren(all_tr)
         if _res_tr.empty:
@@ -2245,7 +2237,7 @@ if _seccion == _SECCIONES[2]:
             _at_ks['Fecha'] = _at_ks['Fecha'].dt.strftime('%d-%m-%Y')
             _st_df(_at_ks, use_container_width=True, hide_index=True)
 
-if _seccion == _SECCIONES[3]:
+if _seccion == _SECCIONES[2]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
         st.header("🔋 Comparación de energías: Total · Tracción · 12 kV")
         _de = df_ops[df_ops['E_Total'] > 0].copy()
@@ -2354,7 +2346,15 @@ if _seccion == _SECCIONES[3]:
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else: st.info("No hay datos de energía procesados (Facturación, PRMTE o SEAT).")
 
-if _seccion == _SECCIONES[4]:
+    # --- Datos consolidados (fusionado desde la pestaña Operaciones) ---
+    if not df_ops.empty:
+        st.divider()
+        with st.expander("📑 Datos consolidados de operaciones y energía — mostrar / ocultar", expanded=False):
+            dv = df_ops.copy()
+            dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
+            _st_df(make_columns_unique(dv), use_container_width=True)
+
+if _seccion == _SECCIONES[3]:
     if all_prmte_full:
         st.markdown("### 🔍 Análisis Granular de Consumo (15 min y Horario)")
         st.markdown("Este panel permite auditar el comportamiento eléctrico de la flota detectando consumos parásitos (nocturnos) y picos de demanda críticos.")
@@ -2463,7 +2463,7 @@ if _seccion == _SECCIONES[4]:
     else: 
         st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para habilitar el Centro de Control de Anomalías.")
 
-if _seccion == _SECCIONES[5]:
+if _seccion == _SECCIONES[4]:
     st.markdown("### 🌙 Consumo Base Nocturno (Mediana)")
     if all_prmte_full:
         st.caption("Ventana nocturna por tipo de día — Laboral: 00:00–06:00 · Sábado: 00:00–07:00 · Domingo/Festivo: 00:00–08:00. Se usa la mediana porque es robusta frente a días atípicos.")
@@ -2531,7 +2531,7 @@ if _seccion == _SECCIONES[5]:
     else:
         st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para este análisis de consumo nocturno.")
 
-if _seccion == _SECCIONES[6]:
+if _seccion == _SECCIONES[5]:
     if not df_ops.empty and df_ops['IDE (kWh/km)'].sum() > 0:
         st.write("### Detección de Valores Atípicos (IDE)")
         mean_ide = df_ops['IDE (kWh/km)'].mean()
@@ -2559,7 +2559,7 @@ if _seccion == _SECCIONES[6]:
         else: st.success("✅ No se detectaron valores atípicos significativos (Z-score > 2) en el periodo analizado.")
     else: st.info("No hay datos de IDE calculados para analizar.")
 
-if _seccion == _SECCIONES[7]:
+if _seccion == _SECCIONES[6]:
     st.markdown("### 📋 THDR — Servicios y Tiempos de Viaje")
     st.markdown("<style>.tv-card{border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#ffffff,#f7fafc);box-shadow:0 1px 4px rgba(15,23,42,.07)}.tv-head{font-weight:800;color:#005195;font-size:1.02rem;margin-bottom:.55rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}.tv-badge{background:#005195;color:#fff;font-size:.68rem;padding:2px 9px;border-radius:999px;font-weight:700}.tv-badge-alt{background:#0a7c6e}.tv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.tv-stat{background:#fff;border:1px solid #eef2f7;border-radius:10px;padding:7px 10px;text-align:center}.tv-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}.tv-val{font-size:1.22rem;font-weight:800;color:#0f172a;font-variant-numeric:tabular-nums}.tv-foot{margin-top:.5rem;font-size:.74rem;color:#64748b;text-align:right}</style>", unsafe_allow_html=True)
     df_thdr_v1, df_thdr_v2, _thdr_mk = _thdr_filtros()
@@ -2666,7 +2666,7 @@ if _seccion == _SECCIONES[7]:
             st.caption("Mostrando hasta 50 registros.")
         else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
-if _seccion == _SECCIONES[8]:
+if _seccion == _SECCIONES[7]:
     st.markdown("### 🔬 Análisis Multivariante: PAX vs Tiempos vs Energía")
     st.markdown("Este módulo utiliza estadística robusta para cruzar la demanda real con la fricción operativa (Tiempos de Viaje/Detenciones) y explicar el gasto de Tracción.")
     
@@ -3153,7 +3153,7 @@ if _seccion == _SECCIONES[8]:
     else: 
         st.info("⚠️ Carga archivos de **THDR (Vía 1 y 2), Facturación/PRMTE/SEAT y Carga de Pasajeros** para habilitar el Microscopio Operacional.")
 
-if _seccion == _SECCIONES[9]:
+if _seccion == _SECCIONES[8]:
     st.write("### Flujo y Carga de Pasajeros")
     if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
         _tot_vj = float(df_viajes['Total Viajes'].sum())
@@ -3220,7 +3220,7 @@ if _seccion == _SECCIONES[9]:
     else:
         st.info("Arriba está el total de **Viajes por Contrato**. Para ver también la **carga a bordo por estación** (Vía 1 / Vía 2), cargá los archivos **Carga Pasajeros V1 / V2** (uploaders 6 y 7).")
 
-if _seccion == _SECCIONES[10]:
+if _seccion == _SECCIONES[9]:
     st.markdown("### 📝 Análisis Ejecutivo Automático")
     if not df_ops.empty:
         if 'filtro_dia' in locals():
@@ -3388,7 +3388,7 @@ if _seccion == _SECCIONES[10]:
     else:
         st.info("No hay datos consolidados para generar el análisis.")
 
-if _seccion == _SECCIONES[11]:
+if _seccion == _SECCIONES[10]:
     st.markdown("### 🩺 Diagnóstico Automático de Anomalías de Consumo")
     st.markdown("Compara **cada día con los de su mismo tipo** (Laboral / Sábado / Domingo-Festivo) "
                 "con estadística robusta, detecta los que se salen de lo normal y **cruza la THDR y la "
@@ -3509,7 +3509,7 @@ if _seccion == _SECCIONES[11]:
         st.info("📂 Sube archivos desde el panel lateral para generar el diagnóstico.")
 
 
-if _seccion == _SECCIONES[12]:
+if _seccion == _SECCIONES[11]:
     _det_sv = detalle_servicios(df_thdr_v1, df_thdr_v2, None)
     if _det_sv is None or _det_sv.empty:
         st.info("No hay datos de servicios (THDR) en el rango seleccionado. Sube archivos THDR desde el panel lateral.")
@@ -3648,7 +3648,7 @@ if _seccion == _SECCIONES[12]:
             _st_df(pd.crosstab(_det_sv['Tipo de tren'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
 
 # --- Pestaña: Ahorro de energía (UMR vs meta) ---
-if _seccion == _SECCIONES[13]:
+if _seccion == _SECCIONES[12]:
     st.header("💡 Ahorro de energía")
     if df_ops is None or df_ops.empty or float(df_ops['Odómetro [km]'].sum()) <= 0:
         st.info("No hay datos de odómetro/energía cargados en el período para calcular el ahorro.")
@@ -3885,7 +3885,7 @@ if _seccion == _SECCIONES[13]:
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # --- Pestaña: Fuentes de energía (Factura vs PRMTE vs SEAT) ---
-if _seccion == _SECCIONES[14]:
+if _seccion == _SECCIONES[13]:
     st.header("⚖️ Comparación de fuentes de energía: Factura · PRMTE · SEAT")
     _fcols = [c for c in ['E_Fact', 'E_Prmte', 'E_Seat_T'] if c in df_ops.columns] if (df_ops is not None and not df_ops.empty) else []
     _renf = {'E_Fact': 'Factura', 'E_Prmte': 'PRMTE', 'E_Seat_T': 'SEAT'}
@@ -3952,7 +3952,7 @@ if _seccion == _SECCIONES[14]:
                     _tc[_s] = _tc[_s].map(lambda _v: _ncl(_v, 0) if _v > 0 else '—')
                 _st_df(_tc, use_container_width=True, hide_index=True)
 
-if _seccion == _SECCIONES[15]:
+if _seccion == _SECCIONES[14]:
     st.header("🧱 Constructor de datos por fecha")
     st.caption("Armá tu propia tabla: elegí qué datos incluir y descargala en Excel. Una fila por fecha, respeta los filtros de arriba.")
     if df_ops is None or df_ops.empty:
@@ -4099,7 +4099,7 @@ if _seccion == _SECCIONES[15]:
                                key="_dl_master")
 
 
-if _seccion == _SECCIONES[16]:
+if _seccion == _SECCIONES[15]:
     st.header("🔮 Proyección de energía")
     _fuente = st.radio("Fuente de energía", ["SEAT (tracción + 12 kV)", "Limache (SAF LI)"], horizontal=True, key="_proj_fuente")
     _es_seat = _fuente.startswith("SEAT")
