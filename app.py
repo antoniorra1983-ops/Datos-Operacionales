@@ -3670,6 +3670,7 @@ if _seccion == _SECCIONES[13]:
             _b['KmTrenR'] = np.nan; _b['KmsxTrenes'] = np.nan
         _has = bool(_b['KmTrenR'].notna().any())
 
+        _ahorro_lb_dia = pd.DataFrame()
         # ===== 0) IDE real vs Línea Base =====
         st.markdown("#### 📉 IDE real vs Línea Base")
         if df_ide_lb is None or df_ide_lb.empty:
@@ -3702,6 +3703,7 @@ if _seccion == _SECCIONES[13]:
                 _ci['E_real'] = _ci['E_Tr'].where(_ci['E_Tr'] > 0, _ci['IDE (kWh/km)'] * _ci['Odómetro [km]'])
                 _ci['Desvío'] = _ci['IDE (kWh/km)'] - _ci['IDE_LB']
                 _ci['Exceso kWh'] = _ci['E_real'] - _ci['E_LB']
+                _ahorro_lb_dia = _ci[['Fecha', 'Exceso kWh']].copy()
                 _odo_t = float(_ci['Odómetro [km]'].sum())
                 _ide_real_g = (float(_ci['E_real'].sum()) / _odo_t) if _odo_t > 0 else 0.0
                 _ide_lb_g = (float(_ci['E_LB'].sum()) / _odo_t) if _odo_t > 0 else 0.0
@@ -3803,6 +3805,84 @@ if _seccion == _SECCIONES[13]:
                 _dec = 3 if _c == 'IDE' else 2
                 _tab[_c] = _tab[_c].map(lambda _v, _d=_dec: _ncl(_v, _d) if pd.notna(_v) else '—')
             _st_df(_tab, use_container_width=True, hide_index=True)
+
+        st.divider()
+        # ===== 4) Ahorro total del período =====
+        st.markdown("#### 💰 Ahorro total del período")
+        _comp_ah = {}
+        if not _ahorro_lb_dia.empty:
+            _tlb = _ahorro_lb_dia.copy()
+            _tlb['kWh'] = -_tlb['Exceso kWh']
+            _comp_ah['Ahorro vs Línea Base'] = _tlb[['Fecha', 'kWh']]
+        if _has and 'Ahorro CA' in _b.columns:
+            _comp_ah['Corte y Acople'] = _b[['Fecha', 'Ahorro CA']].rename(columns={'Ahorro CA': 'kWh'})
+        if _has and 'Ahorro Vacío' in _b.columns:
+            _comp_ah['Tracción Vacío'] = _b[['Fecha', 'Ahorro Vacío']].rename(columns={'Ahorro Vacío': 'kWh'})
+        if 'Ahorro UMR' in _b.columns:
+            _comp_ah['UMR vs meta'] = _b[['Fecha', 'Ahorro UMR']].rename(columns={'Ahorro UMR': 'kWh'})
+        if not _comp_ah:
+            st.info("No hay componentes de ahorro calculables con los datos cargados.")
+        else:
+            _sel_ah = st.multiselect("Componentes incluidos en el total", list(_comp_ah.keys()),
+                                     default=list(_comp_ah.keys()), key="_ah_comp")
+            if not _sel_ah:
+                st.info("Selecciona al menos un componente para ver el total.")
+            else:
+                _cmap_ah = {'Ahorro vs Línea Base': '#7c3aed', 'Corte y Acople': '#0a7c6e',
+                            'Tracción Vacío': '#E85500', 'UMR vs meta': '#005195'}
+                _tot_ah = {k: float(_comp_ah[k]['kWh'].sum()) for k in _sel_ah}
+                _gran_total = float(sum(_tot_ah.values()))
+                _e_tr_per = float(_b['E_Tr'].sum()) if 'E_Tr' in _b.columns else 0.0
+                _pct_tr = (_gran_total / _e_tr_per * 100) if _e_tr_per > 0 else None
+                _kc = st.columns(len(_sel_ah) + 1)
+                _kc[0].metric("💰 Ahorro total", f"{_ncl(_gran_total, 0)} kWh",
+                              (f"{_ncl(_pct_tr, 1)} % de la tracción" if _pct_tr is not None else None),
+                              delta_color="off")
+                for _i, _k in enumerate(_sel_ah):
+                    _kc[_i + 1].metric(_k, f"{_ncl(_tot_ah[_k], 0)} kWh")
+                _g1a, _g2a = st.columns(2)
+                with _g1a:
+                    _fw = go.Figure(go.Waterfall(
+                        x=_sel_ah + ['Total'],
+                        measure=['relative'] * len(_sel_ah) + ['total'],
+                        y=[_tot_ah[_k] for _k in _sel_ah] + [0],
+                        text=[_ncl(_tot_ah[_k], 0) for _k in _sel_ah] + [_ncl(_gran_total, 0)],
+                        textposition='outside',
+                        connector={'line': {'color': '#9aa0a6'}},
+                        increasing={'marker': {'color': '#0a7d3e'}},
+                        decreasing={'marker': {'color': '#c62828'}},
+                        totals={'marker': {'color': '#005195'}}))
+                    _fw.update_layout(height=350, margin=dict(t=40, b=0, l=0, r=0),
+                                      title="Composición del ahorro (kWh)", showlegend=False)
+                    _pc(_fw, use_container_width=True, config={'locale': 'es'})
+                with _g2a:
+                    _dd_ah = []
+                    for _k in _sel_ah:
+                        _t = _comp_ah[_k].copy()
+                        _t['Componente'] = _k
+                        _dd_ah.append(_t)
+                    _dd_ah = pd.concat(_dd_ah, ignore_index=True)
+                    _dd_ah['Fecha'] = pd.to_datetime(_dd_ah['Fecha']).dt.normalize()
+                    _fd_ah = px.bar(_dd_ah, x='Fecha', y='kWh', color='Componente', barmode='relative',
+                                    color_discrete_map=_cmap_ah)
+                    _fd_ah.update_layout(height=350, margin=dict(t=40, b=0, l=0, r=0),
+                                         title="Ahorro diario por componente (kWh)",
+                                         yaxis_title='kWh', xaxis_title='', legend_title='')
+                    _pc(_no_huecos(_fd_ah), use_container_width=True, config={'locale': 'es'})
+                st.caption("Ahorro total = suma de los componentes seleccionados en el período. Positivo = energía ahorrada; negativo = consumo por sobre la referencia. Ojo: «Tracción Vacío» y «UMR vs meta» miden el desvío contra la misma meta UMR desde ángulos distintos, así que incluir ambos puede duplicar parte del ahorro — usa el selector para dejar el que corresponda.")
+                _piv_ah = _dd_ah.pivot_table(index='Fecha', columns='Componente', values='kWh', aggfunc='sum').reset_index()
+                _cols_num_ah = [c for c in _piv_ah.columns if c != 'Fecha']
+                _piv_ah['Total'] = _piv_ah[_cols_num_ah].sum(axis=1)
+                _buf_ah = BytesIO()
+                with pd.ExcelWriter(_buf_ah, engine='openpyxl') as _w:
+                    _px_ah = _piv_ah.copy()
+                    _px_ah['Fecha'] = pd.to_datetime(_px_ah['Fecha']).dt.strftime('%d-%m-%Y')
+                    _px_ah.to_excel(_w, sheet_name='Ahorro diario', index=False)
+                    pd.DataFrame({'Componente': _sel_ah + ['TOTAL'],
+                                  'kWh': [_tot_ah[_k] for _k in _sel_ah] + [_gran_total]}).to_excel(_w, sheet_name='Resumen', index=False)
+                st.download_button("⬇️ Descargar ahorros en Excel", data=_buf_ah.getvalue(),
+                                   file_name="ahorros_energia.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # --- Pestaña: Fuentes de energía (Factura vs PRMTE vs SEAT) ---
 if _seccion == _SECCIONES[14]:
