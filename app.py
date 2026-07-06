@@ -2160,6 +2160,38 @@ if _seccion == _SECCIONES[1]:
             _st_df(make_columns_unique(df_tr), use_container_width=True)
         else:
             st.markdown("### 🚆 Kilometraje por tren (odómetro UMR)")
+            # Tren-Km por tren desde los THDR (km de servicio asignados a cada motriz; dobles suman a ambas)
+            _tk_tren = pd.DataFrame()
+            _pt_thdr = [d for d in [df_thdr_v1, df_thdr_v2] if d is not None and not getattr(d, 'empty', True) and 'Km_Recorrido' in d.columns]
+            if _pt_thdr:
+                _acc_tk = []
+                for _dth in _pt_thdr:
+                    _cm1 = next((c for c in _dth.columns if str(c).strip().upper() == 'MOTRIZ 1'), None)
+                    _cm2 = next((c for c in _dth.columns if str(c).strip().upper() == 'MOTRIZ 2'), None)
+                    if not _cm1:
+                        continue
+                    _acc_tk.append(pd.DataFrame({'Km': pd.to_numeric(_dth['Km_Recorrido'], errors='coerce'),
+                                                 'M1': pd.to_numeric(_dth[_cm1], errors='coerce'),
+                                                 'M2': (pd.to_numeric(_dth[_cm2], errors='coerce') if _cm2 else np.nan)}))
+                if _acc_tk:
+                    _ttk = pd.concat(_acc_tk, ignore_index=True).dropna(subset=['Km'])
+                    _l1 = _ttk.dropna(subset=['M1'])[['Km', 'M1']].rename(columns={'M1': 'NMot'})
+                    _l2 = _ttk.dropna(subset=['M2'])[['Km', 'M2']].rename(columns={'M2': 'NMot'})
+                    _lt = pd.concat([_l1, _l2], ignore_index=True)
+                    if not _lt.empty:
+                        _lt['NMot'] = _lt['NMot'].astype(int)
+                        def _nom_mot(_n):
+                            if 1 <= _n <= 27: return f"M{_n:02d}"
+                            if 28 <= _n <= 35: return f"XM{_n}"
+                            return f"SFE {_n}"
+                        _lt['_key'] = _lt['NMot'].map(_nom_mot).str.upper().str.replace(' ', '', regex=False)
+                        _tk_tren = _lt.groupby('_key', as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
+            if not _tk_tren.empty:
+                _res_tr['_key'] = _res_tr['Tren'].astype(str).str.upper().str.replace(' ', '', regex=False)
+                _res_tr = _res_tr.merge(_tk_tren, on='_key', how='left').drop(columns=['_key'])
+                _res_tr['Tren-Km THDR'] = _res_tr['Tren-Km THDR'].fillna(0.0)
+                _res_tr['UMR tren (%)'] = np.where(_res_tr['Km recorridos'] > 0,
+                                                   _res_tr['Tren-Km THDR'] / _res_tr['Km recorridos'] * 100, np.nan)
             _km_tot_tr = float(_res_tr['Km recorridos'].sum())
             _act_tr = _res_tr[_res_tr['Km recorridos'] > 0]
             _n_act = int(len(_act_tr))
@@ -2194,6 +2226,17 @@ if _seccion == _SECCIONES[1]:
             _fig_kt.update_traces(textposition='outside', cliponaxis=False)
             _pc(_fig_kt, use_container_width=True, config={'locale': 'es'})
             st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención.")
+            if not _tk_tren.empty:
+                st.markdown("#### Odómetro vs Tren-Km por tren")
+                _cmpk = _res_tr.melt(id_vars=['Tren'], value_vars=['Km recorridos', 'Tren-Km THDR'], var_name='Métrica', value_name='km')
+                _cmpk['Métrica'] = _cmpk['Métrica'].map({'Km recorridos': 'Odómetro (UMR)', 'Tren-Km THDR': 'Tren-Km (THDR)'})
+                _fig_cmp = px.bar(_cmpk, x='km', y='Tren', orientation='h', color='Métrica', barmode='group',
+                                  color_discrete_map={'Odómetro (UMR)': '#005195', 'Tren-Km (THDR)': '#0a7d3e'})
+                _fig_cmp.update_layout(height=max(380, 26 * _res_tr['Tren'].nunique()), margin=dict(t=10, b=0, l=0, r=0),
+                                       yaxis=dict(autorange='reversed', title=''), legend_title='',
+                                       legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='right', x=1))
+                _pc(_fig_cmp, use_container_width=True, config={'locale': 'es'})
+                st.caption("Tren-Km (THDR) = km de servicios comerciales asignados a cada motriz según el tipo de servicio del THDR (en composiciones dobles el km del viaje suma a ambas motrices). La diferencia con el odómetro corresponde a movimientos sin servicio: vacío, maniobras y traslados.")
             if not _flota_tr.empty:
                 st.markdown("#### Km diario de la flota")
                 _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
