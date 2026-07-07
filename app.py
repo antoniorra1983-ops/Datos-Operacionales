@@ -2347,9 +2347,19 @@ if _seccion == _SECCIONES[1]:
                 _n_srv = int((_res_tr['Tren-Km THDR'] > 0).sum())
                 _desc_tot = float(_res_tr['Desc. incidentes'].sum()) if 'Desc. incidentes' in _res_tr.columns else 0.0
                 _top_tk = _res_tr.loc[_res_tr['Tren-Km THDR'].idxmax()] if _tkm_tot > 0 else None
+                _tk_umr_ref = np.nan
+                try:
+                    _fchs_thdr = pd.concat([pd.to_datetime(_d['Fecha_Op']).dt.normalize() for _d in _pt_thdr if 'Fecha_Op' in _d.columns]).unique()
+                    if not df_ops.empty and 'Tren-Km [km]' in df_ops.columns:
+                        _dref = df_ops[pd.to_datetime(df_ops['Fecha']).dt.normalize().isin(_fchs_thdr)]
+                        _tk_umr_ref = float(_dref.loc[_dref['Tren-Km [km]'] > 0, 'Tren-Km [km]'].sum())
+                except Exception:
+                    pass
                 _k1, _k2, _k3, _k4 = st.columns(4)
                 _k1.metric("Trenes con servicio", _ncl(_n_srv, 0))
-                _k2.metric("Tren-Km total flota", f"{_ncl(_tkm_tot, 0)} km")
+                _k2.metric("Tren-Km total flota", f"{_ncl(_tkm_tot, 0)} km",
+                           (f"Δ vs Tren-Km UMR: {_ncl(_tkm_tot + _desc_tot - _tk_umr_ref, 0)} km" if pd.notna(_tk_umr_ref) and _tk_umr_ref > 0 else None),
+                           delta_color="off")
                 _k3.metric("Descuento corte/acople", f"{_ncl(_desc_tot, 0)} km")
                 _k4.metric("Tren con más servicio", str(_top_tk['Tren']) if _top_tk is not None else "—",
                            f"{_ncl(_top_tk['Tren-Km THDR'], 0)} km" if _top_tk is not None else None)
