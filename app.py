@@ -1513,7 +1513,13 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                                 all_kmserv.append({"Fecha": _fe.normalize(),
                                                    "KmsxTrenes": parse_latam_number(df_raw.iloc[_ri, 9]),
                                                    "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22]),
-                                                   "KmTrenP": parse_latam_number(df_raw.iloc[_ri, 23])})
+                                                   "KmTrenP": parse_latam_number(df_raw.iloc[_ri, 23]),
+                                                   "Cortes_EB": parse_latam_number(df_raw.iloc[_ri, 16]),
+                                                   "Cortes_SA": parse_latam_number(df_raw.iloc[_ri, 17]),
+                                                   "Cortes_PE": parse_latam_number(df_raw.iloc[_ri, 18]),
+                                                   "Acoples_EB": parse_latam_number(df_raw.iloc[_ri, 19]),
+                                                   "Acoples_SA": parse_latam_number(df_raw.iloc[_ri, 20]),
+                                                   "Acoples_PE": parse_latam_number(df_raw.iloc[_ri, 21])})
             except Exception as e: _errores_proc[f.name]=f"UMR: {e}"
             
     if f_seat_all:
@@ -2380,6 +2386,37 @@ if _seccion == _SECCIONES[1]:
                             _ti2['Fecha'] = pd.to_datetime(_ti2['Fecha']).dt.strftime('%d-%m-%Y')
                             _ti2 = _ti2.rename(columns={'TS': 'Tramo', 'Km desc': 'Km descontados'})
                             _st_df(_ti2, use_container_width=True, hide_index=True)
+                if all_kmserv and not df_incid.empty:
+                    _dks_c = pd.DataFrame(all_kmserv)
+                    if 'Cortes_EB' not in _dks_c.columns:
+                        st.caption("ℹ️ Para el control cruzado de cortes/acoples contra el KM-Servicio, vuelve a apretar «🔄 Cargar / actualizar datos» (el UMR se recargará capturando esas columnas).")
+                    else:
+                        _dks_c['Fecha'] = pd.to_datetime(_dks_c['Fecha']).dt.normalize()
+                        _cc = _dks_c.groupby('Fecha', as_index=False)[['Cortes_EB', 'Cortes_SA', 'Cortes_PE', 'Acoples_EB', 'Acoples_SA', 'Acoples_PE']].sum()
+                        _cc['Cortes KM-Serv'] = _cc[['Cortes_EB', 'Cortes_SA', 'Cortes_PE']].sum(axis=1)
+                        _cc['Acoples KM-Serv'] = _cc[['Acoples_EB', 'Acoples_SA', 'Acoples_PE']].sum(axis=1)
+                        _ic = df_incid.copy()
+                        _ic['Fecha'] = pd.to_datetime(_ic['Fecha']).dt.normalize()
+                        _icg = _ic.pivot_table(index='Fecha', columns='Tipo', aggfunc='size', fill_value=0).reset_index()
+                        for _cx in ['Desacople', 'Acople']:
+                            if _cx not in _icg.columns:
+                                _icg[_cx] = 0
+                        _cmp_ca = _cc[['Fecha', 'Cortes KM-Serv', 'Acoples KM-Serv']].merge(
+                            _icg[['Fecha', 'Desacople', 'Acople']], on='Fecha', how='outer').fillna(0).sort_values('Fecha')
+                        _cmp_ca = _cmp_ca[_cmp_ca[['Cortes KM-Serv', 'Acoples KM-Serv', 'Desacople', 'Acople']].sum(axis=1) > 0]
+                        if not _cmp_ca.empty:
+                            _cmp_ca['Δ cortes'] = _cmp_ca['Desacople'] - _cmp_ca['Cortes KM-Serv']
+                            _cmp_ca['Δ acoples'] = _cmp_ca['Acople'] - _cmp_ca['Acoples KM-Serv']
+                            with st.expander("Control cruzado: cortes y acoples — KM-Servicio vs Incidentes", expanded=False):
+                                _tc = _cmp_ca.rename(columns={'Desacople': 'Desacoples Incid', 'Acople': 'Acoples Incid'})
+                                _tc = _tc[['Fecha', 'Cortes KM-Serv', 'Desacoples Incid', 'Δ cortes', 'Acoples KM-Serv', 'Acoples Incid', 'Δ acoples']].copy()
+                                _tc['Fecha'] = _tc['Fecha'].dt.strftime('%d-%m-%Y')
+                                for _cx in _tc.columns[1:]:
+                                    _tc[_cx] = _tc[_cx].astype(int)
+                                _tot_row = {'Fecha': 'TOTAL', **{_cx: int(_tc[_cx].sum()) for _cx in _tc.columns[1:]}}
+                                _tc = pd.concat([_tc, pd.DataFrame([_tot_row])], ignore_index=True)
+                                _st_df(_tc, use_container_width=True, hide_index=True)
+                                st.caption("Cortes y acoples del KM-Servicio (UMR, suma EB+SA+PE por día) contra las asignaciones por servicio detectadas en los Incidentes PCC. Δ = Incidentes − KM-Servicio: distinto de 0 indica eventos registrados en una sola de las fuentes o criterios de conteo diferentes. Solo se muestran días con actividad en alguna fuente.")
             if not _flota_tr.empty:
                 st.markdown("#### Km diario de la flota")
                 _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
