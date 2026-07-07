@@ -1511,6 +1511,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             _fe = _fe_kms.get(_ri)
                             if pd.notna(_od) and pd.notna(_fe) and re.match(r'^[A-Z]{2,3}-[A-Z]{2,3}$', str(_od).strip().upper()) and start_date <= _fe.date() <= end_date:
                                 all_kmserv.append({"Fecha": _fe.normalize(),
+                                                   "OD": str(_od).strip().upper(),
                                                    "KmsxTrenes": parse_latam_number(df_raw.iloc[_ri, 9]),
                                                    "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22]),
                                                    "KmTrenP": parse_latam_number(df_raw.iloc[_ri, 23]),
@@ -2388,35 +2389,91 @@ if _seccion == _SECCIONES[1]:
                             _st_df(_ti2, use_container_width=True, hide_index=True)
                 if all_kmserv and not df_incid.empty:
                     _dks_c = pd.DataFrame(all_kmserv)
-                    if 'Cortes_EB' not in _dks_c.columns:
-                        st.caption("ℹ️ Para el control cruzado de cortes/acoples contra el KM-Servicio, vuelve a apretar «🔄 Cargar / actualizar datos» (el UMR se recargará capturando esas columnas).")
+                    if 'Cortes_EB' not in _dks_c.columns or 'OD' not in _dks_c.columns:
+                        st.caption("ℹ️ Para el control cruzado de cortes/acoples contra el KM-Servicio, vuelve a apretar «🔄 Cargar / actualizar datos» (el UMR se recargará capturando el tramo y esas columnas).")
                     else:
+                        # Lado KM-Servicio: melt a (Fecha, Tramo, Estación) con conteos por tipo
                         _dks_c['Fecha'] = pd.to_datetime(_dks_c['Fecha']).dt.normalize()
-                        _cc = _dks_c.groupby('Fecha', as_index=False)[['Cortes_EB', 'Cortes_SA', 'Cortes_PE', 'Acoples_EB', 'Acoples_SA', 'Acoples_PE']].sum()
-                        _cc['Cortes KM-Serv'] = _cc[['Cortes_EB', 'Cortes_SA', 'Cortes_PE']].sum(axis=1)
-                        _cc['Acoples KM-Serv'] = _cc[['Acoples_EB', 'Acoples_SA', 'Acoples_PE']].sum(axis=1)
+                        _kms_l = []
+                        for _colv, _tipoe, _este in [('Cortes_EB', 'Cortes', 'EB'), ('Cortes_SA', 'Cortes', 'SA'), ('Cortes_PE', 'Cortes', 'PE'),
+                                                     ('Acoples_EB', 'Acoples', 'EB'), ('Acoples_SA', 'Acoples', 'SA'), ('Acoples_PE', 'Acoples', 'PE')]:
+                            _t = _dks_c[['Fecha', 'OD', _colv]].copy()
+                            _t = _t[pd.to_numeric(_t[_colv], errors='coerce').fillna(0) > 0]
+                            if _t.empty:
+                                continue
+                            _t = _t.rename(columns={_colv: 'N'})
+                            _t['Evento'] = _tipoe
+                            _t['Est'] = _este
+                            _kms_l.append(_t)
+                        _kms_ev = pd.concat(_kms_l, ignore_index=True) if _kms_l else pd.DataFrame(columns=['Fecha', 'OD', 'N', 'Evento', 'Est'])
+                        _kms_g = _kms_ev.groupby(['Fecha', 'OD', 'Est', 'Evento'], as_index=False)['N'].sum()
+                        _kms_p = _kms_g.pivot_table(index=['Fecha', 'OD', 'Est'], columns='Evento', values='N', aggfunc='sum', fill_value=0).reset_index()
+                        for _cx in ['Cortes', 'Acoples']:
+                            if _cx not in _kms_p.columns:
+                                _kms_p[_cx] = 0
+                        _kms_p = _kms_p.rename(columns={'Cortes': 'Cortes KM-Serv', 'Acoples': 'Acoples KM-Serv'})
+
+                        # Lado Incidentes: tipo de servicio vía cruce con THDR, estación = Lugar
+                        _S2C = {'PUE': 'PU', 'BEL': 'BE', 'FRA': 'FR', 'BAR': 'BA', 'POR': 'PO', 'REC': 'RE', 'MIR': 'MI',
+                                'V.MAR': 'VM', 'HOS': 'HO', 'CHO': 'CH', 'SAL': 'ES', 'QUI': 'QU', 'E.BEL': 'EB',
+                                'AME': 'AM', 'S.ALD': 'SA', 'PEÑ': 'PE', 'LIM': 'LI'}
                         _ic = df_incid.copy()
                         _ic['Fecha'] = pd.to_datetime(_ic['Fecha']).dt.normalize()
-                        _icg = _ic.pivot_table(index='Fecha', columns='Tipo', aggfunc='size', fill_value=0).reset_index()
+                        _vjt2 = pd.DataFrame()
+                        _vj2_acc = []
+                        for _dth in _pt_thdr:
+                            _cs2 = next((c for c in _dth.columns if str(c).strip().upper() == 'TREN'), None)
+                            _cv2 = next((c for c in _dth.columns if str(c).strip().upper() == 'VIAJE'), None)
+                            if not _cs2 or not _cv2 or 'Fecha_Op' not in _dth.columns:
+                                continue
+                            _vj2_acc.append(pd.DataFrame({'Fecha': pd.to_datetime(_dth['Fecha_Op']).dt.normalize(),
+                                                          'Servicio': pd.to_numeric(_dth[_cs2], errors='coerce'),
+                                                          'Viaje': pd.to_numeric(_dth[_cv2], errors='coerce'),
+                                                          'TS': (_dth['Tipo_Servicio'].astype(str).values if 'Tipo_Servicio' in _dth.columns else 'Sin clasificar')}))
+                        if _vj2_acc:
+                            _vjt2 = pd.concat(_vj2_acc, ignore_index=True).dropna(subset=['Servicio', 'Viaje']).drop_duplicates(subset=['Fecha', 'Servicio', 'Viaje'])
+                        if not _vjt2.empty:
+                            _ic = _ic.merge(_vjt2, on=['Fecha', 'Servicio', 'Viaje'], how='left')
+                        else:
+                            _ic['TS'] = np.nan
+                        def _ts_a_od(_ts):
+                            _s = str(_ts)
+                            if '→' not in _s:
+                                return '—'
+                            _o, _d = [_p.strip() for _p in _s.split('→', 1)]
+                            return f"{_S2C.get(_o, _o)}-{_S2C.get(_d, _d)}"
+                        _ic['OD'] = _ic['TS'].map(_ts_a_od)
+                        _ic['Est'] = _ic['Lugar'].astype(str).str.strip().str.upper()
+                        _inc_g = _ic.groupby(['Fecha', 'OD', 'Est', 'Tipo'], as_index=False).size().rename(columns={'size': 'N'})
+                        _inc_p = _inc_g.pivot_table(index=['Fecha', 'OD', 'Est'], columns='Tipo', values='N', aggfunc='sum', fill_value=0).reset_index()
                         for _cx in ['Desacople', 'Acople']:
-                            if _cx not in _icg.columns:
-                                _icg[_cx] = 0
-                        _cmp_ca = _cc[['Fecha', 'Cortes KM-Serv', 'Acoples KM-Serv']].merge(
-                            _icg[['Fecha', 'Desacople', 'Acople']], on='Fecha', how='outer').fillna(0).sort_values('Fecha')
-                        _cmp_ca = _cmp_ca[_cmp_ca[['Cortes KM-Serv', 'Acoples KM-Serv', 'Desacople', 'Acople']].sum(axis=1) > 0]
+                            if _cx not in _inc_p.columns:
+                                _inc_p[_cx] = 0
+                        _inc_p = _inc_p.rename(columns={'Desacople': 'Desacoples Incid', 'Acople': 'Acoples Incid'})
+
+                        # Cruce por Fecha × Tramo × Estación
+                        _cmp_ca = _kms_p.merge(_inc_p, on=['Fecha', 'OD', 'Est'], how='outer').fillna(0).sort_values(['Fecha', 'OD', 'Est'])
                         if not _cmp_ca.empty:
-                            _cmp_ca['Δ cortes'] = _cmp_ca['Desacople'] - _cmp_ca['Cortes KM-Serv']
-                            _cmp_ca['Δ acoples'] = _cmp_ca['Acople'] - _cmp_ca['Acoples KM-Serv']
-                            with st.expander("Control cruzado: cortes y acoples — KM-Servicio vs Incidentes", expanded=False):
-                                _tc = _cmp_ca.rename(columns={'Desacople': 'Desacoples Incid', 'Acople': 'Acoples Incid'})
-                                _tc = _tc[['Fecha', 'Cortes KM-Serv', 'Desacoples Incid', 'Δ cortes', 'Acoples KM-Serv', 'Acoples Incid', 'Δ acoples']].copy()
-                                _tc['Fecha'] = _tc['Fecha'].dt.strftime('%d-%m-%Y')
-                                for _cx in _tc.columns[1:]:
+                            _cmp_ca['Δ cortes'] = _cmp_ca['Desacoples Incid'] - _cmp_ca['Cortes KM-Serv']
+                            _cmp_ca['Δ acoples'] = _cmp_ca['Acoples Incid'] - _cmp_ca['Acoples KM-Serv']
+                            with st.expander("Control cruzado: cortes y acoples por tipo de servicio y estación — KM-Servicio vs Incidentes", expanded=False):
+                                _cols_ord = ['Fecha', 'OD', 'Est', 'Cortes KM-Serv', 'Desacoples Incid', 'Δ cortes', 'Acoples KM-Serv', 'Acoples Incid', 'Δ acoples']
+                                _tc = _cmp_ca[_cols_ord].copy()
+                                _tc['Fecha'] = pd.to_datetime(_tc['Fecha']).dt.strftime('%d-%m-%Y')
+                                for _cx in _cols_ord[3:]:
                                     _tc[_cx] = _tc[_cx].astype(int)
-                                _tot_row = {'Fecha': 'TOTAL', **{_cx: int(_tc[_cx].sum()) for _cx in _tc.columns[1:]}}
+                                _tc = _tc.rename(columns={'OD': 'Tipo servicio', 'Est': 'Estación'})
+                                _tot_row = {'Fecha': 'TOTAL', 'Tipo servicio': '', 'Estación': '', **{_cx: int(_tc[_cx].sum()) for _cx in _tc.columns[3:]}}
                                 _tc = pd.concat([_tc, pd.DataFrame([_tot_row])], ignore_index=True)
                                 _st_df(_tc, use_container_width=True, hide_index=True)
-                                st.caption("Cortes y acoples del KM-Servicio (UMR, suma EB+SA+PE por día) contra las asignaciones por servicio detectadas en los Incidentes PCC. Δ = Incidentes − KM-Servicio: distinto de 0 indica eventos registrados en una sola de las fuentes o criterios de conteo diferentes. Solo se muestran días con actividad en alguna fuente.")
+                                _res_te = _cmp_ca.groupby(['OD', 'Est'], as_index=False)[['Cortes KM-Serv', 'Desacoples Incid', 'Acoples KM-Serv', 'Acoples Incid']].sum()
+                                _res_te = _res_te[_res_te.iloc[:, 2:].sum(axis=1) > 0]
+                                st.markdown("**Resumen del período por tipo de servicio y estación**")
+                                _res_te = _res_te.rename(columns={'OD': 'Tipo servicio', 'Est': 'Estación'})
+                                for _cx in _res_te.columns[2:]:
+                                    _res_te[_cx] = _res_te[_cx].astype(int)
+                                _st_df(_res_te, use_container_width=True, hide_index=True)
+                                st.caption("Cruce por día, tipo de servicio (tramo) y estación del evento. En el KM-Servicio el tramo es el de la fila donde se anota el corte/acople; en los Incidentes se obtiene cruzando servicio+viaje con el THDR (los eventos sin cruce aparecen con tramo «—»). Δ = Incidentes − KM-Servicio.")
             if not _flota_tr.empty:
                 st.markdown("#### Km diario de la flota")
                 _fig_fl = px.bar(_flota_tr, x='Fecha', y='Km flota', color_discrete_sequence=['#E85500'])
