@@ -1684,7 +1684,6 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     if f_incid_all:
         _RX_INC_D = re.compile(r'(\d{3})\s+XT[-\s]*(?:XT[-\s]*)?(\d{1,2})\s*[-/]\s*(\d{1,2})\s*\(\s*viaje\s*(\d+)\s*\)', re.I)
         _RX_INC_S = re.compile(r'(\d{3})\s+XT[-\s]*(\d{1,2})\s*\(\s*viaje\s*(\d+)\s*\).*?acople\s+con\s+XT[-\s]*(\d{1,2})', re.I | re.S)
-        _RX_INC_C = re.compile(r'[Ss]ervicio\s+(\d{3})\s+XT[-\s]*(\d{1,2})(?![\d/-]).*?acopla\s+en\s+\S+.*?con\s+XT[-\s]*(\d{1,2})', re.I | re.S)
         _RX_INC_N = re.compile(r'(\d{3})\s*\(\s*viaje\s*(\d+)\s*\)', re.I)
         _inc_rows = []
         for f in f_incid_all:
@@ -1732,12 +1731,6 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
                                               'Servicio': int(_m.group(1)), 'Viaje': int(_m.group(3)),
                                               'M1': int(_m.group(2)), 'M2': int(_m.group(4))})
-                        else:
-                            _mc = _RX_INC_C.search(_desc)
-                            if _mc:
-                                _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': 'Acople', 'Lugar': _lug,
-                                                  'Servicio': int(_mc.group(1)), 'Viaje': np.nan,
-                                                  'M1': int(_mc.group(2)), 'M2': int(_mc.group(3))})
             except Exception as _e:
                 _errores_proc[f.name] = f"Incidentes: {_e}"
         if _inc_rows:
