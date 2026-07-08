@@ -1682,9 +1682,13 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     # Incidentes PCC: cortes y acoples (para descontar km no recorridos en Tren-Km por tren)
     if f_incid_all:
-        _RX_INC_D = re.compile(r'(\d{3})\s+XT[-\s]*(?:XT[-\s]*)?(\d{1,2})\s*[-/]\s*(\d{1,2})\s*\(\s*viaje\s*(\d+)\s*\)', re.I)
-        _RX_INC_S = re.compile(r'(\d{3})\s+XT[-\s]*(\d{1,2})\s*\(\s*viaje\s*(\d+)\s*\).*?acople\s+con\s+XT[-\s]*(\d{1,2})', re.I | re.S)
-        _RX_INC_N = re.compile(r'(\d{3})\s*\(\s*viaje\s*(\d+)\s*\)', re.I)
+        # Token general: un servicio (4xx/6xx), motrices opcionales (XT-A o XT-A-B), y su viaje
+        _RX_INC_TOK = re.compile(
+            r'(?P<sv>[246]\d{2})'
+            r'(?:\s+XT[-\s]*(?P<m1>\d{1,2})(?:\s*[-/]\s*(?P<m2>\d{1,2}))?)?'
+            r'\s*\(\s*viaje\s*(?P<vj>\d+)\s*\)', re.I)
+        # Frases donde el (des)acople es de OTRO servicio (consecuencia), no del que se describe
+        _RX_INC_CONSEC = re.compile(r'precedente|servicio anterior|viaje anterior|debido a exceso|por (?:des)?acople en', re.I)
         _inc_rows = []
         for f in f_incid_all:
             try:
@@ -1708,6 +1712,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                     _low = _desc.lower()
                     _lug = str(_r.get('Lugar', '')).strip().upper()
                     _sub_i = str(_r.get('Subtipo incidente'))
+                    # Tipo del evento: subtipo oficial manda; si no, se deriva del texto
                     if _sub_i in ('Acople', 'Desacople'):
                         _tipo_i = _sub_i
                     elif 'desacopl' in _low:
@@ -1716,21 +1721,19 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                         _tipo_i = 'Acople'
                     else:
                         continue
-                    _ms = _RX_INC_D.findall(_desc)
-                    _caps = {(int(_sv), int(_vj)) for _sv, _m1, _m2, _vj in _ms}
-                    for _sv, _m1, _m2, _vj in _ms:
+                    # Si el subtipo no es Acople/Desacople y el texto habla de consecuencia, se omite
+                    if _sub_i not in ('Acople', 'Desacople') and _RX_INC_CONSEC.search(_desc):
+                        continue
+                    _vistos = set()
+                    for _m in _RX_INC_TOK.finditer(_desc):
+                        _sv = int(_m.group('sv')); _vj = int(_m.group('vj'))
+                        if (_sv, _vj) in _vistos:
+                            continue
+                        _vistos.add((_sv, _vj))
+                        _m1v = int(_m.group('m1')) if _m.group('m1') else np.nan
+                        _m2v = int(_m.group('m2')) if _m.group('m2') else np.nan
                         _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
-                                          'Servicio': int(_sv), 'Viaje': int(_vj), 'M1': int(_m1), 'M2': int(_m2)})
-                    _ns = [(int(_sv), int(_vj)) for _sv, _vj in _RX_INC_N.findall(_desc) if (int(_sv), int(_vj)) not in _caps]
-                    for _sv, _vj in _ns:
-                        _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
-                                          'Servicio': _sv, 'Viaje': _vj, 'M1': np.nan, 'M2': np.nan})
-                    if not _ms and not _ns:
-                        _m = _RX_INC_S.search(_desc)
-                        if _m:
-                            _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
-                                              'Servicio': int(_m.group(1)), 'Viaje': int(_m.group(3)),
-                                              'M1': int(_m.group(2)), 'M2': int(_m.group(4))})
+                                          'Servicio': _sv, 'Viaje': _vj, 'M1': _m1v, 'M2': _m2v})
             except Exception as _e:
                 _errores_proc[f.name] = f"Incidentes: {_e}"
         if _inc_rows:
