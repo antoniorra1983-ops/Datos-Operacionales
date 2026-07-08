@@ -2284,9 +2284,13 @@ if _seccion == _SECCIONES[1]:
                     _cv = next((c for c in _dth.columns if str(c).strip().upper() == 'VIAJE'), None)
                     if not _cs or not _cv or 'Fecha_Op' not in _dth.columns:
                         continue
+                    _cmt1 = next((c for c in _dth.columns if str(c).strip().upper() == 'MOTRIZ 1'), None)
+                    _cmt2 = next((c for c in _dth.columns if str(c).strip().upper() == 'MOTRIZ 2'), None)
                     _vj_acc.append(pd.DataFrame({'Fecha': pd.to_datetime(_dth['Fecha_Op']).dt.normalize(),
                                                  'Servicio': pd.to_numeric(_dth[_cs], errors='coerce'),
                                                  'Viaje': pd.to_numeric(_dth[_cv], errors='coerce'),
+                                                 'M1_thdr': (pd.to_numeric(_dth[_cmt1], errors='coerce') if _cmt1 else np.nan),
+                                                 'M2_thdr': (pd.to_numeric(_dth[_cmt2], errors='coerce') if _cmt2 else np.nan),
                                                  'TS': (_dth['Tipo_Servicio'].astype(str).values if 'Tipo_Servicio' in _dth.columns else 'Sin clasificar')}))
                 if _vj_acc:
                     _vjt = pd.concat(_vj_acc, ignore_index=True).dropna(subset=['Servicio', 'Viaje'])
@@ -2295,6 +2299,9 @@ if _seccion == _SECCIONES[1]:
                     _evi['Fecha'] = pd.to_datetime(_evi['Fecha']).dt.normalize()
                     _evi['Lugar'] = _evi['Lugar'].astype(str).str.strip().str.upper()
                     _evi = _evi.merge(_vjt, on=['Fecha', 'Servicio', 'Viaje'], how='left')
+                    # Si el incidente no trae la motriz, se recupera del THDR (2ª motriz del servicio)
+                    _evi['M2'] = _evi['M2'].where(_evi['M2'].notna(), _evi['M2_thdr'])
+                    _evi['M2'] = _evi['M2'].where(_evi['M2'].notna(), _evi['M1_thdr'])
                     def _desc_ev(_r):
                         if str(_r.get('Lugar', '')) in ('PU', 'LI'):
                             return pd.Series({'_cl': 'cab', 'Km desc': 0.0})
