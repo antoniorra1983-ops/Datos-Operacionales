@@ -2262,7 +2262,7 @@ if _seccion == _SECCIONES[1]:
                         _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
                         _tk_tren = _lt.groupby(['_key', 'TrenTHDR'], as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
             # Descuento por cortes/acoples (incidentes): km no recorridos por la motriz acoplada/desacoplada
-            _det_inc = pd.DataFrame(); _inc_no = 0; _inc_cab = 0; _inc_ot = 0
+            _det_inc = pd.DataFrame(); _diag_inc = pd.DataFrame(); _inc_no = 0; _inc_cab = 0; _inc_ot = 0
             if not _tk_tren.empty and not df_incid.empty and _pt_thdr:
                 _KM3 = {'PUE': 0.0, 'BEL': 0.72, 'FRA': 1.2, 'BAR': 2.2, 'POR': 3.9, 'REC': 6.0, 'MIR': 7.4,
                         'V.MAR': 8.3, 'HOS': 9.55, 'CHO': 10.55, 'SAL': 11.71, 'VAL': 19.0, 'QUI': 21.43,
@@ -2286,10 +2286,10 @@ if _seccion == _SECCIONES[1]:
                     _evi = df_incid.copy()
                     _evi['Fecha'] = pd.to_datetime(_evi['Fecha']).dt.normalize()
                     _evi['Lugar'] = _evi['Lugar'].astype(str).str.strip().str.upper()
-                    _inc_cab = int(_evi['Lugar'].isin(['PU', 'LI']).sum())
-                    _evi = _evi[~_evi['Lugar'].isin(['PU', 'LI'])]
                     _evi = _evi.merge(_vjt, on=['Fecha', 'Servicio', 'Viaje'], how='left')
                     def _desc_ev(_r):
+                        if str(_r.get('Lugar', '')) in ('PU', 'LI'):
+                            return pd.Series({'_cl': 'cab', 'Km desc': 0.0})
                         _ts = str(_r.get('TS', ''))
                         if '→' not in _ts:
                             return pd.Series({'_cl': 'nc', 'Km desc': np.nan})
@@ -2303,8 +2303,12 @@ if _seccion == _SECCIONES[1]:
                         _kmv = abs(_kd - _kl) if str(_r.get('Tipo')) == 'Desacople' else abs(_kl - _ko)
                         return pd.Series({'_cl': 'ruta', 'Km desc': _kmv})
                     _evi[['_cl', 'Km desc']] = _evi.apply(_desc_ev, axis=1)
+                    _inc_cab = int((_evi['_cl'] == 'cab').sum())
                     _inc_no = int((_evi['_cl'] == 'nc').sum())
                     _inc_ot = int((_evi['_cl'] == 'ot').sum())
+                    _CL_TXT = {'ruta': 'En ruta (descuenta)', 'ot': 'Inicio/término del viaje', 'cab': 'Maniobra de cabecera', 'nc': 'Sin cruce THDR'}
+                    _diag_inc = _evi.copy()
+                    _diag_inc['Clase'] = _diag_inc['_cl'].map(_CL_TXT)
                     _evi = _evi[_evi['_cl'] == 'ruta'].drop(columns=['_cl'])
                     if not _evi.empty:
                         _evi['Tren'] = _evi['M2'].astype(int).map(_nom_mot)
@@ -2406,12 +2410,22 @@ if _seccion == _SECCIONES[1]:
                 if not _det_inc.empty or _inc_no > 0 or _inc_cab > 0 or _inc_ot > 0:
                     _tot_di = float(_det_inc['Km desc'].sum()) if not _det_inc.empty else 0.0
                     st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
-                    if not _det_inc.empty:
+                    if not _det_inc.empty or not _diag_inc.empty:
                         with st.expander("Ver descuentos por corte y acople — detalle", expanded=False):
-                            _ti2 = _det_inc.copy()
-                            _ti2['Fecha'] = pd.to_datetime(_ti2['Fecha']).dt.strftime('%d-%m-%Y')
-                            _ti2 = _ti2.rename(columns={'TS': 'Tramo', 'Km desc': 'Km descontados'})
-                            _st_df(_ti2, use_container_width=True, hide_index=True)
+                            if not _det_inc.empty:
+                                _ti2 = _det_inc.copy()
+                                _ti2['Fecha'] = pd.to_datetime(_ti2['Fecha']).dt.strftime('%d-%m-%Y')
+                                _ti2 = _ti2.rename(columns={'TS': 'Tramo', 'Km desc': 'Km descontados'})
+                                _st_df(_ti2, use_container_width=True, hide_index=True)
+                            if not _diag_inc.empty:
+                                st.markdown("**Diagnóstico: todas las asignaciones detectadas y su clasificación**")
+                                _tdx = _diag_inc.copy()
+                                _tdx['Tren'] = pd.to_numeric(_tdx['M2'], errors='coerce').fillna(0).astype(int).map(_nom_mot)
+                                _tdx = _tdx[['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Viaje', 'TS', 'Tren', 'Clase', 'Km desc']].copy()
+                                _tdx['Fecha'] = pd.to_datetime(_tdx['Fecha']).dt.strftime('%d-%m-%Y')
+                                _tdx = _tdx.rename(columns={'TS': 'Tramo THDR', 'Km desc': 'Km desc.'})
+                                _st_df(_tdx.sort_values(['Fecha', 'Servicio']), use_container_width=True, hide_index=True)
+                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. «Sin cruce THDR» no encontró el servicio+viaje en los THDR cargados (revisa que los THDR cubran esas fechas).")
                 if all_kmserv and not df_incid.empty:
                     _dks_c = pd.DataFrame(all_kmserv)
                     if 'Cortes_EB' not in _dks_c.columns:
