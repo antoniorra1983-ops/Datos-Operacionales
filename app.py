@@ -2297,12 +2297,14 @@ if _seccion == _SECCIONES[1]:
                                                  'M2_thdr': (pd.to_numeric(_dth[_cmt2], errors='coerce') if _cmt2 else np.nan),
                                                  'TS': (_dth['Tipo_Servicio'].astype(str).values if 'Tipo_Servicio' in _dth.columns else 'Sin clasificar')}))
                 if _vj_acc:
-                    _vjt = pd.concat(_vj_acc, ignore_index=True).dropna(subset=['Servicio', 'Viaje'])
-                    _vjt = _vjt.drop_duplicates(subset=['Fecha', 'Servicio', 'Viaje'])
+                    _vjt = pd.concat(_vj_acc, ignore_index=True).dropna(subset=['Viaje'])
+                    _vjt = _vjt.rename(columns={'Servicio': 'Servicio_thdr'}).drop_duplicates(subset=['Fecha', 'Viaje'])
                     _evi = df_incid.copy()
                     _evi['Fecha'] = pd.to_datetime(_evi['Fecha']).dt.normalize()
                     _evi['Lugar'] = _evi['Lugar'].astype(str).str.strip().str.upper()
-                    _evi = _evi.merge(_vjt, on=['Fecha', 'Servicio', 'Viaje'], how='left')
+                    # Cruce por VIAJE (único por día): el THDR aporta servicio, tramo y motrices reales
+                    _evi = _evi.merge(_vjt, on=['Fecha', 'Viaje'], how='left')
+                    _evi['Servicio'] = _evi['Servicio_thdr'].where(_evi['Servicio_thdr'].notna(), _evi['Servicio'])
                     # Si el incidente no trae la motriz, se recupera del THDR (2ª motriz del servicio)
                     _evi['M2'] = _evi['M2'].where(_evi['M2'].notna(), _evi['M2_thdr'])
                     _evi['M2'] = _evi['M2'].where(_evi['M2'].notna(), _evi['M1_thdr'])
@@ -2505,9 +2507,9 @@ if _seccion == _SECCIONES[1]:
                                                       'Viaje': pd.to_numeric(_dth[_cv2], errors='coerce'),
                                                       'TS': (_dth['Tipo_Servicio'].astype(str).values if 'Tipo_Servicio' in _dth.columns else 'Sin clasificar')}))
                     if _vj2_acc:
-                        _vjt2 = pd.concat(_vj2_acc, ignore_index=True).dropna(subset=['Servicio', 'Viaje']).drop_duplicates(subset=['Fecha', 'Servicio', 'Viaje'])
+                        _vjt2 = pd.concat(_vj2_acc, ignore_index=True).dropna(subset=['Viaje']).drop_duplicates(subset=['Fecha', 'Viaje'])
                     if not _vjt2.empty:
-                        _ic = _ic.merge(_vjt2, on=['Fecha', 'Servicio', 'Viaje'], how='left')
+                        _ic = _ic.merge(_vjt2[['Fecha', 'Viaje', 'TS']], on=['Fecha', 'Viaje'], how='left')
                     else:
                         _ic['TS'] = np.nan
                     _S2C = {'PUE': 'PU', 'BEL': 'BE', 'FRA': 'FR', 'BAR': 'BA', 'POR': 'PO', 'REC': 'RE', 'MIR': 'MI',
