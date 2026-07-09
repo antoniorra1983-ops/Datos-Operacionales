@@ -2446,11 +2446,18 @@ if _seccion == _SECCIONES[1]:
                 _top_tk = _res_tr.loc[_res_tr['Tren-Km THDR'].idxmax()] if _tkm_tot > 0 else None
                 _tk_umr_ref = np.nan
                 _km_perd_umr = np.nan
+                _kmtren_r_ref = np.nan
                 try:
                     _fchs_thdr = pd.concat([pd.to_datetime(_d['Fecha_Op']).dt.normalize() for _d in _pt_thdr if 'Fecha_Op' in _d.columns]).unique()
                     if not df_ops.empty and 'Tren-Km [km]' in df_ops.columns:
                         _dref = df_ops[pd.to_datetime(df_ops['Fecha']).dt.normalize().isin(_fchs_thdr)]
                         _tk_umr_ref = float(_dref.loc[_dref['Tren-Km [km]'] > 0, 'Tren-Km [km]'].sum())
+                    if all_kmserv:
+                        _dkm_r = pd.DataFrame(all_kmserv)
+                        if 'KmTrenR' in _dkm_r.columns:
+                            _dkm_r['Fecha'] = pd.to_datetime(_dkm_r['Fecha']).dt.normalize()
+                            _dkm_r = _dkm_r[_dkm_r['Fecha'].isin(_fchs_thdr)]
+                            _kmtren_r_ref = float(pd.to_numeric(_dkm_r['KmTrenR'], errors='coerce').clip(lower=0).sum())
                     if all_kmserv:
                         _dkm_p = pd.DataFrame(all_kmserv)
                         if {'KmTrenP', 'KmTrenR'}.issubset(_dkm_p.columns):
@@ -2459,15 +2466,17 @@ if _seccion == _SECCIONES[1]:
                             _km_perd_umr = float((pd.to_numeric(_dkm_p['KmTrenP'], errors='coerce') - pd.to_numeric(_dkm_p['KmTrenR'], errors='coerce')).clip(lower=0).sum())
                 except Exception:
                     pass
-                _k1, _k2, _k3, _k4 = st.columns(4)
+                _k1, _k2, _k3, _k4, _k5 = st.columns(5)
                 _k1.metric("Trenes con servicio", _ncl(_n_srv, 0))
                 _k2.metric("Tren-Km total flota", f"{_ncl(_tkm_tot, 0)} km",
-                           (f"Δ vs Tren-Km UMR: {_ncl(_tkm_tot + _desc_tot - _tk_umr_ref, 0)} km" if pd.notna(_tk_umr_ref) and _tk_umr_ref > 0 else None),
+                           (f"por motriz (doble ×2)"),
                            delta_color="off")
-                _k3.metric("Descuento corte/acople", f"{_ncl(_desc_tot, 0)} km",
+                _k3.metric("KmTrenR (UMR)", f"{_ncl(_kmtren_r_ref, 0)} km" if pd.notna(_kmtren_r_ref) and _kmtren_r_ref > 0 else "—",
+                           "malla de servicios (ida+vuelta = 1)", delta_color="off")
+                _k4.metric("Descuento corte/acople", f"{_ncl(_desc_tot, 0)} km",
                            (f"UMR (KmTrenP−R): {_ncl(_km_perd_umr, 0)} km" if pd.notna(_km_perd_umr) and _km_perd_umr > 0 else None),
                            delta_color="off")
-                _k4.metric("Tren con más servicio", str(_top_tk['Tren']) if _top_tk is not None else "—",
+                _k5.metric("Tren con más servicio", str(_top_tk['Tren']) if _top_tk is not None else "—",
                            f"{_ncl(_top_tk['Tren-Km THDR'], 0)} km" if _top_tk is not None else None)
                 _tkg = _res_tr[_res_tr['Tren-Km THDR'] > 0].sort_values('Tren-Km THDR', ascending=False)
                 _fig_cmp = px.bar(_tkg, x='Tren-Km THDR', y='Tren', orientation='h', text='Tren-Km THDR',
@@ -2477,6 +2486,8 @@ if _seccion == _SECCIONES[1]:
                                        yaxis=dict(autorange='reversed', title=''), xaxis_title='km', legend_title='')
                 _pc(_fig_cmp, use_container_width=True, config={'locale': 'es'})
                 st.caption("Tren-Km = km de servicios comerciales asignados a cada motriz según el tipo de servicio del THDR (en composiciones dobles el km del viaje suma a ambas motrices). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja).")
+                if pd.notna(_kmtren_r_ref) and _kmtren_r_ref > 0:
+                    st.caption(f"ℹ️ El «Tren-Km total flota» ({_ncl(_tkm_tot, 0)} km) cuenta el km de cada motriz por separado (el THDR registra ida y vuelta como dos viajes, y en dobles ambas motrices suman). El «KmTrenR» del UMR ({_ncl(_kmtren_r_ref, 0)} km) cuenta la malla de servicios (una vuelta completa ida+vuelta = 1 servicio). Por eso el primero es ~2× el segundo: miden la misma operación con distinta unidad de conteo, ninguno está errado.")
                 if not _det_inc.empty or _inc_no > 0 or _inc_cab > 0 or _inc_ot > 0 or _inc_sm > 0:
                     _tot_di = float(_det_inc['Km desc'].sum()) if not _det_inc.empty else 0.0
                     st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_sm} sin motriz identificada (cuentan en el control, no descuentan)" if _inc_sm else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
