@@ -1901,7 +1901,9 @@ if not df_ops.empty and _seccion != _SECCIONES[6]:
     _cods = {_J_COD[j] for j in _selj}
     def _msk_f(serie):
         f = pd.to_datetime(serie, errors='coerce')
-        m = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
+        _lo = pd.Timestamp(_fi); _hi = pd.Timestamp(_fe)
+        _fn = f.dt.normalize()
+        m = f.notna() & (_fn >= _lo) & (_fn <= _hi)
         if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
         if _sel_m != "Todos": m = m & (f.dt.month == _mesnum_g[_sel_m])
         if _sel_s != "Todas":
@@ -1911,7 +1913,7 @@ if not df_ops.empty and _seccion != _SECCIONES[6]:
         if len(_cods) < 3:
             td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None)
             m = m & td.isin(_cods)
-        return m.values
+        return m.fillna(False).values
     def _filt_df(df, col):
         if df is None or getattr(df, 'empty', True) or col not in df.columns: return df
         return df[_msk_f(df[col])].reset_index(drop=True)
@@ -2070,7 +2072,7 @@ if _seccion == _SECCIONES[0]:
                     _card_metric(_cols[0], _label_total, _fmt(_tot), _unit)
                     for _i, _v in enumerate(_vias):
                         _card_metric(_cols[_i + 1], _v, _fmt(_pv[_v]), _unit, _v)
-            ev_serv = ev_pax = ev_tk = None
+            ev_serv = ev_pax = None
 
             def _layout_tipo(_fig):
                 _fig.update_layout(margin=dict(t=10, b=80, l=0, r=0),
@@ -2123,39 +2125,38 @@ if _seccion == _SECCIONES[0]:
 
             st.divider()
 
-            # --- 3. Tren-Km (UMR) ---
-            st.markdown("**Tren-Km (UMR)**")
-            _df_tk = df_resumen[df_resumen['Tren-Km [km]'] >= 0] if 'Tren-Km [km]' in df_resumen.columns else pd.DataFrame()
+            # --- 3. Odómetro y Tren-Km (UMR) en un solo gráfico ---
+            st.markdown("**Odómetro y Tren-Km (UMR)**")
+            _tiene_tk = 'Tren-Km [km]' in df_resumen.columns
+            _tiene_od = 'Odómetro [km]' in df_resumen.columns
+            _df_ot = df_resumen.copy()
+            if _tiene_od: _df_ot = _df_ot[_df_ot['Odómetro [km]'] >= 0]
+            if _tiene_tk: _df_ot = _df_ot[_df_ot['Tren-Km [km]'] >= 0]
+            _tot_od = float(_df_ot['Odómetro [km]'].sum()) if _tiene_od else 0.0
+            _tot_tk = float(_df_ot['Tren-Km [km]'].sum()) if _tiene_tk else 0.0
+            _dif_ot = _tot_od - _tot_tk
             _mc = st.columns(4)
-            _mc[0].metric("Tren-Km Total", f"{_ncl(_df_tk['Tren-Km [km]'].sum() if not _df_tk.empty else 0, 1)} km")
-            if not _df_tk.empty:
-                _df_tk_g = _agr_mes(_df_tk, ['Tren-Km [km]'])
-                fig_tk = px.bar(_df_tk_g, x='Fecha', y='Tren-Km [km]', color_discrete_sequence=["#0a7d3e"],
-                                hover_data=hover_config, title="Tren-Km Real (UMR)")
-                fig_tk.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-                fig_tk.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                     bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                _eje_mes(fig_tk)
-                ev_tk = _pc(_no_huecos(fig_tk), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_tk")
+            _mc[0].metric("Odómetro Total", f"{_ncl(_tot_od, 0)} km")
+            _mc[1].metric("Tren-Km Total", f"{_ncl(_tot_tk, 0)} km")
+            _mc[2].metric("UMR Global", f"{_ncl(_tot_tk / _tot_od * 100 if _tot_od > 0 else 0, 1)} %")
+            _mc[3].metric("Vacío / maniobras", f"{_ncl(_dif_ot, 0)} km")
+            if not _df_ot.empty and (_tiene_od or _tiene_tk):
+                _cols_ot = [c for c in ['Odómetro [km]', 'Tren-Km [km]'] if c in _df_ot.columns]
+                _df_ot_g = _agr_mes(_df_ot, _cols_ot)
+                _melt_ot = _df_ot_g.melt(id_vars='Fecha', value_vars=_cols_ot, var_name='Métrica', value_name='km')
+                _melt_ot['Métrica'] = _melt_ot['Métrica'].map({'Odómetro [km]': 'Odómetro', 'Tren-Km [km]': 'Tren-Km'})
+                fig_ot = px.bar(_melt_ot, x='Fecha', y='km', color='Métrica', barmode='group',
+                                color_discrete_map={'Odómetro': '#005195', 'Tren-Km': '#0a7d3e'},
+                                title="Odómetro vs Tren-Km Real (UMR)")
+                fig_ot.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=9))
+                fig_ot.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
+                                     bargap=0.25, bargroupgap=0.05, uniformtext=dict(minsize=7, mode='hide'),
+                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                _eje_mes(fig_ot)
+                _pc(_no_huecos(fig_ot), use_container_width=True, config={'locale': 'es'})
             else:
-                st.info("Sin datos de Tren-Km (UMR) para el filtro actual.")
-            st.caption("Tren-Km del archivo Resumen UMR (recorrido real comercial). Se omiten días con valor negativo (lectura errónea).")
-
-            st.divider()
-
-            # --- 4. Odómetro real (UMR) ---
-            st.markdown("**Odómetro real (UMR)**")
-            _df_odo = df_resumen[df_resumen['Odómetro [km]'] >= 0] if 'Odómetro [km]' in df_resumen.columns else df_resumen
-            _mc = st.columns(4)
-            _mc[0].metric("Odómetro Total", f"{_ncl(_df_odo['Odómetro [km]'].sum(), 1)} km")
-            _df_odo_g = _agr_mes(_df_odo, ['Odómetro [km]'])
-            fig_odo = px.bar(_df_odo_g, x='Fecha', y='Odómetro [km]', color_discrete_sequence=["#005195"],
-                             hover_data=hover_config, title="Odómetro Real (UMR)")
-            fig_odo.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-            fig_odo.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                  bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-            _eje_mes(fig_odo)
-            ev_odo = _pc(_no_huecos(fig_odo), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_odo")
+                st.info("Sin datos de Odómetro / Tren-Km (UMR) para el filtro actual.")
+            st.caption("Del archivo Resumen UMR. Odómetro = recorrido físico total; Tren-Km = recorrido comercial. La diferencia es movimiento sin servicio (vacío, maniobras). Se omiten días con valor negativo (lectura errónea).")
 
             st.divider()
 
