@@ -1136,11 +1136,22 @@ def _thdr_filtros():
             _cur = st.session_state.get('_t_fec')
             if _cur is None or not _inr(_cur): st.session_state['_t_fec'] = (_fmin, _fmax)
             _rg = st.date_input("Fecha", min_value=_fmin, max_value=_fmax, key="_t_fec")
-            _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
+            if isinstance(_rg, (tuple, list)):
+                _fi = _rg[0] if len(_rg) >= 1 else _fmin
+                _fe = _rg[1] if len(_rg) >= 2 else _fi
+            else:
+                _fi = _fe = _rg
     _cods = {_JC[x] for x in _j}
+    if isinstance(_fi, (tuple, list)): _fi = _fi[0] if _fi else None
+    if isinstance(_fe, (tuple, list)): _fe = _fe[-1] if _fe else None
     def _mk(serie):
         f = pd.to_datetime(serie, errors='coerce')
-        mm = f.notna() & (f.dt.date >= _fi) & (f.dt.date <= _fe)
+        _lo = pd.to_datetime(_fi, errors='coerce'); _hi = pd.to_datetime(_fe, errors='coerce')
+        if pd.isna(_lo) or pd.isna(_hi):
+            mm = f.notna()
+        else:
+            _fn = f.dt.normalize()
+            mm = f.notna() & (_fn >= _lo.normalize()) & (_fn <= _hi.normalize())
         if _a != "Todos": mm = mm & (f.dt.year == int(_a))
         if _me != "Todos": mm = mm & (f.dt.month == _mesnum_t[_me])
         if _sw != "Todas":
@@ -1148,7 +1159,7 @@ def _thdr_filtros():
             mm = mm & (_ic['year'] == _iy2) & (_ic['week'] == _iw2)
         if len(_cods) < 3:
             _td = f.dt.date.map(lambda d: get_tipo_dia(d) if pd.notna(d) else None); mm = mm & _td.isin(_cods)
-        return mm.values
+        return mm.fillna(False).values
     def _ap(t):
         if t is None or getattr(t, 'empty', True) or 'Fecha_Op' not in t.columns: return t
         return t[_mk(t['Fecha_Op'])].reset_index(drop=True)
@@ -1897,11 +1908,20 @@ if not df_ops.empty and _seccion != _SECCIONES[6]:
             _cur = st.session_state.get('_f_fecha')
             if _cur is None or not _in_rg(_cur): st.session_state['_f_fecha'] = (_fmin, _fmax)
             _rg = st.date_input("Fecha", min_value=_fmin, max_value=_fmax, key="_f_fecha")
-            _fi, _fe = (_rg[0], _rg[1]) if isinstance(_rg, tuple) and len(_rg) == 2 else (_rg, _rg)
+            if isinstance(_rg, (tuple, list)):
+                _fi = _rg[0] if len(_rg) >= 1 else _fmin
+                _fe = _rg[1] if len(_rg) >= 2 else _fi
+            else:
+                _fi = _fe = _rg
     _cods = {_J_COD[j] for j in _selj}
+    if isinstance(_fi, (tuple, list)): _fi = _fi[0] if _fi else None
+    if isinstance(_fe, (tuple, list)): _fe = _fe[-1] if _fe else None
     def _msk_f(serie):
         f = pd.to_datetime(serie, errors='coerce')
-        _lo = pd.Timestamp(_fi); _hi = pd.Timestamp(_fe)
+        _lo = pd.to_datetime(_fi, errors='coerce'); _hi = pd.to_datetime(_fe, errors='coerce')
+        if pd.isna(_lo) or pd.isna(_hi):
+            return f.notna().values
+        _lo = _lo.normalize(); _hi = _hi.normalize()
         _fn = f.dt.normalize()
         m = f.notna() & (_fn >= _lo) & (_fn <= _hi)
         if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
