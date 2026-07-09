@@ -2295,7 +2295,7 @@ if _seccion == _SECCIONES[1]:
                 if _fam == 6: return 'PU-LI' if _v1 else 'LI-PU'
                 if _fam == 4: return 'PU-SA' if _v1 else 'SA-PU'
                 return None
-            _det_inc = pd.DataFrame(); _diag_inc = pd.DataFrame(); _inc_no = 0; _inc_cab = 0; _inc_ot = 0; _inc_sm = 0
+            _det_inc = pd.DataFrame(); _diag_inc = pd.DataFrame(); _inc_no = 0; _inc_cab = 0; _inc_ot = 0; _inc_sm = 0; _srv_conflict = 0
             if not _tk_tren.empty and not df_incid.empty and _pt_thdr:
                 _KM3 = {'PUE': 0.0, 'BEL': 0.72, 'FRA': 1.2, 'BAR': 2.2, 'POR': 3.9, 'REC': 6.0, 'MIR': 7.4,
                         'V.MAR': 8.3, 'HOS': 9.55, 'CHO': 10.55, 'SAL': 11.71, 'VAL': 19.0, 'QUI': 21.43,
@@ -2324,8 +2324,15 @@ if _seccion == _SECCIONES[1]:
                     _evi['Fecha'] = pd.to_datetime(_evi['Fecha']).dt.normalize()
                     _evi['Lugar'] = _evi['Lugar'].astype(str).str.strip().str.upper()
                     # Cruce por VIAJE (único por día): el THDR aporta servicio, tramo y motrices reales
+                    _evi['Servicio_incid'] = pd.to_numeric(_evi['Servicio'], errors='coerce')
                     _evi = _evi.merge(_vjt, on=['Fecha', 'Viaje'], how='left')
-                    _evi['Servicio'] = _evi['Servicio_thdr'].where(_evi['Servicio_thdr'].notna(), _evi['Servicio'])
+                    # Verificar coincidencia servicio incidente vs THDR (para el mismo viaje)
+                    _svi = _evi['Servicio_incid']
+                    _svt = pd.to_numeric(_evi['Servicio_thdr'], errors='coerce')
+                    _evi['_srv_ok'] = np.where(_svi.notna() & _svt.notna(), _svi == _svt, np.nan)
+                    _srv_conflict = int(((_svi.notna()) & (_svt.notna()) & (_svi != _svt)).sum())
+                    # El servicio del THDR manda (fuente confiable); si no está, se usa el del incidente
+                    _evi['Servicio'] = _svt.where(_svt.notna(), _svi)
                     # Si el incidente no trae la motriz, se recupera del THDR (2ª motriz del servicio)
                     _evi['M2'] = _evi['M2'].where(_evi['M2'].notna(), _evi['M2_thdr'])
                     _evi['M2'] = _evi['M2'].where(_evi['M2'].notna(), _evi['M1_thdr'])
@@ -2469,6 +2476,8 @@ if _seccion == _SECCIONES[1]:
                 if not _det_inc.empty or _inc_no > 0 or _inc_cab > 0 or _inc_ot > 0 or _inc_sm > 0:
                     _tot_di = float(_det_inc['Km desc'].sum()) if not _det_inc.empty else 0.0
                     st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_sm} sin motriz identificada (cuentan en el control, no descuentan)" if _inc_sm else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
+                    if _srv_conflict > 0:
+                        st.caption(f"⚠️ {_srv_conflict} incidente(s) con servicio que no coincide con el THDR para ese viaje (posible error de tipeo en el registro). Se usó el servicio del THDR; revisa el detalle en el diagnóstico.")
                     if not _det_inc.empty or not _diag_inc.empty:
                         with st.expander("Ver descuentos por corte y acople — detalle", expanded=False):
                             if not _det_inc.empty:
@@ -2480,11 +2489,15 @@ if _seccion == _SECCIONES[1]:
                                 st.markdown("**Diagnóstico: todas las asignaciones detectadas y su clasificación**")
                                 _tdx = _diag_inc.copy()
                                 _tdx['Tren'] = pd.to_numeric(_tdx['M2'], errors='coerce').map(lambda _v: _nom_mot(int(_v)) if pd.notna(_v) else '—')
-                                _tdx = _tdx[['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Viaje', 'TS', 'Tren', 'Clase', 'Km desc']].copy()
+                                _tdx['Servicio incid.'] = pd.to_numeric(_tdx.get('Servicio_incid'), errors='coerce')
+                                _tdx['Coincide'] = _tdx['_srv_ok'].map(lambda _v: '✓' if _v == True else ('✗ no coincide' if _v == False else '—')) if '_srv_ok' in _tdx.columns else '—'
+                                _cols_diag = ['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Servicio incid.', 'Coincide', 'Viaje', 'TS', 'Tren', 'Clase', 'Km desc']
+                                _cols_diag = [c for c in _cols_diag if c in _tdx.columns]
+                                _tdx = _tdx[_cols_diag].copy()
                                 _tdx['Fecha'] = pd.to_datetime(_tdx['Fecha']).dt.strftime('%d-%m-%Y')
-                                _tdx = _tdx.rename(columns={'TS': 'Tramo THDR', 'Km desc': 'Km desc.'})
-                                _st_df(_tdx.sort_values(['Fecha', 'Servicio']), use_container_width=True, hide_index=True)
-                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. «Sin cruce THDR» no encontró el servicio+viaje en los THDR cargados (revisa que los THDR cubran esas fechas).")
+                                _tdx = _tdx.rename(columns={'Servicio': 'Servicio (THDR)', 'TS': 'Tramo THDR', 'Km desc': 'Km desc.'})
+                                _st_df(_tdx.sort_values(['Fecha', 'Servicio (THDR)']), use_container_width=True, hide_index=True)
+                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. «Sin cruce THDR» no encontró el viaje en los THDR cargados. La columna Coincide compara el servicio del incidente con el del THDR para ese viaje: «✗ no coincide» señala un posible error de tipeo en el registro (se usa el del THDR).")
             if all_kmserv and not df_incid.empty:
                 _dks_c = pd.DataFrame(all_kmserv)
                 if 'Cortes_EB' not in _dks_c.columns:
