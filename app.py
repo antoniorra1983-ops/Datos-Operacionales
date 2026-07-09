@@ -2325,7 +2325,11 @@ if _seccion == _SECCIONES[1]:
                     _evi['Lugar'] = _evi['Lugar'].astype(str).str.strip().str.upper()
                     # Cruce por VIAJE (único por día): el THDR aporta servicio, tramo y motrices reales
                     _evi['Servicio_incid'] = pd.to_numeric(_evi['Servicio'], errors='coerce')
+                    _evi['Viaje_incid'] = pd.to_numeric(_evi['Viaje'], errors='coerce')
+                    _vjt['Viaje_thdr'] = _vjt['Viaje']
                     _evi = _evi.merge(_vjt, on=['Fecha', 'Viaje'], how='left')
+                    # El viaje del THDR solo existe si el cruce encontró match (Servicio_thdr no nulo)
+                    _evi['Viaje_thdr'] = _evi['Viaje_thdr'].where(_evi['Servicio_thdr'].notna(), np.nan)
                     # Verificar coincidencia servicio incidente vs THDR (para el mismo viaje)
                     _svi = _evi['Servicio_incid']
                     _svt = pd.to_numeric(_evi['Servicio_thdr'], errors='coerce')
@@ -2491,15 +2495,17 @@ if _seccion == _SECCIONES[1]:
                                 _tdx['Tren'] = pd.to_numeric(_tdx['M2'], errors='coerce').map(lambda _v: _nom_mot(int(_v)) if pd.notna(_v) else '—')
                                 _tdx['Servicio THDR'] = pd.to_numeric(_tdx['Servicio'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
                                 _tdx['Servicio Incidente'] = pd.to_numeric(_tdx.get('Servicio_incid'), errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                _tdx['Viaje Incidente'] = pd.to_numeric(_tdx.get('Viaje_incid'), errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                _tdx['Viaje THDR'] = pd.to_numeric(_tdx.get('Viaje_thdr'), errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                _tdx['Viaje igual'] = _tdx.apply(lambda _r: ('✓' if _r['Viaje Incidente'] == _r['Viaje THDR'] else '✗') if _r['Viaje THDR'] != '—' else '✗ sin THDR', axis=1)
                                 _tdx['Coincide'] = _tdx['_srv_ok'].map(lambda _v: '✓' if _v == True else ('✗ no coincide' if _v == False else '—')) if '_srv_ok' in _tdx.columns else '—'
-                                _tdx['Viaje'] = pd.to_numeric(_tdx['Viaje'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
-                                _cols_diag = ['Fecha', 'Tipo', 'Lugar', 'Viaje', 'Servicio THDR', 'Servicio Incidente', 'Coincide', 'TS', 'Tren', 'Clase', 'Km desc']
+                                _cols_diag = ['Fecha', 'Tipo', 'Lugar', 'Viaje Incidente', 'Viaje THDR', 'Viaje igual', 'Servicio THDR', 'Servicio Incidente', 'Coincide', 'TS', 'Tren', 'Clase', 'Km desc']
                                 _cols_diag = [c for c in _cols_diag if c in _tdx.columns]
                                 _tdx2 = _tdx[_cols_diag].copy()
                                 _tdx2['Fecha'] = pd.to_datetime(_tdx2['Fecha']).dt.strftime('%d-%m-%Y')
                                 _tdx2 = _tdx2.rename(columns={'TS': 'Tramo THDR', 'Km desc': 'Km desc.'})
-                                _st_df(_tdx2.sort_values(['Fecha', 'Viaje']), use_container_width=True, hide_index=True)
-                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. «Sin cruce THDR» no encontró el viaje en los THDR cargados. Servicio THDR = el que corresponde a ese viaje según el THDR; Servicio Incidente = el que trae el registro de incidentes. «✗ no coincide» señala un posible error de tipeo en el registro (para los cálculos se usa el del THDR).")
+                                _st_df(_tdx2.sort_values(['Fecha', 'Viaje Incidente']), use_container_width=True, hide_index=True)
+                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. Viaje Incidente = el que trae el registro; Viaje THDR = el mismo viaje encontrado en el THDR (— si no existe ahí). «Viaje igual» ✓ = el viaje del incidente sí está en el THDR; «✗ sin THDR» = no se encontró (revisa que los THDR cubran esas fechas). Servicio THDR vs Servicio Incidente: «✗ no coincide» señala posible error de tipeo (para los cálculos se usa el del THDR).")
             if all_kmserv and not df_incid.empty:
                 _dks_c = pd.DataFrame(all_kmserv)
                 if 'Cortes_EB' not in _dks_c.columns:
