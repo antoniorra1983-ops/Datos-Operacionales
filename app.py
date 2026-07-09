@@ -1687,14 +1687,8 @@ elif _hay_archivos and st.session_state.get('_do_load'):
             r'(?P<sv>[246]\d{2})'
             r'(?:\s+XT[-\s]*(?P<m1>\d{1,2})(?:\s*[-/]\s*(?P<m2>\d{1,2}))?)?'
             r'\s*\(\s*viaje\s*(?P<vj>\d+)\s*\)', re.I)
-        # Palabras clave de evento de composición
-        _RX_INC_ACOPL = re.compile(r'des\s*acopl|acopl', re.I)
-        _RX_INC_DESAC = re.compile(r'des\s*acopl', re.I)
-        # "corte" solo cuenta si va acompañado de un servicio con viaje (evita "corte 3kv", "corte en el ojo")
-        _RX_INC_CORTE = re.compile(r'\bcort[ea]\b', re.I)
-        _RX_INC_CORTE_FALSO = re.compile(r'cort[ea]\s+(?:de\s+)?(?:energ|3\s*kv|kv|tensi|suministro|luz|ojo|corriente|catenaria|el[eé]ctr)', re.I)
-        # Frases donde el (des)acople es de OTRO servicio (consecuencia), no del que se describe
-        _RX_INC_CONSEC = re.compile(r'precedente|servicio anterior|viaje anterior|debido a exceso|por (?:des)?acople en', re.I)
+        # Frase clave transversal: "es/son acoplado(s)" o "es/son desacoplado(s)"
+        _RX_INC_EVT = re.compile(r'\b(?:es|son)\s+(?P<des>des)?acoplad[oa]s?\b', re.I)
         _inc_rows = []
         for f in f_incid_all:
             try:
@@ -1702,42 +1696,32 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _d0 = pd.read_excel(f, header=None, engine=_ei)
                 _hr = None
                 for _i in range(min(12, len(_d0))):
-                    if (_d0.iloc[_i].astype(str).str.strip() == 'Subtipo incidente').any():
+                    if (_d0.iloc[_i].astype(str).str.strip() == 'Descripción').any():
                         _hr = _i; break
+                if _hr is None:
+                    for _i in range(min(12, len(_d0))):
+                        if (_d0.iloc[_i].astype(str).str.strip() == 'Subtipo incidente').any():
+                            _hr = _i; break
                 if _hr is None:
                     continue
                 _di = pd.read_excel(f, header=_hr, engine=_ei)
-                _col_sub = 'Subtipo incidente' if 'Subtipo incidente' in _di.columns else None
+                _col_desc = next((c for c in _di.columns if str(c).strip().lower().startswith('descrip')), None)
+                _col_fec = next((c for c in _di.columns if 'ocurrencia' in str(c).strip().lower()), None)
+                _col_lug = next((c for c in _di.columns if str(c).strip().lower() == 'lugar'), None)
+                if _col_desc is None or _col_fec is None:
+                    continue
                 for _, _r in _di.iterrows():
-                    _fo = pd.to_datetime(_r.get('Fecha ocurrencia'), dayfirst=True, errors='coerce')
+                    _fo = pd.to_datetime(_r.get(_col_fec), dayfirst=True, errors='coerce')
                     if pd.isna(_fo) or not (start_date <= _fo.date() <= end_date):
                         continue
-                    _desc = str(_r.get('Descripción', ''))
-                    _low = _desc.lower()
-                    _lug = str(_r.get('Lugar', '')).strip().upper()
-                    _sub_i = str(_r.get(_col_sub, '')) if _col_sub else ''
-                    _toks = list(_RX_INC_TOK.finditer(_desc))
-                    _tiene_corte = bool(_RX_INC_CORTE.search(_desc)) and bool(_toks) and not bool(_RX_INC_CORTE_FALSO.search(_desc))
-                    # ¿Es un evento de composición? subtipo oficial, o texto acopl/desacopl, o "corte" junto a servicio
-                    _es_evt = (_sub_i in ('Acople', 'Desacople')) or bool(_RX_INC_ACOPL.search(_desc)) or _tiene_corte
-                    if not _es_evt:
+                    _desc = str(_r.get(_col_desc, ''))
+                    _mevt = _RX_INC_EVT.search(_desc)
+                    if not _mevt:
                         continue
-                    # Tipo: subtipo oficial manda; si no, se deriva del texto (desacople/corte = Desacople)
-                    if _sub_i in ('Acople', 'Desacople'):
-                        _tipo_i = _sub_i
-                    elif _RX_INC_DESAC.search(_desc):
-                        _tipo_i = 'Desacople'
-                    elif _RX_INC_ACOPL.search(_desc):
-                        _tipo_i = 'Acople'
-                    elif _tiene_corte:
-                        _tipo_i = 'Desacople'
-                    else:
-                        continue
-                    # Descartar consecuencias (evento de otro servicio) salvo que el subtipo sea explícito
-                    if _sub_i not in ('Acople', 'Desacople') and _RX_INC_CONSEC.search(_desc):
-                        continue
+                    _tipo_i = 'Desacople' if _mevt.group('des') else 'Acople'
+                    _lug = str(_r.get(_col_lug, '')).strip().upper() if _col_lug else ''
                     _vistos = set()
-                    for _m in _toks:
+                    for _m in _RX_INC_TOK.finditer(_desc):
                         _sv = int(_m.group('sv')); _vj = int(_m.group('vj'))
                         if (_sv, _vj) in _vistos:
                             continue
