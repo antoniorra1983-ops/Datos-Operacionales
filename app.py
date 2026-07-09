@@ -2489,15 +2489,17 @@ if _seccion == _SECCIONES[1]:
                                 st.markdown("**Diagnóstico: todas las asignaciones detectadas y su clasificación**")
                                 _tdx = _diag_inc.copy()
                                 _tdx['Tren'] = pd.to_numeric(_tdx['M2'], errors='coerce').map(lambda _v: _nom_mot(int(_v)) if pd.notna(_v) else '—')
-                                _tdx['Servicio incid.'] = pd.to_numeric(_tdx.get('Servicio_incid'), errors='coerce')
+                                _tdx['Servicio THDR'] = pd.to_numeric(_tdx['Servicio'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                _tdx['Servicio Incidente'] = pd.to_numeric(_tdx.get('Servicio_incid'), errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
                                 _tdx['Coincide'] = _tdx['_srv_ok'].map(lambda _v: '✓' if _v == True else ('✗ no coincide' if _v == False else '—')) if '_srv_ok' in _tdx.columns else '—'
-                                _cols_diag = ['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Servicio incid.', 'Coincide', 'Viaje', 'TS', 'Tren', 'Clase', 'Km desc']
+                                _tdx['Viaje'] = pd.to_numeric(_tdx['Viaje'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                _cols_diag = ['Fecha', 'Tipo', 'Lugar', 'Viaje', 'Servicio THDR', 'Servicio Incidente', 'Coincide', 'TS', 'Tren', 'Clase', 'Km desc']
                                 _cols_diag = [c for c in _cols_diag if c in _tdx.columns]
-                                _tdx = _tdx[_cols_diag].copy()
-                                _tdx['Fecha'] = pd.to_datetime(_tdx['Fecha']).dt.strftime('%d-%m-%Y')
-                                _tdx = _tdx.rename(columns={'Servicio': 'Servicio (THDR)', 'TS': 'Tramo THDR', 'Km desc': 'Km desc.'})
-                                _st_df(_tdx.sort_values(['Fecha', 'Servicio (THDR)']), use_container_width=True, hide_index=True)
-                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. «Sin cruce THDR» no encontró el viaje en los THDR cargados. La columna Coincide compara el servicio del incidente con el del THDR para ese viaje: «✗ no coincide» señala un posible error de tipeo en el registro (se usa el del THDR).")
+                                _tdx2 = _tdx[_cols_diag].copy()
+                                _tdx2['Fecha'] = pd.to_datetime(_tdx2['Fecha']).dt.strftime('%d-%m-%Y')
+                                _tdx2 = _tdx2.rename(columns={'TS': 'Tramo THDR', 'Km desc': 'Km desc.'})
+                                _st_df(_tdx2.sort_values(['Fecha', 'Viaje']), use_container_width=True, hide_index=True)
+                                st.caption("«En ruta» descuenta km y entra al control cruzado. «Inicio/término del viaje» y «Maniobra de cabecera» no tienen efecto en km. «Sin cruce THDR» no encontró el viaje en los THDR cargados. Servicio THDR = el que corresponde a ese viaje según el THDR; Servicio Incidente = el que trae el registro de incidentes. «✗ no coincide» señala un posible error de tipeo en el registro (para los cálculos se usa el del THDR).")
             if all_kmserv and not df_incid.empty:
                 _dks_c = pd.DataFrame(all_kmserv)
                 if 'Cortes_EB' not in _dks_c.columns:
