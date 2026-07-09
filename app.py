@@ -1682,10 +1682,15 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     # Incidentes PCC: cortes y acoples (para descontar km no recorridos en Tren-Km por tren)
     if f_incid_all:
-        # Token general: un servicio (4xx/6xx), motrices opcionales (XT-A o XT-A-B), y su viaje
+        # Token general: servicio (4xx/6xx), motrices en cualquier formato (opcionales) y su viaje.
+        # Cubre: "473 XT-17-13 (viaje 22)", "660 XT01/18 (viaje 99)", "660 02-28 (viaje 99)",
+        #        "473 XT-XT-03-05 (viaje 22)", "651 XT-23-05(viaje 141)", "601 XT-35 (viaje 189)", "473 (viaje 22)"
         _RX_INC_TOK = re.compile(
             r'(?P<sv>[246]\d{2})'
-            r'(?:\s+XT[-\s]*(?P<m1>\d{1,2})(?:\s*[-/]\s*(?P<m2>\d{1,2}))?)?'
+            r'(?:'
+              r'\s*(?:XT[-\s]*)*(?P<m1>\d{1,2})\s*[-/]\s*(?P<m2>\d{1,2})'
+              r'|\s+XT[-\s]*(?P<m1b>\d{1,2})'
+            r')?'
             r'\s*\(\s*viaje\s*(?P<vj>\d+)\s*\)', re.I)
         # Frase clave transversal: "es/son acoplado(s)" o "es/son desacoplado(s)"
         _RX_INC_EVT = re.compile(r'\b(?:es|son)\s+(?P<des>des)?acoplad[oa]s?\b', re.I)
@@ -1726,7 +1731,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                         if (_sv, _vj) in _vistos:
                             continue
                         _vistos.add((_sv, _vj))
-                        _m1v = int(_m.group('m1')) if _m.group('m1') else np.nan
+                        _m1v = int(_m.group('m1') or _m.group('m1b')) if (_m.group('m1') or _m.group('m1b')) else np.nan
                         _m2v = int(_m.group('m2')) if _m.group('m2') else np.nan
                         _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
                                           'Servicio': _sv, 'Viaje': _vj, 'M1': _m1v, 'M2': _m2v})
