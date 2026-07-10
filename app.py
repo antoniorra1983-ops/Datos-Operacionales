@@ -2660,6 +2660,38 @@ if _seccion == _SECCIONES[1]:
                         _ic = _ic.merge(_vjt2[['Fecha', 'Viaje', 'TS']], on=['Fecha', 'Viaje'], how='left')
                     else:
                         _ic['TS'] = np.nan
+                    # Excluir los eventos en la estación de inicio/término del propio viaje: no son
+                    # cortes/acoples en ruta (el viaje sale o llega con esa composición).
+                    _KM2C = {'PU': 0.0, 'EB': 25.4, 'SA': 29.11, 'PE': 3.9, 'LI': 43.13}
+                    _KM3C = {'PUE': 0.0, 'E.BEL': 25.4, 'S.ALD': 29.11, 'LIM': 43.13, 'PEÑ': 3.9}
+                    def _es_extremo(_r):
+                        _e = str(_r.get('Est', '')).strip().upper()
+                        try:
+                            _fam = int(_r.get('Servicio')) // 100
+                        except Exception:
+                            _fam = None
+                        # Regla de dominio: 4xx retorna en SA (extremo), 6xx en LI (ya excluido como cabecera)
+                        if _fam == 4 and _e == 'SA':
+                            return True
+                        _ts = str(_r.get('TS', ''))
+                        _ko = _kd = None
+                        if '→' in _ts:
+                            _o, _d = [_p.strip() for _p in _ts.split('→', 1)]
+                            _ko, _kd = _KM3C.get(_o), _KM3C.get(_d)
+                        if _ko is None or _kd is None:
+                            _odr = _od_regla(_r.get('Servicio'), _r.get('Viaje'))
+                            if _odr:
+                                _po, _pd = _odr.split('-', 1)
+                                _ko, _kd = _KM2C.get(_po), _KM2C.get(_pd)
+                        _kl = _KM2C.get(_e)
+                        if _ko is not None and _kd is not None and _kl is not None:
+                            return _kl == _ko or _kl == _kd
+                        return False
+                    _n_ot_ctl = 0
+                    if not _ic.empty:
+                        _mask_ext = _ic.apply(_es_extremo, axis=1)
+                        _n_ot_ctl = int(_mask_ext.sum())
+                        _ic = _ic[~_mask_ext]
                     _S2C = {'PUE': 'PU', 'BEL': 'BE', 'FRA': 'FR', 'BAR': 'BA', 'POR': 'PO', 'REC': 'RE', 'MIR': 'MI',
                             'V.MAR': 'VM', 'HOS': 'HO', 'CHO': 'CH', 'SAL': 'ES', 'QUI': 'QU', 'E.BEL': 'EB',
                             'AME': 'AM', 'S.ALD': 'SA', 'PEÑ': 'PE', 'LIM': 'LI'}
@@ -2695,7 +2727,7 @@ if _seccion == _SECCIONES[1]:
                             _tot_row = {'Fecha': 'TOTAL', 'Estación': '', **{_cx: int(_tc[_cx].sum()) for _cx in _tc.columns[2:]}}
                             _tc = pd.concat([_tc, pd.DataFrame([_tot_row])], ignore_index=True)
                             _st_df(_tc, use_container_width=True, hide_index=True)
-                            st.caption("Comparación por día y estación intermedia (EB/SA/PE). Cortes/Acoples UMR: contadores del KM-Servicio. Cortes/Acoples Incid: desacoples y acoples por servicio detectados en los Incidentes PCC. Δ = Incidentes − UMR." + (f" Se excluyeron {_n_cab_ctl} maniobras de cabecera (PU/LI): armado de composición antes de salir." if _n_cab_ctl else ""))
+                            st.caption("Comparación por día y estación intermedia (EB/SA/PE). Cortes/Acoples UMR: contadores del KM-Servicio. Cortes/Acoples Incid: desacoples y acoples por servicio detectados en los Incidentes PCC. Δ = Incidentes − UMR." + (f" Se excluyeron {_n_cab_ctl} maniobras de cabecera (PU/LI): armado de composición antes de salir." if _n_cab_ctl else "") + (f" Se excluyeron {_n_ot_ctl} eventos en la estación de inicio/término del propio viaje (no son cortes/acoples en ruta)." if _n_ot_ctl else ""))
                             if not _ic.empty:
                                 st.markdown("**Desglose de incidentes por tipo de servicio y estación (período)**")
                                 _dts = _ic.groupby(['Tipo servicio', 'Est', 'Tipo'], as_index=False).size().rename(columns={'size': 'N'})
