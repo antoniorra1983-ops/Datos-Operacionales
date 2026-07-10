@@ -1099,6 +1099,11 @@ def _thdr_filtros():
     if st.session_state.get('_t_sig') != _tsig:
         st.session_state['_t_sig'] = _tsig
         for _k in ('_t_anio', '_t_mes', '_t_sem', '_t_jor', '_t_fec'): st.session_state.pop(_k, None)
+    # Defaults para que estas variables existan aunque un rerun corte los widgets.
+    _fmin, _fmax = min(_dts_all), max(_dts_all)
+    _fi, _fe = _fmin, _fmax
+    _a = _me = "Todos"; _sw = "Todas"
+    _j = list(_JC.keys())
     with st.container(border=True):
         st.markdown("**🎛️ Filtros THDR** — Año · Mes · Semana · Jornada · Fecha")
         _c1, _cmm, _c2, _c3, _c4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
@@ -1910,6 +1915,12 @@ if not df_ops.empty and _seccion != _SECCIONES[6]:
     if st.session_state.get('_f_sig') != _sig:
         st.session_state['_f_sig'] = _sig
         for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
+    # Valores por defecto: garantizan que estas variables existan aunque un rerun
+    # interrumpa la construcción de los widgets (evita NameError al aplicar el filtro).
+    _fmin, _fmax = min(_dts_all), max(_dts_all)
+    _fi, _fe = _fmin, _fmax
+    _sel_a = _sel_m = _sel_s = "Todos"; _sel_s = "Todas"
+    _selj = list(_J_COD.keys())
     with st.container(border=True):
         _ct1, _ct2 = st.columns([5, 1])
         _ct1.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
