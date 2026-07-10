@@ -1616,6 +1616,53 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     if all_ops:
         df_ops=pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum","Tren-Km [km]":"sum"}).reset_index()
+        # --- Excluir SFE en pruebas del Odómetro/Tren-Km ---
+        # Regla: hasta el 20-abr-2026 TODOS los SFE van aparte (en pruebas). Desde el
+        # 21-abr-2026 el SFE 412 se integra al total y el resto sigue aparte.
+        # El km diario de cada SFE se toma de all_tr (odómetro por tren). Se descuenta del
+        # total del UMR el aporte de los SFE que NO deben contar en cada fecha.
+        _SFE_CORTE = pd.Timestamp(2026, 4, 21)
+        _sfe_desc = {}
+        if all_tr:
+            _dt_all = pd.DataFrame(all_tr)
+            if {'Tren', 'Fecha', 'Valor'}.issubset(_dt_all.columns):
+                _dt_all['Fecha'] = pd.to_datetime(_dt_all['Fecha'], errors='coerce').dt.normalize()
+                _dt_all['Valor'] = pd.to_numeric(_dt_all['Valor'], errors='coerce')
+                if 'Clase' in _dt_all.columns and (_dt_all['Clase'] == 'km').any():
+                    _dt_km = _dt_all[_dt_all['Clase'] == 'km']
+                else:
+                    _dt_km = _dt_all[_dt_all['Valor'] < 50000]
+                _dt_km = _dt_km.dropna(subset=['Fecha', 'Valor'])
+                _es_sfe = _dt_km['Tren'].astype(str).str.upper().str.startswith('SFE')
+                # Km diario total por fecha reconstruido desde all_tr (todos los trenes)
+                _tot_tr = _dt_km.groupby('Fecha')['Valor'].sum()
+                # Km diario de SFE por fecha
+                _tot_sfe_dia = _dt_km[_es_sfe].groupby('Fecha')['Valor'].sum()
+                for _fe_s in _tot_sfe_dia.index:
+                    # Solo descontar si el total del UMR para esa fecha INCLUYE el SFE
+                    # (se compara la suma por tren con el odómetro del df_ops de esa fecha)
+                    _od_umr = df_ops.loc[pd.to_datetime(df_ops['Fecha']).dt.normalize() == _fe_s, 'Odómetro [km]']
+                    _od_umr = float(_od_umr.iloc[0]) if len(_od_umr) else 0.0
+                    _tot_con_sfe = float(_tot_tr.get(_fe_s, 0.0))
+                    _incluye_sfe = _od_umr > (_tot_con_sfe - float(_tot_sfe_dia[_fe_s])) + 1.0
+                    if not _incluye_sfe:
+                        continue
+                    # Sumar el km de los SFE que NO deben contar en esa fecha
+                    _sfe_fe = _dt_km[_es_sfe & (_dt_km['Fecha'] == _fe_s)]
+                    for _, _rs in _sfe_fe.iterrows():
+                        _es_412 = bool(re.search(r'\b412\b', str(_rs['Tren'])))
+                        _cuenta = _es_412 and (_fe_s >= _SFE_CORTE)
+                        if not _cuenta:
+                            _sfe_desc[_fe_s] = _sfe_desc.get(_fe_s, 0.0) + float(_rs['Valor'])
+        if _sfe_desc:
+            _sfe_ser = pd.Series(_sfe_desc)
+            _df_desc = pd.DataFrame({'Fecha': _sfe_ser.index, '_sfe_km': _sfe_ser.values})
+            _df_desc['Fecha'] = pd.to_datetime(_df_desc['Fecha']).dt.normalize()
+            df_ops['Fecha'] = pd.to_datetime(df_ops['Fecha']).dt.normalize()
+            df_ops = df_ops.merge(_df_desc, on='Fecha', how='left')
+            df_ops['_sfe_km'] = df_ops['_sfe_km'].fillna(0.0)
+            df_ops['Odómetro [km]'] = (df_ops['Odómetro [km]'] - df_ops['_sfe_km']).clip(lower=0)
+            df_ops = df_ops.drop(columns=['_sfe_km'])
         df_f_d=(pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha","E_Fact"]))
         df_p_d=(pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha","E_Prmte"]))
         df_s_d=(pd.DataFrame(all_seat).groupby("Fecha").agg({"E_Total":"sum","E_Tr":"sum","E_12":"sum"}).reset_index().rename(columns={"E_Total":"E_Seat_T","E_Tr":"E_Seat_Tr","E_12":"E_Seat_12"}) if all_seat else pd.DataFrame(columns=["Fecha","E_Seat_T","E_Seat_Tr","E_Seat_12"]))
