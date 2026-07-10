@@ -2325,14 +2325,18 @@ if _seccion == _SECCIONES[1]:
                     _cm2 = next((c for c in _dth.columns if str(c).strip().upper() == 'MOTRIZ 2'), None)
                     if not _cm1:
                         continue
+                    _fop = pd.to_datetime(_dth['Fecha_Op'], errors='coerce').dt.normalize() if 'Fecha_Op' in _dth.columns else pd.Series([pd.NaT] * len(_dth))
                     _acc_tk.append(pd.DataFrame({'Km': pd.to_numeric(_dth['Km_Recorrido'], errors='coerce'),
+                                                 'Fecha': _fop.values,
                                                  'M1': pd.to_numeric(_dth[_cm1], errors='coerce'),
                                                  'M2': (pd.to_numeric(_dth[_cm2], errors='coerce') if _cm2 else np.nan)}))
                 if _acc_tk:
                     _ttk = pd.concat(_acc_tk, ignore_index=True).dropna(subset=['Km'])
-                    _l1 = _ttk.dropna(subset=['M1'])[['Km', 'M1']].rename(columns={'M1': 'NMot'})
-                    _l2 = _ttk.dropna(subset=['M2'])[['Km', 'M2']].rename(columns={'M2': 'NMot'})
+                    _l1 = _ttk.dropna(subset=['M1'])[['Km', 'Fecha', 'M1']].rename(columns={'M1': 'NMot'})
+                    _l2 = _ttk.dropna(subset=['M2'])[['Km', 'Fecha', 'M2']].rename(columns={'M2': 'NMot'})
                     _lt = pd.concat([_l1, _l2], ignore_index=True)
+                    _lt['NMot'] = pd.to_numeric(_lt['NMot'], errors='coerce')
+                    _lt = _lt[_lt['NMot'] >= 1]  # descartar motriz 0/vacía (no es un tren real)
                     if not _lt.empty:
                         _lt['NMot'] = _lt['NMot'].astype(int)
                         def _nom_mot(_n):
@@ -2340,6 +2344,13 @@ if _seccion == _SECCIONES[1]:
                             if 28 <= _n <= 35: return f"XM{_n}"
                             return f"SFE {_n}"
                         _lt['TrenTHDR'] = _lt['NMot'].map(_nom_mot)
+                        # Excluir SFE en pruebas: hasta 20-abr todos aparte; desde 21-abr solo el 412 cuenta
+                        _SFE_CT = pd.Timestamp(2026, 4, 21)
+                        _es_sfe_l = _lt['TrenTHDR'].str.upper().str.startswith('SFE')
+                        _es_412_l = _lt['NMot'] == 412
+                        _fe_ok = pd.to_datetime(_lt['Fecha'], errors='coerce')
+                        _cuenta_l = (~_es_sfe_l) | (_es_412_l & (_fe_ok >= _SFE_CT))
+                        _lt = _lt[_cuenta_l]
                         _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
                         _tk_tren = _lt.groupby(['_key', 'TrenTHDR'], as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
             # Descuento por cortes/acoples (incidentes): km no recorridos por la motriz acoplada/desacoplada
