@@ -983,9 +983,11 @@ def _filtra_fecha_op(df, fecha):
         return df
     return df[pd.to_datetime(df['Fecha_Op'], errors='coerce').dt.date == fecha]
 
-def _km_por_tren(all_tr):
+def _km_por_tren(all_tr, excluir_sfe=True):
     """Desde all_tr (Tren, Fecha, Valor) separa odómetro acumulado (valores grandes) y
     kilometraje diario (valores chicos) de la hoja UMR, y resume km recorridos por tren.
+    Con excluir_sfe=True aplica la regla de SFE en pruebas: hasta el 20-abr-2026 todos los
+    SFE quedan fuera; desde el 21-abr-2026 solo el SFE 412 cuenta y el resto sigue fuera.
     Devuelve (resumen_por_tren, km_diario_flota, pivote_km_diario)."""
     _vacio = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     if not all_tr:
@@ -998,6 +1000,17 @@ def _km_por_tren(all_tr):
     _d = _d.dropna(subset=['Fecha', 'Valor'])
     if _d.empty:
         return _vacio
+    if excluir_sfe:
+        # Regla SFE en pruebas: descartar el km de los SFE que no deben contar en cada fecha.
+        _SFE_CT = pd.Timestamp(2026, 4, 21)
+        _tru = _d['Tren'].astype(str).str.upper()
+        _es_sfe = _tru.str.startswith('SFE')
+        _n_sfe = _tru.str.extract(r'SFE[\s\-_.]*0*(\d+)')[0]
+        _es_412 = _n_sfe == '412'
+        _cuenta = (~_es_sfe) | (_es_412 & (_d['Fecha'] >= _SFE_CT))
+        _d = _d[_cuenta]
+        if _d.empty:
+            return _vacio
     if 'Clase' in _d.columns and _d['Clase'].notna().any():
         _km = _d[_d['Clase'] == 'km']
         _odo = _d[_d['Clase'] == 'odo']
