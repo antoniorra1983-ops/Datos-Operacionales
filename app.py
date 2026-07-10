@@ -2428,6 +2428,16 @@ if _seccion == _SECCIONES[1]:
                     def _desc_ev(_r):
                         if str(_r.get('Lugar', '')) in ('PU', 'LI'):
                             return pd.Series({'_cl': 'cab', 'Km desc': 0.0})
+                        _lug = str(_r.get('Lugar', '')).strip().upper()
+                        # Regla de dominio: en cada familia la estación de retorno es un extremo del
+                        # viaje, nunca un punto intermedio. Familia 4xx retorna en SA; 6xx en LI (cabecera).
+                        # Un (des)acople en el extremo natural del servicio = inicio/término (no descuenta).
+                        try:
+                            _famv = int(_r.get('Servicio')) // 100
+                        except Exception:
+                            _famv = None
+                        if _famv == 4 and _lug == 'SA':
+                            return pd.Series({'_cl': 'ot', 'Km desc': 0.0})
                         _ts = str(_r.get('TS', ''))
                         _ko = _kd = None
                         if '→' in _ts:
@@ -2438,7 +2448,7 @@ if _seccion == _SECCIONES[1]:
                             if _odr:
                                 _po, _pdst = _odr.split('-', 1)
                                 _ko, _kd = _KM2.get(_po), _KM2.get(_pdst)
-                        _kl = _KM2.get(str(_r.get('Lugar', '')).strip().upper())
+                        _kl = _KM2.get(_lug)
                         if _ko is None or _kd is None or _kl is None:
                             return pd.Series({'_cl': 'nc', 'Km desc': np.nan})
                         if _kl == _ko or _kl == _kd:
