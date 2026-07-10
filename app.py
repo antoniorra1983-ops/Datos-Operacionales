@@ -1759,13 +1759,14 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     # Incidentes PCC: cortes y acoples (para descontar km no recorridos en Tren-Km por tren)
     if f_incid_all:
         # Token general: servicio (4xx/6xx), motrices en cualquier formato (opcionales) y su viaje.
-        # Cubre motrices: "XT-17-13", "XT01/18", "02-28", "XT-XT-03-05", "XT-35" (una), o sin motriz.
-        # El viaje puede venir con o sin paréntesis: "(viaje 99)" o "viaje 99".
+        # Cubre motrices: "XT-17-13", "XT01/18", "02-28", "XT-XT-03-05", "XT-1702" (pegado 4 díg),
+        #                 "XT-35" (una), o sin motriz. El viaje viene con o sin paréntesis.
         _RX_INC_TOK = re.compile(
             r'(?P<sv>[246]\d{2})'
             r'(?:'
               r'\s*(?:XT[-\s]*)*(?P<m1>\d{1,2})\s*[-/]\s*(?P<m2>\d{1,2})'
-              r'|\s+XT[-\s]*(?P<m1b>\d{1,2})'
+              r'|\s+XT[-\s]*(?P<mp1>\d{2})(?P<mp2>\d{2})(?!\d)'
+              r'|\s+XT[-\s]*(?P<m1b>\d{1,2})(?!\d)'
             r')?'
             r'\s*\(?\s*viaje\s*(?P<vj>\d+)\s*\)?', re.I)
         # Frase clave transversal: "es/son acoplado(s)" o "es/son desacoplado(s)"
@@ -1807,8 +1808,10 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                         if (_sv, _vj) in _vistos:
                             continue
                         _vistos.add((_sv, _vj))
-                        _m1v = int(_m.group('m1') or _m.group('m1b')) if (_m.group('m1') or _m.group('m1b')) else np.nan
-                        _m2v = int(_m.group('m2')) if _m.group('m2') else np.nan
+                        _mm1 = _m.group('m1') or _m.group('mp1') or _m.group('m1b')
+                        _mm2 = _m.group('m2') or _m.group('mp2')
+                        _m1v = int(_mm1) if _mm1 else np.nan
+                        _m2v = int(_mm2) if _mm2 else np.nan
                         _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
                                           'Servicio': _sv, 'Viaje': _vj, 'M1': _m1v, 'M2': _m2v})
             except Exception as _e:
