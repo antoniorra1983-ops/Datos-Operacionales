@@ -2431,12 +2431,15 @@ if _seccion == _SECCIONES[1]:
                         _lug = str(_r.get('Lugar', '')).strip().upper()
                         # Regla de dominio: en cada familia la estación de retorno es un extremo del
                         # viaje, nunca un punto intermedio. Familia 4xx retorna en SA; 6xx en LI (cabecera).
-                        # Un (des)acople en el extremo natural del servicio = inicio/término (no descuenta).
-                        try:
-                            _famv = int(_r.get('Servicio')) // 100
-                        except Exception:
-                            _famv = None
-                        if _famv == 4 and _lug == 'SA':
+                        # Se revisa tanto el servicio del THDR como el del incidente: si cualquiera es
+                        # 4xx y el evento es en SA, es inicio/término (no descuenta).
+                        _fams = set()
+                        for _sv_chk in (_r.get('Servicio'), _r.get('Servicio_incid')):
+                            try:
+                                _fams.add(int(_sv_chk) // 100)
+                            except Exception:
+                                pass
+                        if 4 in _fams and _lug == 'SA':
                             return pd.Series({'_cl': 'ot', 'Km desc': 0.0})
                         _ts = str(_r.get('TS', ''))
                         _ko = _kd = None
@@ -2666,12 +2669,14 @@ if _seccion == _SECCIONES[1]:
                     _KM3C = {'PUE': 0.0, 'E.BEL': 25.4, 'S.ALD': 29.11, 'LIM': 43.13, 'PEÑ': 3.9}
                     def _es_extremo(_r):
                         _e = str(_r.get('Est', '')).strip().upper()
-                        try:
-                            _fam = int(_r.get('Servicio')) // 100
-                        except Exception:
-                            _fam = None
+                        _fams2 = set()
+                        for _sv_chk in (_r.get('Servicio'), _r.get('Servicio_incid')):
+                            try:
+                                _fams2.add(int(_sv_chk) // 100)
+                            except Exception:
+                                pass
                         # Regla de dominio: 4xx retorna en SA (extremo), 6xx en LI (ya excluido como cabecera)
-                        if _fam == 4 and _e == 'SA':
+                        if 4 in _fams2 and _e == 'SA':
                             return True
                         _ts = str(_r.get('TS', ''))
                         _ko = _kd = None
