@@ -239,23 +239,30 @@ def clasificar_od_thdr(df_thdr):
     def _od(i):
         s = sal.loc[i]; l = lle.loc[i]
         # Origen = estación con salida y sin llegada; destino = con llegada y sin salida.
-        # Si hay más de una candidata, se decide por la HORA (no por el orden geográfico):
+        # Si hay más de una candidata se decide por la HORA (no por el orden geográfico):
         # un viaje que parte de Limache empieza en la última estación de la línea, así que
         # tomar "la primera en orden geográfico" clasificaría el tramo al revés.
         orig = [e for e in ESTACIONES if pd.notna(s[e]) and pd.isna(l[e])]
         dest = [e for e in ESTACIONES if pd.notna(l[e]) and pd.isna(s[e])]
-        if orig:
-            o = min(orig, key=lambda e: s[e])
-        elif s.notna().any():
-            o = s.dropna().idxmin()
-        else:
-            o = None
-        if dest:
-            d = max(dest, key=lambda e: l[e])
-        elif l.notna().any():
-            d = l.dropna().idxmax()
-        else:
-            d = None
+        o = min(orig, key=lambda e: s[e]) if orig else None
+        d = max(dest, key=lambda e: l[e]) if dest else None
+        # Respaldo: si el THDR no marca claramente el extremo (p.ej. la estación de origen
+        # también trae hora de llegada del servicio anterior), se reconstruye el recorrido
+        # ordenando por hora de paso: la primera estación en el tiempo es el origen y la
+        # última es el destino. Así un 4xx que parte de Limache igual sale como LI-PU.
+        if o is None or d is None:
+            _paso = {}
+            for e in ESTACIONES:
+                _hs, _hl = s[e], l[e]
+                if pd.notna(_hs) or pd.notna(_hl):
+                    _paso[e] = (_hs if pd.notna(_hs) else _hl, _hl if pd.notna(_hl) else _hs)
+            if len(_paso) < 2:
+                return pd.NA
+            _sec = sorted(_paso, key=lambda e: min(_paso[e]))
+            if o is None:
+                o = _sec[0]
+            if d is None:
+                d = max(_paso, key=lambda e: max(_paso[e]))
         if o is None or d is None:
             return pd.NA
         return f"{SHORT_NAMES_DICT.get(o, o)}→{SHORT_NAMES_DICT.get(d, d)}"
