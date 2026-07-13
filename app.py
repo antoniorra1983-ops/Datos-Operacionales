@@ -2333,6 +2333,7 @@ if _seccion == _SECCIONES[1]:
             st.markdown("### 🚆 Kilometraje por tren (odómetro UMR)")
             # Tren-Km por tren desde los THDR (km de servicio asignados a cada motriz; dobles suman a ambas)
             _tk_tren = pd.DataFrame()
+            _tk_bruto_dia = pd.DataFrame()
             _pt_thdr = [d for d in [df_thdr_v1, df_thdr_v2] if d is not None and not getattr(d, 'empty', True) and 'Km_Recorrido' in d.columns]
             if _pt_thdr:
                 _acc_tk = []
@@ -2369,6 +2370,8 @@ if _seccion == _SECCIONES[1]:
                         _lt = _lt[_cuenta_l]
                         _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
                         _tk_tren = _lt.groupby(['_key', 'TrenTHDR'], as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
+                        # Tren-Km BRUTO por día (sin descontar cortes/acoples): comparable al Kms.xTrenes del UMR
+                        _tk_bruto_dia = _lt.groupby('Fecha', as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km bruto'})
             # Descuento por cortes/acoples (incidentes): km no recorridos por la motriz acoplada/desacoplada
             def _od_regla(_sv, _vj):
                 try:
@@ -2591,6 +2594,46 @@ if _seccion == _SECCIONES[1]:
                     st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_sm} sin motriz identificada (cuentan en el control, no descuentan)" if _inc_sm else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
                     if _srv_conflict > 0:
                         st.caption(f"⚠️ {_srv_conflict} incidente(s) con servicio que no coincide con el THDR para ese viaje (posible error de tipeo en el registro). Se usó el servicio del THDR; revisa el detalle en el diagnóstico.")
+                    # --- Comparación día a día: Tren-Km (THDR) vs Kms.xTrenes (UMR) ---
+                    if not _tk_bruto_dia.empty and all_kmserv:
+                        _dcmp = _tk_bruto_dia.copy()
+                        _dcmp['Fecha'] = pd.to_datetime(_dcmp['Fecha']).dt.normalize()
+                        # Descuento por incidentes agregado por día
+                        if not _det_inc.empty:
+                            _dd = _det_inc.copy()
+                            _dd['Fecha'] = pd.to_datetime(_dd['Fecha']).dt.normalize()
+                            _dd = _dd.groupby('Fecha', as_index=False)['Km desc'].sum().rename(columns={'Km desc': 'Desc. incid.'})
+                            _dcmp = _dcmp.merge(_dd, on='Fecha', how='left')
+                        else:
+                            _dcmp['Desc. incid.'] = 0.0
+                        _dcmp['Desc. incid.'] = _dcmp['Desc. incid.'].fillna(0.0)
+                        _dcmp['Tren-Km neto'] = _dcmp['Tren-Km bruto'] - _dcmp['Desc. incid.']
+                        # Lado UMR
+                        _dku = pd.DataFrame(all_kmserv)
+                        if {'KmsxTrenes', 'KmTrenR', 'KmTrenP'}.issubset(_dku.columns):
+                            _dku['Fecha'] = pd.to_datetime(_dku['Fecha']).dt.normalize()
+                            for _cu in ['KmsxTrenes', 'KmTrenR', 'KmTrenP']:
+                                _dku[_cu] = pd.to_numeric(_dku[_cu], errors='coerce')
+                            _dku = _dku.groupby('Fecha', as_index=False).agg(**{
+                                'Kms.xTrenes (UMR)': ('KmsxTrenes', 'sum'),
+                                'KmTrenR (UMR)': ('KmTrenR', 'sum'),
+                                '_kmp': ('KmTrenP', 'sum')})
+                            _dku['Km perdido UMR'] = (_dku['_kmp'] - _dku['KmTrenR (UMR)']).clip(lower=0)
+                            _dcmp = _dcmp.merge(_dku.drop(columns=['_kmp']), on='Fecha', how='left')
+                            _dcmp['Δ descuento'] = _dcmp['Desc. incid.'] - _dcmp['Km perdido UMR']
+                            with st.expander("Ver comparación Tren-Km (THDR) vs Kms.xTrenes (UMR) — día a día", expanded=False):
+                                _tc = _dcmp.copy()
+                                _tc['Fecha'] = pd.to_datetime(_tc['Fecha']).dt.strftime('%d-%m-%Y')
+                                _cols_c = ['Fecha', 'Tren-Km bruto', 'Kms.xTrenes (UMR)', 'Desc. incid.', 'Km perdido UMR', 'Δ descuento', 'Tren-Km neto', 'KmTrenR (UMR)']
+                                _tc = _tc[[c for c in _cols_c if c in _tc.columns]]
+                                _st_df(_tc, use_container_width=True, hide_index=True)
+                                _sd_i = float(_dcmp['Desc. incid.'].sum()); _sd_u = float(_dcmp['Km perdido UMR'].fillna(0).sum())
+                                _c1c, _c2c, _c3c = st.columns(3)
+                                _c1c.metric("Descuento incidentes", f"{_ncl(_sd_i, 1)} km")
+                                _c2c.metric("Km perdido UMR", f"{_ncl(_sd_u, 1)} km")
+                                _c3c.metric("Diferencia", f"{_ncl(_sd_i - _sd_u, 1)} km",
+                                            "coinciden" if abs(_sd_i - _sd_u) < 0.5 else "revisar días con Δ ≠ 0", delta_color="off")
+                                st.caption("«Tren-Km bruto» = km de servicio del THDR por motriz, SIN descontar cortes/acoples (equivalente a Kms.xTrenes del UMR). «Desc. incid.» = km descontados según los Incidentes PCC. «Km perdido UMR» = KmTrenP − KmTrenR (lo que el propio UMR reconoce como pérdida por cortes). Si «Δ descuento» ≠ 0 en un día, el conteo de cortes/acoples de ese día no calza con el del UMR: revisa el diagnóstico de ese día.")
                     if not _det_inc.empty or not _diag_inc.empty:
                         with st.expander("Ver descuentos por corte y acople — detalle", expanded=False):
                             if not _det_inc.empty:
