@@ -238,32 +238,25 @@ def clasificar_od_thdr(df_thdr):
         lle[est] = pd.to_numeric(df_thdr[cl], errors='coerce') if cl else np.nan
     def _od(i):
         s = sal.loc[i]; l = lle.loc[i]
-        # Origen = estación con salida y sin llegada; destino = con llegada y sin salida.
-        # Si hay más de una candidata se decide por la HORA (no por el orden geográfico):
-        # un viaje que parte de Limache empieza en la última estación de la línea, así que
-        # tomar "la primera en orden geográfico" clasificaría el tramo al revés.
-        orig = [e for e in ESTACIONES if pd.notna(s[e]) and pd.isna(l[e])]
-        dest = [e for e in ESTACIONES if pd.notna(l[e]) and pd.isna(s[e])]
-        o = min(orig, key=lambda e: s[e]) if orig else None
-        d = max(dest, key=lambda e: l[e]) if dest else None
-        # Respaldo: si el THDR no marca claramente el extremo (p.ej. la estación de origen
-        # también trae hora de llegada del servicio anterior), se reconstruye el recorrido
-        # ordenando por hora de paso: la primera estación en el tiempo es el origen y la
-        # última es el destino. Así un 4xx que parte de Limache igual sale como LI-PU.
-        if o is None or d is None:
-            _paso = {}
-            for e in ESTACIONES:
-                _hs, _hl = s[e], l[e]
-                if pd.notna(_hs) or pd.notna(_hl):
-                    _paso[e] = (_hs if pd.notna(_hs) else _hl, _hl if pd.notna(_hl) else _hs)
-            if len(_paso) < 2:
-                return pd.NA
-            _sec = sorted(_paso, key=lambda e: min(_paso[e]))
-            if o is None:
-                o = _sec[0]
-            if d is None:
-                d = max(_paso, key=lambda e: max(_paso[e]))
-        if o is None or d is None:
+        # Horas de paso por cada estación (llegada y/o salida, las que existan).
+        _paso = {}
+        for e in ESTACIONES:
+            _hh = [h for h in (s[e], l[e]) if pd.notna(h)]
+            if _hh:
+                _paso[e] = _hh
+        if len(_paso) < 2:
+            return pd.NA
+        # Si el viaje cruza medianoche, las horas bajas son del día siguiente: se corrigen.
+        _todas = [h for _v in _paso.values() for h in _v]
+        if max(_todas) - min(_todas) > 720:
+            _paso = {e: [h + 1440 if h < 720 else h for h in _v] for e, _v in _paso.items()}
+        # Regla general: el ORIGEN es la estación recorrida primero en el tiempo y el
+        # DESTINO la última. No depende del número de servicio ni del orden geográfico,
+        # así un 4xx que parte de Limache queda LI-PU y un 6xx que parte de Sgto. Aldea
+        # queda SA-PU, y el kilometraje sale de ese recorrido real.
+        o = min(_paso, key=lambda e: min(_paso[e]))
+        d = max(_paso, key=lambda e: max(_paso[e]))
+        if o == d:
             return pd.NA
         return f"{SHORT_NAMES_DICT.get(o, o)}→{SHORT_NAMES_DICT.get(d, d)}"
     return df_thdr.index.to_series().apply(_od)
