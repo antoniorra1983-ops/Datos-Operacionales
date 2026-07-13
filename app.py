@@ -1545,6 +1545,10 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                                                    "KmsxTrenes": parse_latam_number(df_raw.iloc[_ri, 9]),
                                                    "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22]),
                                                    "KmTrenP": parse_latam_number(df_raw.iloc[_ri, 23]),
+                                                   "SimP": parse_latam_number(df_raw.iloc[_ri, 1]),
+                                                   "DobP": parse_latam_number(df_raw.iloc[_ri, 2]),
+                                                   "SimR": parse_latam_number(df_raw.iloc[_ri, 3]),
+                                                   "DobR": parse_latam_number(df_raw.iloc[_ri, 4]),
                                                    "Cortes_EB": parse_latam_number(df_raw.iloc[_ri, 16]),
                                                    "Cortes_SA": parse_latam_number(df_raw.iloc[_ri, 17]),
                                                    "Cortes_PE": parse_latam_number(df_raw.iloc[_ri, 18]),
@@ -2607,6 +2611,77 @@ if _seccion == _SECCIONES[1]:
                 st.caption("Tren-Km = km de servicios comerciales asignados a cada motriz según el tipo de servicio del THDR (en composiciones dobles el km del viaje suma a ambas motrices). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja).")
                 if pd.notna(_kmtren_r_ref) and _kmtren_r_ref > 0:
                     st.caption(f"ℹ️ El «Tren-Km total flota» ({_ncl(_tkm_tot, 0)} km) cuenta el km de cada motriz por separado (el THDR registra ida y vuelta como dos viajes, y en dobles ambas motrices suman). El «KmTrenR» del UMR ({_ncl(_kmtren_r_ref, 0)} km) cuenta la malla de servicios (una vuelta completa ida+vuelta = 1 servicio). Por eso el primero es ~2× el segundo: miden la misma operación con distinta unidad de conteo, ninguno está errado.")
+                # --- Servicios por tipo (O-D): UMR vs THDR ---
+                if all_kmserv and _pt_thdr:
+                    _dsu = pd.DataFrame(all_kmserv)
+                    if 'OD' in _dsu.columns and 'SimR' in _dsu.columns:
+                        _dsu['Fecha'] = pd.to_datetime(_dsu['Fecha']).dt.normalize()
+                        for _cx in ['SimR', 'DobR', 'SimP', 'DobP']:
+                            _dsu[_cx] = pd.to_numeric(_dsu.get(_cx), errors='coerce').fillna(0)
+                        _umr_od = _dsu.groupby('OD', as_index=False).agg(**{
+                            'Simples UMR': ('SimR', 'sum'), 'Dobles UMR': ('DobR', 'sum')})
+                        # Lado THDR: contar viajes por tramo real (Tipo_Servicio) y unidad S/M
+                        _S2O = {'PUE': 'PU', 'LIM': 'LI', 'S.ALD': 'SA', 'E.BEL': 'EB', 'PEÑ': 'PE',
+                                'BEL': 'BE', 'FRA': 'FR', 'BAR': 'BA', 'POR': 'PO', 'REC': 'RE', 'MIR': 'MI',
+                                'V.MAR': 'VM', 'HOS': 'HO', 'CHO': 'CH', 'SAL': 'ES', 'VAL': 'VA',
+                                'QUI': 'QU', 'SOL': 'SO', 'AME': 'AM', 'CON': 'CO', 'V.ALE': 'VA'}
+                        _acc_od = []
+                        for _dth in _pt_thdr:
+                            if 'Tipo_Servicio' not in _dth.columns:
+                                continue
+                            _uni = _dth['Unidad'].astype(str).str.strip() if 'Unidad' in _dth.columns else pd.Series(['S'] * len(_dth))
+                            _acc_od.append(pd.DataFrame({'TS': _dth['Tipo_Servicio'].astype(str).values,
+                                                         'Doble': (_uni == 'M').values}))
+                        if _acc_od:
+                            _dth_od = pd.concat(_acc_od, ignore_index=True)
+                            def _ts_od(_s):
+                                _s = str(_s)
+                                if '→' not in _s:
+                                    return '—'
+                                _o, _d = [_p.strip() for _p in _s.split('→', 1)]
+                                return f"{_S2O.get(_o, _o)}-{_S2O.get(_d, _d)}"
+                            _dth_od['OD'] = _dth_od['TS'].map(_ts_od)
+                            _thd_od = _dth_od.groupby('OD', as_index=False).agg(**{
+                                'Simples THDR': ('Doble', lambda _x: int((~_x).sum())),
+                                'Dobles THDR': ('Doble', lambda _x: int(_x.sum()))})
+                            _cmp_od = _umr_od.merge(_thd_od, on='OD', how='outer').fillna(0)
+                            for _cx in ['Simples UMR', 'Dobles UMR', 'Simples THDR', 'Dobles THDR']:
+                                _cmp_od[_cx] = pd.to_numeric(_cmp_od[_cx], errors='coerce').fillna(0).astype(int)
+                            _cmp_od['Servicios UMR'] = _cmp_od['Simples UMR'] + _cmp_od['Dobles UMR']
+                            _cmp_od['Servicios THDR'] = _cmp_od['Simples THDR'] + _cmp_od['Dobles THDR']
+                            _cmp_od['Δ servicios'] = _cmp_od['Servicios THDR'] - _cmp_od['Servicios UMR']
+                            _cmp_od['Trenes UMR'] = _cmp_od['Simples UMR'] + 2 * _cmp_od['Dobles UMR']
+                            _cmp_od['Trenes THDR'] = _cmp_od['Simples THDR'] + 2 * _cmp_od['Dobles THDR']
+                            _cmp_od['Δ trenes'] = _cmp_od['Trenes THDR'] - _cmp_od['Trenes UMR']
+                            _cmp_od = _cmp_od[(_cmp_od['Servicios UMR'] > 0) | (_cmp_od['Servicios THDR'] > 0)]
+                            _ord_od = {'PU-LI': 0, 'LI-PU': 1, 'PU-SA': 2, 'SA-PU': 3, 'PU-EB': 4, 'EB-PU': 5}
+                            _cmp_od['_o'] = _cmp_od['OD'].map(_ord_od).fillna(99)
+                            _cmp_od = _cmp_od.sort_values('_o').drop(columns=['_o'])
+                            with st.expander("🔀 Servicios por tipo (O-D): UMR vs THDR", expanded=True):
+                                _tot_od = pd.DataFrame([{'OD': 'TOTAL',
+                                                         'Simples UMR': int(_cmp_od['Simples UMR'].sum()), 'Dobles UMR': int(_cmp_od['Dobles UMR'].sum()),
+                                                         'Servicios UMR': int(_cmp_od['Servicios UMR'].sum()),
+                                                         'Simples THDR': int(_cmp_od['Simples THDR'].sum()), 'Dobles THDR': int(_cmp_od['Dobles THDR'].sum()),
+                                                         'Servicios THDR': int(_cmp_od['Servicios THDR'].sum()),
+                                                         'Δ servicios': int(_cmp_od['Δ servicios'].sum()),
+                                                         'Trenes UMR': int(_cmp_od['Trenes UMR'].sum()), 'Trenes THDR': int(_cmp_od['Trenes THDR'].sum()),
+                                                         'Δ trenes': int(_cmp_od['Δ trenes'].sum())}])
+                                _tab_od = pd.concat([_cmp_od, _tot_od], ignore_index=True)
+                                _cols_od = ['OD', 'Simples UMR', 'Dobles UMR', 'Servicios UMR',
+                                            'Simples THDR', 'Dobles THDR', 'Servicios THDR', 'Δ servicios',
+                                            'Trenes UMR', 'Trenes THDR', 'Δ trenes']
+                                _st_df(_tab_od[[c for c in _cols_od if c in _tab_od.columns]], use_container_width=True, hide_index=True)
+                                _dsrv = int(_cmp_od['Δ servicios'].sum()); _dtre = int(_cmp_od['Δ trenes'].sum())
+                                _o1, _o2, _o3 = st.columns(3)
+                                _o1.metric("Servicios UMR", _ncl(int(_cmp_od['Servicios UMR'].sum()), 0))
+                                _o2.metric("Servicios THDR", _ncl(int(_cmp_od['Servicios THDR'].sum()), 0))
+                                _o3.metric("Δ (THDR − UMR)", _ncl(_dsrv, 0),
+                                           "coinciden" if _dsrv == 0 else "revisar tipos con Δ ≠ 0", delta_color="off")
+                                _mal = _cmp_od[_cmp_od['Δ servicios'] != 0]
+                                if not _mal.empty:
+                                    _lst = ", ".join(f"{_r['OD']} ({_r['Δ servicios']:+d})" for _, _r in _mal.iterrows())
+                                    st.warning(f"Tipos de servicio con diferencia entre THDR y UMR: {_lst}. Un Δ positivo significa que el THDR trae más servicios de ese tipo que los que el UMR registra (y al revés si es negativo).")
+                                st.caption("Cantidad de servicios por tipo O-D. UMR: columnas Simples/Dobles realizados del KM-Servicio. THDR: viajes contados por su tramo real (deducido de las horas por estación), separados en simple (S) y doble (M). «Trenes» = Simples + 2×Dobles (cada motriz de un doble cuenta aparte), que es la base del Kms.xTrenes y del Tren-Km.")
                 # --- Comparación día a día: Tren-Km (THDR) vs Kms.xTrenes (UMR) ---
                 if not _tk_bruto_dia.empty and not all_kmserv:
                     st.caption("ℹ️ Para ver la comparación contra el Kms.xTrenes del UMR, carga el archivo Resumen UMR y aprieta «🔄 Cargar / actualizar datos».")
