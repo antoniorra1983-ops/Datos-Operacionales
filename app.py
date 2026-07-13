@@ -1454,7 +1454,7 @@ _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame(); df_viajes=pd.DataFrame()
-df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame()
+df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); _mot_inval=0
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
@@ -1478,6 +1478,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_viajes=st.session_state.get('df_viajes', pd.DataFrame())
     df_ide_lb=st.session_state.get('df_ide_lb', pd.DataFrame())
     df_incid=st.session_state.get('df_incid', pd.DataFrame())
+    _mot_inval=st.session_state.get('_mot_inval', 0)
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
@@ -1759,19 +1760,31 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     # Incidentes PCC: cortes y acoples (para descontar km no recorridos en Tren-Km por tren)
     if f_incid_all:
         # Token general: servicio (4xx/6xx), motrices en cualquier formato (opcionales) y su viaje.
-        # Cubre motrices: "XT-17-13", "XT01/18", "02-28", "XT-XT-03-05", "XT-1702" (pegado 4 díg),
-        #                 "XT-35" (una), o sin motriz. El viaje viene con o sin paréntesis.
+        # Tolera errores de tipeo humano: "XT-010-24" (cero de más) se lee como motriz 10 y 24.
+        # Cubre: "XT-17-13", "XT01/18", "02-28", "XT-XT-03-05", "XT-1702" (pegado), "XT-35" (una), sin motriz.
+        # El viaje viene con o sin paréntesis.
         _RX_INC_TOK = re.compile(
             r'(?P<sv>[246]\d{2})'
             r'(?:'
-              r'\s*(?:XT[-\s]*)*(?P<m1>\d{1,2})\s*[-/]\s*(?P<m2>\d{1,2})'
+              r'\s*(?:XT[-\s]*)*(?P<m1>\d{1,3})\s*[-/]\s*(?P<m2>\d{1,3})'
               r'|\s+XT[-\s]*(?P<mp1>\d{2})(?P<mp2>\d{2})(?!\d)'
-              r'|\s+XT[-\s]*(?P<m1b>\d{1,2})(?!\d)'
+              r'|\s+XT[-\s]*(?P<m1b>\d{1,3})(?!\d)'
             r')?'
             r'\s*\(?\s*viaje\s*(?P<vj>\d+)\s*\)?', re.I)
+
+        def _mot_valida(_n):
+            """Motrices que existen en la flota: 1-27 (M), 28-35 (XM), 400-499 (SFE).
+            Un número fuera de rango (ej. XT-36-37) es un error de registro: se descarta
+            la motriz y se recupera del THDR."""
+            try:
+                _v = int(_n)
+            except (TypeError, ValueError):
+                return False
+            return (1 <= _v <= 35) or (400 <= _v <= 499)
         # Frase clave transversal: "es/son acoplado(s)" o "es/son desacoplado(s)"
         _RX_INC_EVT = re.compile(r'\b(?:es|son)\s+(?P<des>des)?acoplad[oa]s?\b', re.I)
         _inc_rows = []
+        _mot_inval = 0  # se reinicia en cada carga
         for f in f_incid_all:
             try:
                 _ei = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
@@ -1810,6 +1823,12 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                         _vistos.add((_sv, _vj))
                         _mm1 = _m.group('m1') or _m.group('mp1') or _m.group('m1b')
                         _mm2 = _m.group('m2') or _m.group('mp2')
+                        # Motriz fuera de la numeración real (ej. XT-36-37) = error de registro:
+                        # se descarta y luego se recupera del THDR por el número de viaje.
+                        if _mm1 is not None and not _mot_valida(_mm1):
+                            _mot_inval += 1; _mm1 = None
+                        if _mm2 is not None and not _mot_valida(_mm2):
+                            _mot_inval += 1; _mm2 = None
                         _m1v = int(_mm1) if _mm1 else np.nan
                         _m2v = int(_mm2) if _mm2 else np.nan
                         _inc_rows.append({'Fecha': _fo.normalize(), 'Tipo': _tipo_i, 'Lugar': _lug,
@@ -1872,7 +1891,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
-                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid})
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, '_mot_inval':_mot_inval})
     st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
@@ -2671,6 +2690,8 @@ if _seccion == _SECCIONES[1]:
                     st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_sm} sin motriz identificada (cuentan en el control, no descuentan)" if _inc_sm else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
                     if _srv_conflict > 0:
                         st.caption(f"⚠️ {_srv_conflict} incidente(s) con servicio que no coincide con el THDR para ese viaje (posible error de tipeo en el registro). Se usó el servicio del THDR; revisa el detalle en el diagnóstico.")
+                    if _mot_inval > 0:
+                        st.caption(f"⚠️ {_mot_inval} motriz(ces) con numeración inexistente en la flota (fuera de M01–XM35 y SFE 4xx, ej. «XT-36-37»): se descartaron y se recuperaron del THDR por el número de viaje. El evento igual se cuenta.")
                     if not _det_inc.empty or not _diag_inc.empty:
                         with st.expander("Ver descuentos por corte y acople — detalle", expanded=False):
                             if not _det_inc.empty:
