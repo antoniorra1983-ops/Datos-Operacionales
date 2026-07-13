@@ -225,8 +225,11 @@ def _srv_clean_series(s):
     return num
 
 def clasificar_od_thdr(df_thdr):
-    # Clasifica cada servicio por su patrón Origen->Destino usando las horas por estación.
-    # Origen = estación con salida y sin llegada; Destino = estación con llegada y sin salida.
+    # Clasifica cada servicio por su recorrido real: el ORIGEN es la estación donde está la
+    # PRIMERA hora del viaje y el DESTINO la estación donde está la ÚLTIMA hora (sea de
+    # llegada o de salida, la que el THDR registre). No se usa el número de servicio ni el
+    # orden geográfico: así un 4xx que parte de Limache queda LI-PU y un 6xx que parte de
+    # Sargento Aldea queda SA-PU.
     if df_thdr is None or df_thdr.empty:
         return pd.Series(dtype=object)
     sal = pd.DataFrame(index=df_thdr.index)
