@@ -238,10 +238,24 @@ def clasificar_od_thdr(df_thdr):
         lle[est] = pd.to_numeric(df_thdr[cl], errors='coerce') if cl else np.nan
     def _od(i):
         s = sal.loc[i]; l = lle.loc[i]
+        # Origen = estación con salida y sin llegada; destino = con llegada y sin salida.
+        # Si hay más de una candidata, se decide por la HORA (no por el orden geográfico):
+        # un viaje que parte de Limache empieza en la última estación de la línea, así que
+        # tomar "la primera en orden geográfico" clasificaría el tramo al revés.
         orig = [e for e in ESTACIONES if pd.notna(s[e]) and pd.isna(l[e])]
         dest = [e for e in ESTACIONES if pd.notna(l[e]) and pd.isna(s[e])]
-        o = orig[0] if orig else (s.dropna().sort_values().index[0] if s.notna().any() else None)
-        d = dest[-1] if dest else (l.dropna().sort_values().index[-1] if l.notna().any() else None)
+        if orig:
+            o = min(orig, key=lambda e: s[e])
+        elif s.notna().any():
+            o = s.dropna().idxmin()
+        else:
+            o = None
+        if dest:
+            d = max(dest, key=lambda e: l[e])
+        elif l.notna().any():
+            d = l.dropna().idxmax()
+        else:
+            d = None
         if o is None or d is None:
             return pd.NA
         return f"{SHORT_NAMES_DICT.get(o, o)}→{SHORT_NAMES_DICT.get(d, d)}"
@@ -2630,8 +2644,13 @@ if _seccion == _SECCIONES[1]:
                             if 'Tipo_Servicio' not in _dth.columns:
                                 continue
                             _uni = _dth['Unidad'].astype(str).str.strip() if 'Unidad' in _dth.columns else pd.Series(['S'] * len(_dth))
+                            _csv = next((c for c in _dth.columns if str(c).strip().upper() == 'TREN'), None)
+                            _cvj = next((c for c in _dth.columns if str(c).strip().upper() == 'VIAJE'), None)
                             _acc_od.append(pd.DataFrame({'TS': _dth['Tipo_Servicio'].astype(str).values,
-                                                         'Doble': (_uni == 'M').values}))
+                                                         'Doble': (_uni == 'M').values,
+                                                         'Serv': (pd.to_numeric(_dth[_csv], errors='coerce').values if _csv else np.nan),
+                                                         'Viaje': (pd.to_numeric(_dth[_cvj], errors='coerce').values if _cvj else np.nan),
+                                                         'Fecha': (pd.to_datetime(_dth['Fecha_Op'], errors='coerce').dt.normalize().values if 'Fecha_Op' in _dth.columns else pd.NaT)}))
                         if _acc_od:
                             _dth_od = pd.concat(_acc_od, ignore_index=True)
                             def _ts_od(_s):
@@ -2682,6 +2701,26 @@ if _seccion == _SECCIONES[1]:
                                     _lst = ", ".join(f"{_r['OD']} ({_r['Δ servicios']:+d})" for _, _r in _mal.iterrows())
                                     st.warning(f"Tipos de servicio con diferencia entre THDR y UMR: {_lst}. Un Δ positivo significa que el THDR trae más servicios de ese tipo que los que el UMR registra (y al revés si es negativo).")
                                 st.caption("Cantidad de servicios por tipo O-D. UMR: columnas Simples/Dobles realizados del KM-Servicio. THDR: viajes contados por su tramo real (deducido de las horas por estación), separados en simple (S) y doble (M). «Trenes» = Simples + 2×Dobles (cada motriz de un doble cuenta aparte), que es la base del Kms.xTrenes y del Tren-Km.")
+                                # Servicios cuyo número no calza con su tramo real (4xx que llega a LI, 6xx que sale de SA, etc.)
+                                _dfam = _dth_od.dropna(subset=['Serv']).copy()
+                                if not _dfam.empty:
+                                    _dfam['Fam'] = (pd.to_numeric(_dfam['Serv'], errors='coerce') // 100).astype('Int64')
+                                    _ESP = {4: {'PU-SA', 'SA-PU'}, 6: {'PU-LI', 'LI-PU'}}
+                                    _dfam['_esp'] = _dfam['Fam'].map(lambda _f: _ESP.get(int(_f)) if pd.notna(_f) and int(_f) in _ESP else None)
+                                    _raro = _dfam[_dfam.apply(lambda _r: _r['_esp'] is not None and _r['OD'] not in _r['_esp'], axis=1)]
+                                    if not _raro.empty:
+                                        st.markdown("**Servicios cuyo número no calza con su tramo real**")
+                                        _tr = _raro.groupby(['Fam', 'OD'], as_index=False).size().rename(columns={'size': 'Viajes'})
+                                        _tr['Familia'] = _tr['Fam'].map(lambda _f: f"{int(_f)}xx")
+                                        _tr['Tramo real (THDR)'] = _tr['OD']
+                                        _tr['Tramo esperado por el número'] = _tr['Fam'].map(lambda _f: " o ".join(sorted(_ESP.get(int(_f), []))))
+                                        _st_df(_tr[['Familia', 'Tramo real (THDR)', 'Tramo esperado por el número', 'Viajes']], use_container_width=True, hide_index=True)
+                                        _ej = _raro.head(6).copy()
+                                        _ej['Servicio'] = pd.to_numeric(_ej['Serv'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                        _ej['Viaje'] = pd.to_numeric(_ej['Viaje'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
+                                        _ej['Fecha'] = pd.to_datetime(_ej['Fecha'], errors='coerce').dt.strftime('%d-%m-%Y')
+                                        _st_df(_ej[['Fecha', 'Servicio', 'Viaje', 'OD']].rename(columns={'OD': 'Tramo real'}), use_container_width=True, hide_index=True)
+                                        st.caption("Estos viajes se cuentan en el tramo REAL que indican sus horas, no en el que sugiere el número de servicio. Ejemplo: un 4xx que parte de Limache es LI-PU, y un 6xx que parte de Sgto. Aldea es SA-PU. Si el UMR los clasificó por el número en vez de por el recorrido, ahí aparece la diferencia en la tabla de arriba.")
                 # --- Comparación día a día: Tren-Km (THDR) vs Kms.xTrenes (UMR) ---
                 if not _tk_bruto_dia.empty and not all_kmserv:
                     st.caption("ℹ️ Para ver la comparación contra el Kms.xTrenes del UMR, carga el archivo Resumen UMR y aprieta «🔄 Cargar / actualizar datos».")
