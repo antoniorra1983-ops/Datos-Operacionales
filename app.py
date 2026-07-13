@@ -2700,27 +2700,7 @@ if _seccion == _SECCIONES[1]:
                                 if not _mal.empty:
                                     _lst = ", ".join(f"{_r['OD']} ({_r['Δ servicios']:+d})" for _, _r in _mal.iterrows())
                                     st.warning(f"Tipos de servicio con diferencia entre THDR y UMR: {_lst}. Un Δ positivo significa que el THDR trae más servicios de ese tipo que los que el UMR registra (y al revés si es negativo).")
-                                st.caption("Cantidad de servicios por tipo O-D. UMR: columnas Simples/Dobles realizados del KM-Servicio. THDR: viajes contados por su tramo real (deducido de las horas por estación), separados en simple (S) y doble (M). «Trenes» = Simples + 2×Dobles (cada motriz de un doble cuenta aparte), que es la base del Kms.xTrenes y del Tren-Km.")
-                                # Servicios cuyo número no calza con su tramo real (4xx que llega a LI, 6xx que sale de SA, etc.)
-                                _dfam = _dth_od.dropna(subset=['Serv']).copy()
-                                if not _dfam.empty:
-                                    _dfam['Fam'] = (pd.to_numeric(_dfam['Serv'], errors='coerce') // 100).astype('Int64')
-                                    _ESP = {4: {'PU-SA', 'SA-PU'}, 6: {'PU-LI', 'LI-PU'}}
-                                    _dfam['_esp'] = _dfam['Fam'].map(lambda _f: _ESP.get(int(_f)) if pd.notna(_f) and int(_f) in _ESP else None)
-                                    _raro = _dfam[_dfam.apply(lambda _r: _r['_esp'] is not None and _r['OD'] not in _r['_esp'], axis=1)]
-                                    if not _raro.empty:
-                                        st.markdown("**Servicios cuyo número no calza con su tramo real**")
-                                        _tr = _raro.groupby(['Fam', 'OD'], as_index=False).size().rename(columns={'size': 'Viajes'})
-                                        _tr['Familia'] = _tr['Fam'].map(lambda _f: f"{int(_f)}xx")
-                                        _tr['Tramo real (THDR)'] = _tr['OD']
-                                        _tr['Tramo esperado por el número'] = _tr['Fam'].map(lambda _f: " o ".join(sorted(_ESP.get(int(_f), []))))
-                                        _st_df(_tr[['Familia', 'Tramo real (THDR)', 'Tramo esperado por el número', 'Viajes']], use_container_width=True, hide_index=True)
-                                        _ej = _raro.head(6).copy()
-                                        _ej['Servicio'] = pd.to_numeric(_ej['Serv'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
-                                        _ej['Viaje'] = pd.to_numeric(_ej['Viaje'], errors='coerce').map(lambda _v: str(int(_v)) if pd.notna(_v) else '—')
-                                        _ej['Fecha'] = pd.to_datetime(_ej['Fecha'], errors='coerce').dt.strftime('%d-%m-%Y')
-                                        _st_df(_ej[['Fecha', 'Servicio', 'Viaje', 'OD']].rename(columns={'OD': 'Tramo real'}), use_container_width=True, hide_index=True)
-                                        st.caption("Estos viajes se cuentan en el tramo REAL que indican sus horas, no en el que sugiere el número de servicio. Ejemplo: un 4xx que parte de Limache es LI-PU, y un 6xx que parte de Sgto. Aldea es SA-PU. Si el UMR los clasificó por el número en vez de por el recorrido, ahí aparece la diferencia en la tabla de arriba.")
+                                st.caption("Cantidad de servicios por tipo O-D. UMR: Simples/Dobles realizados del KM-Servicio. THDR: cada viaje se cuenta en el tramo que realmente recorrió, deducido de las horas por estación — no del número de servicio. Así, un 4xx que parte de Limache cuenta como LI-PU y un 6xx que parte de Sgto. Aldea cuenta como SA-PU, y su kilometraje usa la distancia real de ese recorrido. «Trenes» = Simples + 2×Dobles (cada motriz de un doble cuenta aparte), que es la base del Kms.xTrenes y del Tren-Km.")
                 # --- Comparación día a día: Tren-Km (THDR) vs Kms.xTrenes (UMR) ---
                 if not _tk_bruto_dia.empty and not all_kmserv:
                     st.caption("ℹ️ Para ver la comparación contra el Kms.xTrenes del UMR, carga el archivo Resumen UMR y aprieta «🔄 Cargar / actualizar datos».")
