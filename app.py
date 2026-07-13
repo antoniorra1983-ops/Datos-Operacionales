@@ -2402,14 +2402,15 @@ if _seccion == _SECCIONES[1]:
                 if _fam == 6: return 'PU-LI' if _v1 else 'LI-PU'
                 if _fam == 4: return 'PU-SA' if _v1 else 'SA-PU'
                 return None
-            _det_inc = pd.DataFrame(); _diag_inc = pd.DataFrame(); _inc_no = 0; _inc_cab = 0; _inc_ot = 0; _inc_sm = 0; _srv_conflict = 0
+            _det_inc = pd.DataFrame(); _diag_inc = pd.DataFrame(); _inc_no = 0; _inc_cab = 0; _inc_ot = 0; _inc_sm = 0; _inc_fu = 0; _srv_conflict = 0
             if not _tk_tren.empty and not df_incid.empty and _pt_thdr:
                 _KM3 = {'PUE': 0.0, 'BEL': 0.72, 'FRA': 1.2, 'BAR': 2.2, 'POR': 3.9, 'REC': 6.0, 'MIR': 7.4,
                         'V.MAR': 8.3, 'HOS': 9.55, 'CHO': 10.55, 'SAL': 11.71, 'VAL': 19.0, 'QUI': 21.43,
                         'SOL': 23.3, 'E.BEL': 25.4, 'AME': 26.4, 'CON': 27.6, 'V.ALE': 28.5, 'S.ALD': 29.11,
                         'PEÑ': 30.4, 'LIM': 43.13}
                 _KM2 = {'PU': 0.0, 'BE': 0.72, 'FR': 1.2, 'BA': 2.2, 'PO': 3.9, 'RE': 6.0, 'MI': 7.4, 'VM': 8.3,
-                        'HO': 9.55, 'CH': 10.55, 'ES': 11.71, 'QU': 21.43, 'EB': 25.4, 'SA': 29.11, 'PB': 30.4, 'LI': 43.13}
+                        'HO': 9.55, 'CH': 10.55, 'ES': 11.71, 'QU': 21.43, 'EB': 25.4, 'SA': 29.11,
+                        'PE': 30.4, 'PB': 30.4, 'LI': 43.13}
                 _vj_acc = []
                 for _dth in _pt_thdr:
                     _cs = next((c for c in _dth.columns if str(c).strip().upper() == 'TREN'), None)
@@ -2451,18 +2452,11 @@ if _seccion == _SECCIONES[1]:
                         if str(_r.get('Lugar', '')) in ('PU', 'LI'):
                             return pd.Series({'_cl': 'cab', 'Km desc': 0.0})
                         _lug = str(_r.get('Lugar', '')).strip().upper()
-                        # Regla de dominio: en cada familia la estación de retorno es un extremo del
-                        # viaje, nunca un punto intermedio. Familia 4xx retorna en SA; 6xx en LI (cabecera).
-                        # Se revisa tanto el servicio del THDR como el del incidente: si cualquiera es
-                        # 4xx y el evento es en SA, es inicio/término (no descuenta).
-                        _fams = set()
-                        for _sv_chk in (_r.get('Servicio'), _r.get('Servicio_incid')):
-                            try:
-                                _fams.add(int(_sv_chk) // 100)
-                            except Exception:
-                                pass
-                        if 4 in _fams and _lug == 'SA':
-                            return pd.Series({'_cl': 'ot', 'Km desc': 0.0})
+                        # El tramo REAL del viaje lo manda el THDR: se deduce de las horas de cada
+                        # estación (origen = tiene salida sin llegada; destino = llegada sin salida).
+                        # Por eso un 4xx con hora en Limache es PU-LI y no PU-SA, y ahí SA es
+                        # intermedio (sí descuenta). La regla por familia solo se usa de respaldo
+                        # cuando el viaje no cruza con ningún THDR cargado.
                         _ts = str(_r.get('TS', ''))
                         _ko = _kd = None
                         if '→' in _ts:
@@ -2476,8 +2470,12 @@ if _seccion == _SECCIONES[1]:
                         _kl = _KM2.get(_lug)
                         if _ko is None or _kd is None or _kl is None:
                             return pd.Series({'_cl': 'nc', 'Km desc': np.nan})
+                        # Evento en el origen o el término del propio viaje: sale/llega con esa composición
                         if _kl == _ko or _kl == _kd:
                             return pd.Series({'_cl': 'ot', 'Km desc': 0.0})
+                        # Evento en una estación por la que ese viaje no pasa: dato inconsistente
+                        if not (min(_ko, _kd) <= _kl <= max(_ko, _kd)):
+                            return pd.Series({'_cl': 'fu', 'Km desc': 0.0})
                         if pd.isna(_r.get('M2')):
                             return pd.Series({'_cl': 'sm', 'Km desc': 0.0})
                         _kmv = abs(_kd - _kl) if str(_r.get('Tipo')) == 'Desacople' else abs(_kl - _ko)
@@ -2487,7 +2485,8 @@ if _seccion == _SECCIONES[1]:
                     _inc_no = int((_evi['_cl'] == 'nc').sum())
                     _inc_ot = int((_evi['_cl'] == 'ot').sum())
                     _inc_sm = int((_evi['_cl'] == 'sm').sum())
-                    _CL_TXT = {'ruta': 'En ruta (descuenta)', 'ot': 'Inicio/término del viaje', 'cab': 'Maniobra de cabecera', 'nc': 'Sin tramo identificable', 'sm': 'Sin motriz identificada'}
+                    _inc_fu = int((_evi['_cl'] == 'fu').sum())
+                    _CL_TXT = {'ruta': 'En ruta (descuenta)', 'ot': 'Inicio/término del viaje', 'cab': 'Maniobra de cabecera', 'nc': 'Sin tramo identificable', 'sm': 'Sin motriz identificada', 'fu': 'Estación fuera del tramo del viaje'}
                     _diag_inc = _evi.copy()
                     _diag_inc['Clase'] = _diag_inc['_cl'].map(_CL_TXT)
                     _evi = _evi[_evi['_cl'] == 'ruta'].drop(columns=['_cl'])
@@ -2687,7 +2686,7 @@ if _seccion == _SECCIONES[1]:
                             st.caption("«Tren-Km bruto» = km del THDR por motriz SIN descontar (equivale al Kms.xTrenes del UMR). «Cortes I/U» y «Acoples I/U» = cantidad detectada por la app (I) vs la registrada por el UMR (U). «Km perdido UMR» = KmTrenP − KmTrenR. «Km/corte UMR» = km que el UMR asigna a cada corte (si sale 17,73 usa un valor fijo, no el tramo real). Si «Δ km» ≠ 0, compara los conteos y el km por corte para ubicar la causa.")
                 if not _det_inc.empty or _inc_no > 0 or _inc_cab > 0 or _inc_ot > 0 or _inc_sm > 0:
                     _tot_di = float(_det_inc['Km desc'].sum()) if not _det_inc.empty else 0.0
-                    st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_sm} sin motriz identificada (cuentan en el control, no descuentan)" if _inc_sm else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
+                    st.caption(f"🔧 Cortes y acoples descontados: {_ncl(_tot_di, 1)} km en {len(_det_inc)} asignaciones" + (f" · {_inc_no} sin descuento (sin cruce con THDR o estación no mapeada)" if _inc_no else "") + (f" · {_inc_ot} en la estación de inicio/término de su viaje (sin efecto en km)" if _inc_ot else "") + (f" · {_inc_sm} sin motriz identificada (cuentan en el control, no descuentan)" if _inc_sm else "") + (f" · {_inc_fu} en estaciones fuera del tramo de su viaje (dato inconsistente)" if _inc_fu else "") + (f" · {_inc_cab} maniobras de cabecera (PU/LI) excluidas: el viaje sale con la composición final" if _inc_cab else "") + ". El descuento se aplica a la segunda motriz indicada en el incidente.")
                     if _srv_conflict > 0:
                         st.caption(f"⚠️ {_srv_conflict} incidente(s) con servicio que no coincide con el THDR para ese viaje (posible error de tipeo en el registro). Se usó el servicio del THDR; revisa el detalle en el diagnóstico.")
                     if _mot_inval > 0:
@@ -2766,19 +2765,17 @@ if _seccion == _SECCIONES[1]:
                         _ic['TS'] = np.nan
                     # Excluir los eventos en la estación de inicio/término del propio viaje: no son
                     # cortes/acoples en ruta (el viaje sale o llega con esa composición).
-                    _KM2C = {'PU': 0.0, 'EB': 25.4, 'SA': 29.11, 'PE': 3.9, 'LI': 43.13}
-                    _KM3C = {'PUE': 0.0, 'E.BEL': 25.4, 'S.ALD': 29.11, 'LIM': 43.13, 'PEÑ': 3.9}
+                    _KM2C = {'PU': 0.0, 'BE': 0.72, 'FR': 1.2, 'BA': 2.2, 'PO': 3.9, 'RE': 6.0, 'MI': 7.4,
+                             'VM': 8.3, 'HO': 9.55, 'CH': 10.55, 'ES': 11.71, 'QU': 21.43, 'EB': 25.4,
+                             'SA': 29.11, 'PE': 30.4, 'PB': 30.4, 'LI': 43.13}
+                    _KM3C = {'PUE': 0.0, 'BEL': 0.72, 'FRA': 1.2, 'BAR': 2.2, 'POR': 3.9, 'REC': 6.0, 'MIR': 7.4,
+                             'V.MAR': 8.3, 'HOS': 9.55, 'CHO': 10.55, 'SAL': 11.71, 'VAL': 19.0, 'QUI': 21.43,
+                             'SOL': 23.3, 'E.BEL': 25.4, 'AME': 26.4, 'CON': 27.6, 'V.ALE': 28.5, 'S.ALD': 29.11,
+                             'PEÑ': 30.4, 'LIM': 43.13}
                     def _es_extremo(_r):
                         _e = str(_r.get('Est', '')).strip().upper()
-                        _fams2 = set()
-                        for _sv_chk in (_r.get('Servicio'), _r.get('Servicio_incid')):
-                            try:
-                                _fams2.add(int(_sv_chk) // 100)
-                            except Exception:
-                                pass
-                        # Regla de dominio: 4xx retorna en SA (extremo), 6xx en LI (ya excluido como cabecera)
-                        if 4 in _fams2 and _e == 'SA':
-                            return True
+                        # El tramo real del THDR manda (deducido de las horas por estación).
+                        # Solo si el viaje no cruzó con el THDR se usa la regla por familia.
                         _ts = str(_r.get('TS', ''))
                         _ko = _kd = None
                         if '→' in _ts:
@@ -2791,7 +2788,10 @@ if _seccion == _SECCIONES[1]:
                                 _ko, _kd = _KM2C.get(_po), _KM2C.get(_pd)
                         _kl = _KM2C.get(_e)
                         if _ko is not None and _kd is not None and _kl is not None:
-                            return _kl == _ko or _kl == _kd
+                            # Extremo del viaje, o estación por la que ese viaje ni siquiera pasa
+                            if _kl == _ko or _kl == _kd:
+                                return True
+                            return not (min(_ko, _kd) <= _kl <= max(_ko, _kd))
                         return False
                     _n_ot_ctl = 0
                     if not _ic.empty:
