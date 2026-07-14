@@ -4409,6 +4409,23 @@ if _seccion == _SECCIONES[12]:
         _b['_f'] = pd.to_datetime(_b['Fecha']).dt.date
         _b['Meta km'] = _b['Odómetro [km]'] * _meta
         _ide = _b['IDE (kWh/km)']
+        # Verde = ahorro (menos energía); rojo = sobreconsumo (más energía que la referencia)
+        _COL_AH = '#0a7d3e'
+        _COL_SC = '#c62828'
+        # Consumo real de tracción del período: base para mostrar el "sin ahorros" (contrafactual)
+        _e_tr_per = float(pd.to_numeric(_b['E_Tr'], errors='coerce').fillna(0).sum()) if 'E_Tr' in _b.columns else 0.0
+
+        def _bar_signo(_df, _x, _y, _titulo_y='kWh'):
+            """Barras coloreadas por signo: verde si es ahorro, rojo si es sobreconsumo."""
+            _t = _df[[_x, _y]].dropna(subset=[_y]).copy()
+            _t['Efecto'] = np.where(_t[_y] >= 0, 'Ahorro', 'Sobreconsumo')
+            _fg = px.bar(_t, x=_x, y=_y, color='Efecto',
+                         color_discrete_map={'Ahorro': _COL_AH, 'Sobreconsumo': _COL_SC})
+            _fg.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
+            _fg.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title=_titulo_y,
+                              xaxis_title='', legend_title='',
+                              legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='right', x=1))
+            return _fg
         if all_kmserv:
             _dkp = pd.DataFrame(all_kmserv)
             for _c in ['KmTrenR', 'KmsxTrenes']:
@@ -4460,11 +4477,15 @@ if _seccion == _SECCIONES[12]:
                 _desv_g = _ide_real_g - _ide_lb_g
                 _desv_pct = (_desv_g / _ide_lb_g * 100) if _ide_lb_g else 0.0
                 _exc = float(_ci['Exceso kWh'].sum())
-                _m1, _m2, _m3, _m4 = st.columns(4)
+                _m1, _m2, _m3, _m4, _m5, _m6 = st.columns(6)
                 _m1.metric("IDE real (período)", f"{_ncl(_ide_real_g, 3)} kWh/km")
                 _m2.metric("IDE Línea Base (período)", f"{_ncl(_ide_lb_g, 3)} kWh/km")
                 _m3.metric("Desvío vs línea base", f"{_ncl(_desv_g, 3)} kWh/km", f"{_ncl(_desv_pct, 1)} %", delta_color="inverse")
-                _m4.metric("Energía vs línea base", f"{_ncl(_exc, 0)} kWh", "exceso" if _exc >= 0 else "ahorro", delta_color="off")
+                _m4.metric("Energía vs línea base", f"{_ncl(_exc, 0)} kWh", "sobreconsumo" if _exc >= 0 else "ahorro", delta_color="off")
+                _e_real_lb = float(_ci['E_real'].sum()); _e_lb_tot = float(_ci['E_LB'].sum())
+                _m5.metric("Consumo real (tracción)", f"{_ncl(_e_real_lb, 0)} kWh")
+                _m6.metric("Consumo esperado (línea base)", f"{_ncl(_e_lb_tot, 0)} kWh",
+                           f"{_ncl(-_exc, 0)} kWh de ahorro" if _exc < 0 else f"{_ncl(_exc, 0)} kWh de más", delta_color="off")
                 if float(_ci['Odom_SFE'].sum()) <= 0:
                     st.caption("⚠️ No se encontró kilometraje de trenes SFE en el UMR del período: la línea base se calculó tratando todo el odómetro como trenes 100 y M.")
                 _mide = _ci.rename(columns={'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE Línea Base'})
@@ -4473,6 +4494,12 @@ if _seccion == _SECCIONES[12]:
                 _fide.update_traces(hovertemplate='%{x}<br>%{fullData.name}: %{y:.3f} kWh/km<extra></extra>')
                 _fide.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh/km', xaxis_title='', legend_title='')
                 _pc(_no_huecos(_fide), use_container_width=True, config={'locale': 'es'})
+                # Ahorro/sobreconsumo diario vs línea base (verde = ahorró, rojo = consumió de más)
+                _cx = _ci[['Fecha', 'Exceso kWh']].copy()
+                _cx['Ahorro vs LB'] = -_cx['Exceso kWh']
+                _fx = _bar_signo(_cx, 'Fecha', 'Ahorro vs LB')
+                _fx.update_layout(title="Ahorro (+) / sobreconsumo (−) diario vs línea base", title_font_size=14, margin=dict(t=40, b=0, l=0, r=0))
+                _pc(_no_huecos(_fx), use_container_width=True, config={'locale': 'es'})
                 st.caption("Energía tracción LB = Intercepción + kWh/km (100 y M) × (Odómetro total − Odómetro SFE) + kWh/km (SFE) × Odómetro SFE. IDE LB = Energía tracción LB ÷ Odómetro total. Desvío positivo = consumo real mayor al esperado por la línea base.")
                 with st.expander("Ver tabla diaria IDE vs línea base", expanded=False):
                     _ti = _ci[['Fecha', 'Odómetro [km]', 'Odom_SFE', 'Odom_100M', 'IDE (kWh/km)', 'IDE_LB', 'Desvío', 'E_real', 'E_LB', 'Exceso kWh']].copy()
@@ -4493,12 +4520,13 @@ if _seccion == _SECCIONES[12]:
             _b['Δ CA'] = _b['KmsxTrenes'] - _b['KmTrenR']
             _b['Ahorro CA'] = _b['Δ CA'] * _ide
             _caR = float(_b['Ahorro CA'].sum()); _cakm = float(_b['Δ CA'].sum())
-            _c1, _c2 = st.columns(2)
+            _c1, _c2, _c3, _c4 = st.columns(4)
             _c1.metric("Ahorro por Corte y Acople", f"{_ncl(_caR, 0)} kWh", f"{_ncl(_cakm, 0)} km")
             _c2.metric("Km (Kms.xTrenes − KmTren R)", f"{_ncl(_cakm, 0)} km")
-            _fca = px.bar(_b, x='Fecha', y='Ahorro CA', color_discrete_sequence=['#0a7c6e'])
-            _fca.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
-            _fca.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='')
+            _c3.metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+            _c4.metric("Consumo sin este ahorro", f"{_ncl(_e_tr_per + _caR, 0)} kWh",
+                       f"{_ncl(_caR, 0)} kWh evitados" if _caR >= 0 else f"{_ncl(-_caR, 0)} kWh de más", delta_color="off")
+            _fca = _bar_signo(_b, 'Fecha', 'Ahorro CA')
             _pc(_no_huecos(_fca), use_container_width=True, config={'locale': 'es'})
             st.caption("Ahorro = (Kms.xTrenes teórico − KmTren R real) × IDE del día. Energía ahorrada al cortar/acoplar composiciones según la demanda: el real recorre menos km-tren que el teórico de composición completa.")
         else:
@@ -4515,16 +4543,23 @@ if _seccion == _SECCIONES[12]:
             _b['E Vacío meta'] = _b['Vacío meta km'] * _ide
             _b['Ahorro Vacío'] = (_b['Vacío meta km'] - _b['Vacío real km']) * _ide
             _vr = float(_b['E Vacío real'].sum()); _vm = float(_b['E Vacío meta'].sum()); _av = float(_b['Ahorro Vacío'].sum())
-            _v1, _v2, _v3 = st.columns(3)
+            _v1, _v2, _v3, _v4, _v5 = st.columns(5)
             _v1.metric("Energía vacío real", f"{_ncl(_vr, 0)} kWh", f"{_ncl(float(_b['Vacío real km'].sum()), 0)} km vacío")
             _v2.metric("Energía vacío meta", f"{_ncl(_vm, 0)} kWh", f"{_ncl(float(_b['Vacío meta km'].sum()), 0)} km permitido")
             _v3.metric("Ahorro vacío (meta − real)", f"{_ncl(_av, 0)} kWh")
-            _mvv = _b.melt(id_vars='Fecha', value_vars=['E Vacío real', 'E Vacío meta'], var_name='Tipo', value_name='kWh').dropna(subset=['kWh'])
-            _mvv['Tipo'] = _mvv['Tipo'].map({'E Vacío real': 'Vacío real', 'E Vacío meta': 'Vacío meta'})
-            _fv = px.bar(_mvv, x='Fecha', y='kWh', color='Tipo', barmode='group',
-                         color_discrete_map={'Vacío real': '#E85500', 'Vacío meta': '#9aa0a6'})
-            _fv.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
+            _v4.metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+            _v5.metric("Consumo sin este ahorro", f"{_ncl(_e_tr_per + _av, 0)} kWh",
+                       f"{_ncl(_av, 0)} kWh evitados" if _av >= 0 else f"{_ncl(-_av, 0)} kWh de más", delta_color="off")
+            _fv = _bar_signo(_b, 'Fecha', 'Ahorro Vacío')
+            _fv.update_layout(title="Ahorro (+) / sobreconsumo (−) diario en vacío", title_font_size=14, margin=dict(t=40, b=0, l=0, r=0))
             _pc(_no_huecos(_fv), use_container_width=True, config={'locale': 'es'})
+            with st.expander("Ver vacío real vs meta por día", expanded=False):
+                _mvv = _b.melt(id_vars='Fecha', value_vars=['E Vacío real', 'E Vacío meta'], var_name='Tipo', value_name='kWh').dropna(subset=['kWh'])
+                _mvv['Tipo'] = _mvv['Tipo'].map({'E Vacío real': 'Vacío real', 'E Vacío meta': 'Vacío meta'})
+                _fv2 = px.bar(_mvv, x='Fecha', y='kWh', color='Tipo', barmode='group',
+                              color_discrete_map={'Vacío real': '#E85500', 'Vacío meta': '#9aa0a6'})
+                _fv2.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='')
+                _pc(_no_huecos(_fv2), use_container_width=True, config={'locale': 'es'})
             st.caption(f"Km vacío = Odómetro − KmTren R (recorrido sin servicio). Vacío meta = (KmTren R ÷ {_ncl(_meta, 3)}) − KmTren R (vacío permitido por la meta UMR). Cada uno × IDE del día. Ahorro = (vacío meta − vacío real) × IDE: positivo si circulaste menos en vacío que lo permitido.")
         else:
             st.info("Carga el Excel UMR (hoja KM-Servicio) para calcular Tracción Vacío.")
@@ -4534,13 +4569,14 @@ if _seccion == _SECCIONES[12]:
         _b['Δ UMR'] = _b['Tren-Km [km]'] - _b['Meta km']
         _b['Ahorro UMR'] = _b['Δ UMR'] * _ide
         st.markdown("#### 📊 Ahorro UMR (vs meta)")
-        _u1, _u2 = st.columns(2)
+        _u1, _u2, _u3, _u4 = st.columns(4)
         _uR = float(_b['Ahorro UMR'].sum()); _ukm = float(_b['Δ UMR'].sum())
         _u1.metric("Ahorro UMR", f"{_ncl(_uR, 0)} kWh", f"{_ncl(_ukm, 0)} km vs meta")
         _u2.metric("Meta UMR", f"{_ncl(_meta * 100, 1)} %")
-        _fu = px.bar(_b, x='Fecha', y='Ahorro UMR', color_discrete_sequence=['#005195'])
-        _fu.update_traces(hovertemplate='%{x}: %{y:,.0f} kWh<extra></extra>')
-        _fu.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='')
+        _u3.metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+        _u4.metric("Consumo sin este ahorro", f"{_ncl(_e_tr_per + _uR, 0)} kWh",
+                   f"{_ncl(_uR, 0)} kWh evitados" if _uR >= 0 else f"{_ncl(-_uR, 0)} kWh de más", delta_color="off")
+        _fu = _bar_signo(_b, 'Fecha', 'Ahorro UMR')
         _pc(_no_huecos(_fu), use_container_width=True, config={'locale': 'es'})
         st.caption(f"Ahorro UMR = (Tren-Km del dashboard − Odómetro × {_ncl(_meta, 3)}) × IDE del día.")
 
@@ -4584,12 +4620,16 @@ if _seccion == _SECCIONES[12]:
                 _gran_total = float(sum(_tot_ah.values()))
                 _e_tr_per = float(_b['E_Tr'].sum()) if 'E_Tr' in _b.columns else 0.0
                 _pct_tr = (_gran_total / _e_tr_per * 100) if _e_tr_per > 0 else None
-                _kc = st.columns(len(_sel_ah) + 1)
+                _kc = st.columns(len(_sel_ah) + 3)
                 _kc[0].metric("💰 Ahorro total", f"{_ncl(_gran_total, 0)} kWh",
                               (f"{_ncl(_pct_tr, 1)} % de la tracción" if _pct_tr is not None else None),
                               delta_color="off")
                 for _i, _k in enumerate(_sel_ah):
                     _kc[_i + 1].metric(_k, f"{_ncl(_tot_ah[_k], 0)} kWh")
+                _kc[-2].metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+                _kc[-1].metric("Consumo sin los ahorros", f"{_ncl(_e_tr_per + _gran_total, 0)} kWh",
+                               f"{_ncl(_gran_total, 0)} kWh evitados" if _gran_total >= 0 else f"{_ncl(-_gran_total, 0)} kWh de más",
+                               delta_color="off")
                 _g1a, _g2a = st.columns(2)
                 with _g1a:
                     _fw = go.Figure(go.Waterfall(
@@ -4619,6 +4659,12 @@ if _seccion == _SECCIONES[12]:
                                          title="Ahorro diario por componente (kWh)",
                                          yaxis_title='kWh', xaxis_title='', legend_title='')
                     _pc(_no_huecos(_fd_ah), use_container_width=True, config={'locale': 'es'})
+                # Total diario: verde donde se ahorró, rojo donde se consumió de más
+                _tot_dia = _dd_ah.groupby('Fecha', as_index=False)['kWh'].sum()
+                _ft_dia = _bar_signo(_tot_dia, 'Fecha', 'kWh')
+                _ft_dia.update_layout(height=320, title="Ahorro (+) / sobreconsumo (−) total por día",
+                                      title_font_size=14, margin=dict(t=40, b=0, l=0, r=0))
+                _pc(_no_huecos(_ft_dia), use_container_width=True, config={'locale': 'es'})
                 st.caption("Ahorro total = suma de los componentes seleccionados en el período. Positivo = energía ahorrada; negativo = consumo por sobre la referencia. Ojo: «Tracción Vacío» y «UMR vs meta» miden el desvío contra la misma meta UMR desde ángulos distintos, así que incluir ambos puede duplicar parte del ahorro — usa el selector para dejar el que corresponda.")
                 _piv_ah = _dd_ah.pivot_table(index='Fecha', columns='Componente', values='kWh', aggfunc='sum').reset_index()
                 _cols_num_ah = [c for c in _piv_ah.columns if c != 'Fecha']
