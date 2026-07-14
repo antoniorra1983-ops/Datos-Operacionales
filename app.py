@@ -1317,31 +1317,49 @@ def _prep_noche(registros, df_ops):
     return d
 
 
-def _base_noche_2025(registros):
-    """Línea base nocturna (año base ISO 50001): mediana del consumo POR HORA tomando la
-    ventana fija 00:00–05:59 de TODOS los días, sin separar por tipo de día.
-    Devuelve (base_global_kWh_por_hora, mediana_de_cada_hora, detalle_por_dia_y_hora)."""
+def _base_noche_2025(registros, df_ops=None):
+    """Línea base nocturna (año base ISO 50001). Ventana fija de 5 franjas horarias:
+    00–01, 01–02, 02–03, 03–04 y 04–05, la misma para laboral, sábado y domingo/festivo.
+    Entrega las medianas POR HORA y CADA 15 MIN, por jornada y del total.
+    Devuelve (base_global, med_hora, med_hora_jornada, med_jornada, med_15, med_15_jornada, detalle)."""
+    _vac = (None,) + tuple(pd.DataFrame() for _ in range(6))
     if not registros:
-        return None, pd.DataFrame(), pd.DataFrame()
+        return _vac
     _d = pd.DataFrame(registros)
     if not {'Fecha', 'Hora', 'Consumo'}.issubset(_d.columns):
-        return None, pd.DataFrame(), pd.DataFrame()
+        return _vac
     _d['Fecha'] = pd.to_datetime(_d['Fecha'], errors='coerce').dt.date
     _d['Hora_n'] = pd.to_numeric(_d['Hora'].astype(str).str.slice(0, 2), errors='coerce')
     _d['Consumo'] = pd.to_numeric(_d['Consumo'], errors='coerce')
     _d = _d.dropna(subset=['Fecha', 'Hora_n', 'Consumo'])
-    _d = _d[(_d['Hora_n'] >= 0) & (_d['Hora_n'] <= 5)]  # 00, 01, 02, 03, 04 y 05
+    # Franjas 00–01, 01–02, 02–03, 03–04 y 04–05  →  horas 0, 1, 2, 3 y 4
+    _d = _d[(_d['Hora_n'] >= 0) & (_d['Hora_n'] <= 4)]
     if _d.empty:
-        return None, pd.DataFrame(), pd.DataFrame()
+        return _vac
     _d['Hora_n'] = _d['Hora_n'].astype(int)
-    # kWh de cada hora de cada día (se suman los cuatro tramos de 15 min)
-    _hd = _d.groupby(['Fecha', 'Hora_n'], as_index=False)['Consumo'].sum()
-    # Mediana de cada hora entre todos los días
+    _d['Q15'] = _d['Hora'].astype(str).str.slice(0, 5)  # 00:00, 00:15, 00:30, 00:45, 01:00 …
+    # Tipo de jornada de cada fecha
+    _mtd = {}
+    if df_ops is not None and not getattr(df_ops, 'empty', True) and 'Tipo Día' in df_ops.columns:
+        _mtd = df_ops.set_index(pd.to_datetime(df_ops['Fecha']).dt.date)['Tipo Día'].to_dict()
+    _td = _d['Fecha'].map(_mtd)
+    _td = _td.fillna(pd.Series(_d['Fecha'].map(get_tipo_dia), index=_d.index))
+    _nom = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo/Festivo'}
+    _d['Jornada'] = _td.map(lambda _t: _nom.get(_t, _t))
+    # --- Por HORA: se suman los cuatro tramos de 15 min de cada franja de cada día ---
+    _hd = _d.groupby(['Fecha', 'Hora_n', 'Jornada'], as_index=False)['Consumo'].sum()
+    _med_hj = _hd.groupby(['Hora_n', 'Jornada'], as_index=False)['Consumo'].median().rename(columns={'Consumo': 'Mediana'})
     _med_h = _hd.groupby('Hora_n', as_index=False)['Consumo'].median().rename(columns={'Consumo': 'Mediana'})
     _med_h['Días'] = _hd.groupby('Hora_n')['Consumo'].size().values
-    # Base global: mediana de todos los valores horarios de la ventana
+    _med_j = _hd.groupby('Jornada', as_index=False)['Consumo'].median().rename(columns={'Consumo': 'Mediana'})
+    _med_j['Días'] = _hd.groupby('Jornada')['Fecha'].nunique().values
+    # --- Cada 15 MIN: mediana de cada tramo entre días (kWh/15min) ---
+    _qd = _d.groupby(['Fecha', 'Q15', 'Jornada'], as_index=False)['Consumo'].sum()
+    _med_qj = _qd.groupby(['Q15', 'Jornada'], as_index=False)['Consumo'].median().rename(columns={'Consumo': 'Mediana'})
+    _med_q = _qd.groupby('Q15', as_index=False)['Consumo'].median().rename(columns={'Consumo': 'Mediana'})
+    _med_q['Días'] = _qd.groupby('Q15')['Consumo'].size().values
     _base = float(_hd['Consumo'].median())
-    return _base, _med_h, _hd
+    return _base, _med_h, _med_hj, _med_j, _med_q, _med_qj, _hd
 
 
 def convertir_a_minutos(val):
@@ -3481,40 +3499,89 @@ if _seccion == _SECCIONES[4]:
 
             st.divider()
             st.markdown("#### 📐 Línea base nocturna (kWh/hora)")
-            # Base ISO 50001: ventana FIJA 00:00–05:59, TODOS los días de 2025, mediana por hora.
-            _base_global, _med_h25, _hd25 = _base_noche_2025(all_prmte_2025)
+            # Base ISO 50001: franjas 00–01, 01–02, 02–03, 03–04 y 04–05, misma ventana para
+            # laboral, sábado y domingo/festivo. Mediana entre días.
+            _base_global, _med_h25, _med_hj25, _med_j25, _med_q25, _med_qj25, _hd25 = _base_noche_2025(all_prmte_2025, df_ops)
             _hay_2025 = _base_global is not None
             if not _hay_2025:
-                _base_global, _med_h25, _hd25 = _base_noche_2025(all_prmte_full)
+                _base_global, _med_h25, _med_hj25, _med_j25, _med_q25, _med_qj25, _hd25 = _base_noche_2025(all_prmte_full, df_ops)
             _suf = "2025" if _hay_2025 else "período cargado"
             if _base_global is None:
-                st.warning("No hay registros PRMTE entre las 00:00 y las 05:59 para calcular la línea base nocturna.")
+                st.warning("No hay registros PRMTE entre las 00:00 y las 05:00 para calcular la línea base nocturna.")
                 _base_global = 0.0
             else:
-                _n_dias25 = int(_hd25['Fecha'].nunique())
+                _JOR = ['Laboral', 'Sábado', 'Domingo/Festivo']
+                _CJ = {'Laboral': '#005195', 'Sábado': '#E85500', 'Domingo/Festivo': '#2CA02C'}
+                _jor_pres = [_j for _j in _JOR if _j in set(_med_j25['Jornada'])]
                 _b1, _b2, _b3 = st.columns(3)
+                _b1.metric("Ventana", "00:00 – 05:00", "5 franjas · todas las jornadas", delta_color="off")
                 _b2.metric(f"Base nocturna ({_suf})", f"{_ncl(_base_global, 0)} kWh/h")
-                _b1.metric("Ventana", "00:00 – 05:59", "todos los días", delta_color="off")
-                _b3.metric("Días en la base", _ncl(_n_dias25, 0), f"{len(_hd25)} horas medidas", delta_color="off")
+                _b3.metric("Días en la base", _ncl(int(_hd25['Fecha'].nunique()), 0), f"{len(_hd25)} franjas medidas", delta_color="off")
                 if _hay_2025:
-                    st.success(f"**Línea base nocturna (2025): {_ncl(_base_global, 0)} kWh/hora** — mediana del consumo horario entre las 00:00 y las 05:59 de todos los días del año base.")
+                    st.success(f"**Línea base nocturna (2025): {_ncl(_base_global, 0)} kWh/hora** — mediana de las franjas 00–01, 01–02, 02–03, 03–04 y 04–05 de todos los días del año base.")
                 else:
                     st.warning(f"No hay PRMTE de 2025 cargado: la base usa el período cargado ({_ncl(_base_global, 0)} kWh/hora) con el mismo criterio. Carga el PRMTE de 2025 para anclar la base al año base.")
-                if not _med_h25.empty:
-                    _mh = _med_h25.copy()
-                    _mh['Hora'] = _mh['Hora_n'].map(lambda _h: f"{int(_h):02d}:00")
-                    _fmh = px.bar(_mh, x='Hora', y='Mediana', color_discrete_sequence=['#005195'])
-                    _fmh.update_traces(hovertemplate='%{x} — %{y:,.1f} kWh/h<extra></extra>')
-                    _fmh.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0),
-                                       yaxis_title='Mediana (kWh/hora)', xaxis_title='')
-                    _fmh.add_hline(y=_base_global, line_dash="dash", line_color="#475569",
-                                   annotation_text=f"Base global · {_ncl(_base_global, 0)} kWh/h", annotation_position="top left")
-                    _pc(_fmh, use_container_width=True, config={'locale': 'es'})
-                    _tmh = _mh[['Hora', 'Mediana', 'Días']].copy()
-                    _tmh['Mediana'] = _tmh['Mediana'].map(lambda _v: _ncl(_v, 1))
-                    with st.expander(f"Ver mediana de cada hora ({_suf})", expanded=False):
-                        _st_df(_tmh.rename(columns={'Mediana': 'Mediana (kWh/hora)'}), use_container_width=True, hide_index=True)
-                st.caption("La base se calcula con la ventana fija 00:00–05:59 de todos los días (sin separar por tipo de día): se suma el consumo de cada hora y se toma la mediana entre todos los días del año base. La mediana es robusta frente a noches atípicas. Si el consumo horario nocturno supera esta base de forma sostenida, suele indicar equipos operando sin necesidad (climatización, trenes sin apagar, auxiliares).")
+
+                def _tabla_med(_piv_src, _idx, _med_tot, _lbl_col, _fila_final=None):
+                    """Arma la tabla mediana por franja × jornada + columna Total."""
+                    _pv = _piv_src.pivot(index=_idx, columns='Jornada', values='Mediana')
+                    _pv = _pv[[_j for _j in _JOR if _j in _pv.columns]]
+                    _pv['Total'] = _med_tot.set_index(_idx)['Mediana']
+                    _pv = _pv.reset_index()
+                    _pv.insert(0, 'Franja', _pv[_idx].map(_lbl_col))
+                    _pv = _pv.drop(columns=[_idx])
+                    if _fila_final is not None:
+                        _pv = pd.concat([_pv, pd.DataFrame([_fila_final])], ignore_index=True)
+                    _fm = _pv.copy()
+                    for _c in _fm.columns:
+                        if _c != 'Franja':
+                            _fm[_c] = _fm[_c].map(lambda _v: _ncl(_v, 1) if pd.notna(_v) else '—')
+                    return _fm
+
+                # Fila final: mediana de todas las franjas (por jornada y global)
+                _fila_tot = {'Franja': 'Todas (base)'}
+                for _j in _JOR:
+                    _v = _med_j25.loc[_med_j25['Jornada'] == _j, 'Mediana']
+                    if len(_v):
+                        _fila_tot[_j] = float(_v.iloc[0])
+                _fila_tot['Total'] = _base_global
+
+                _tab_hora, _tab_q15 = st.tabs(["🕐 Por hora (kWh/hora)", "⏱️ Cada 15 min (kWh/15min)"])
+                with _tab_hora:
+                    _fr_lbl = {_h: f"{_h:02d}–{_h + 1:02d}" for _h in range(5)}
+                    _st_df(_tabla_med(_med_hj25, 'Hora_n', _med_h25, _fr_lbl, _fila_tot), use_container_width=True, hide_index=True)
+                    _g_hj = _med_hj25.copy(); _g_hj['Franja'] = _g_hj['Hora_n'].map(_fr_lbl)
+                    _fhj = px.bar(_g_hj, x='Franja', y='Mediana', color='Jornada', barmode='group',
+                                  color_discrete_map=_CJ, category_orders={'Jornada': _jor_pres},
+                                  labels={'Mediana': 'Mediana (kWh/hora)'})
+                    _fhj.update_traces(hovertemplate='%{x} — %{fullData.name}: %{y:,.1f} kWh/h<extra></extra>')
+                    _fhj.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), xaxis_title='', legend_title='',
+                                       legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+                    _fhj.add_hline(y=_base_global, line_dash="dash", line_color="#475569",
+                                   annotation_text=f"Base · {_ncl(_base_global, 0)} kWh/h", annotation_position="top left")
+                    _pc(_fhj, use_container_width=True, config={'locale': 'es'})
+                    st.caption("En cada franja de cada día se suma el consumo (los cuatro tramos de 15 min) y luego se toma la mediana entre días. La fila «Todas (base)» es la mediana de todas las franjas juntas: el valor de referencia de la línea base.")
+                with _tab_q15:
+                    _q_lbl = {_q: _q for _q in _med_q25['Q15']}
+                    _base_q = float(_med_q25['Mediana'].median())
+                    _fila_q = {'Franja': 'Todas (base)'}
+                    for _j in _JOR:
+                        _vq = _med_qj25.loc[_med_qj25['Jornada'] == _j, 'Mediana']
+                        if len(_vq):
+                            _fila_q[_j] = float(_vq.median())
+                    _fila_q['Total'] = _base_q
+                    _st_df(_tabla_med(_med_qj25, 'Q15', _med_q25, _q_lbl, _fila_q), use_container_width=True, hide_index=True)
+                    _fq = px.line(_med_qj25.sort_values('Q15'), x='Q15', y='Mediana', color='Jornada', markers=True,
+                                  color_discrete_map=_CJ, category_orders={'Jornada': _jor_pres},
+                                  labels={'Q15': 'Tramo de 15 min', 'Mediana': 'Mediana (kWh/15min)'})
+                    _fq.update_traces(hovertemplate='%{x} — %{fullData.name}: %{y:,.1f} kWh<extra></extra>')
+                    _fq.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), xaxis_title='', legend_title='',
+                                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+                    _fq.add_hline(y=_base_q, line_dash="dash", line_color="#475569",
+                                  annotation_text=f"Base · {_ncl(_base_q, 1)} kWh/15min", annotation_position="top left")
+                    _pc(_fq, use_container_width=True, config={'locale': 'es'})
+                    st.caption("Mediana de cada tramo de 15 min entre todos los días, dentro de la misma ventana (00:00 a 05:00). Los valores son kWh por tramo de 15 minutos, así que equivalen aproximadamente a un cuarto de los de la vista por hora.")
+                st.caption("Ventana fija de 5 franjas (00–01, 01–02, 02–03, 03–04 y 04–05), la misma para laboral, sábado y domingo/festivo. La mediana es robusta frente a noches atípicas; si el consumo nocturno la supera de forma sostenida, suele indicar equipos operando sin necesidad.")
 
             st.divider()
             st.markdown("#### Mediana cada 15 minutos")
