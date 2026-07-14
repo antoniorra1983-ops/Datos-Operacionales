@@ -1235,6 +1235,26 @@ def convertir_a_minutos(val):
         return None
     except Exception: return None
 
+_MESES_ARCH = [('SEPTIEMBRE', 9), ('SETIEMBRE', 9), ('DICIEMBRE', 12), ('NOVIEMBRE', 11), ('OCTUBRE', 10),
+               ('FEBRERO', 2), ('ENERO', 1), ('MARZO', 3), ('ABRIL', 4), ('AGOSTO', 8), ('JULIO', 7),
+               ('JUNIO', 6), ('MAYO', 5), ('SEPT', 9), ('ENE', 1), ('FEB', 2), ('MAR', 3), ('ABR', 4),
+               ('MAY', 5), ('JUN', 6), ('JUL', 7), ('AGO', 8), ('SEP', 9), ('OCT', 10), ('NOV', 11), ('DIC', 12)]
+
+
+def _mes_archivo(nombre):
+    """Deduce (año, mes) del nombre del archivo, p.ej. '01enero2026.xlsx' -> (2026, 1).
+    Sirve para decidir qué archivo manda cuando una misma fecha aparece en más de uno."""
+    _n = _norm(str(nombre))
+    _mes = next((_v for _k, _v in _MESES_ARCH if _k in _n), None)
+    _m4 = re.search(r'(20\d{2})', str(nombre))
+    _anio = int(_m4.group(1)) if _m4 else None
+    if _anio is None:
+        _m2 = re.search(r'(?<!\d)(\d{2})(?!\d)\s*$', re.sub(r'\.[A-Za-z]+$', '', str(nombre)))
+        if _m2:
+            _anio = 2000 + int(_m2.group(1))
+    return _anio, _mes
+
+
 def parsear_fecha_nombre(nombre):
     nombre = str(nombre)
     patrones = [
@@ -1479,7 +1499,7 @@ _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame(); df_viajes=pd.DataFrame()
-df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); _mot_inval=0
+df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); _mot_inval=0; _seat_dups=0
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
@@ -1504,6 +1524,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_ide_lb=st.session_state.get('df_ide_lb', pd.DataFrame())
     df_incid=st.session_state.get('df_incid', pd.DataFrame())
     _mot_inval=st.session_state.get('_mot_inval', 0)
+    _seat_dups=st.session_state.get('_seat_dups', 0)
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
@@ -1586,12 +1607,14 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         for f in f_seat_all:
             try:
                 es="xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                _sa_y, _sa_m = _mes_archivo(f.name)
                 df_s=pd.read_excel(f,header=None,engine=es)
                 for i in range(len(df_s)):
                     fs=pd.to_datetime(df_s.iloc[i,1],errors='coerce')
                     if pd.notna(fs) and start_date<=fs.normalize().date()<=end_date:
                         all_seat.append({"Fecha":fs.normalize(),"E_Total":parse_latam_number(df_s.iloc[i,3]),
-                                         "E_Tr":parse_latam_number(df_s.iloc[i,5]),"E_12":parse_latam_number(df_s.iloc[i,7])})
+                                         "E_Tr":parse_latam_number(df_s.iloc[i,5]),"E_12":parse_latam_number(df_s.iloc[i,7]),
+                                         "_arch":f.name,"_arch_anio":_sa_y,"_arch_mes":_sa_m})
                 # Hoja SAFs: Limache (SAF LI: Taller=col6, TGSN=col7; Principal=Taller+TGSN)
                 try:
                     f.seek(0); _xls_saf=pd.ExcelFile(f,engine=es)
@@ -1713,7 +1736,33 @@ elif _hay_archivos and st.session_state.get('_do_load'):
             df_ops = df_ops.drop(columns=['_sfe_km'])
         df_f_d=(pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha","E_Fact"]))
         df_p_d=(pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha","E_Prmte"]))
-        df_s_d=(pd.DataFrame(all_seat).groupby("Fecha").agg({"E_Total":"sum","E_Tr":"sum","E_12":"sum"}).reset_index().rename(columns={"E_Total":"E_Seat_T","E_Tr":"E_Seat_Tr","E_12":"E_Seat_12"}) if all_seat else pd.DataFrame(columns=["Fecha","E_Seat_T","E_Seat_Tr","E_Seat_12"]))
+        # SEAT: si una misma fecha viene en más de un archivo, manda el archivo de ESE mes
+        # (antes se sumaban y el día quedaba duplicado).
+        if all_seat:
+            _dse = pd.DataFrame(all_seat)
+            _dse['Fecha'] = pd.to_datetime(_dse['Fecha']).dt.normalize()
+            for _c in ['E_Total', 'E_Tr', 'E_12']:
+                _dse[_c] = pd.to_numeric(_dse[_c], errors='coerce')
+            if '_arch' not in _dse.columns:
+                _dse['_arch'] = ''
+            for _c in ['_arch_anio', '_arch_mes']:
+                if _c not in _dse.columns:
+                    _dse[_c] = np.nan
+            # Un mismo archivo puede traer varias filas del día: se suman dentro del archivo
+            _dse = _dse.groupby(['Fecha', '_arch', '_arch_anio', '_arch_mes'], as_index=False, dropna=False).agg(
+                {'E_Total': 'sum', 'E_Tr': 'sum', 'E_12': 'sum'})
+            # Prioridad 1 = el archivo corresponde al mes/año de la fecha
+            _fx = pd.to_datetime(_dse['Fecha'])
+            _dse['_prio'] = ((_dse['_arch_mes'] == _fx.dt.month) & (_dse['_arch_anio'] == _fx.dt.year)).astype(int)
+            _n_antes = len(_dse)
+            _dse = _dse.sort_values(['Fecha', '_prio', '_arch'], ascending=[True, False, True])
+            _dse = _dse.drop_duplicates(subset=['Fecha'], keep='first')
+            _seat_dups = _n_antes - len(_dse)
+            df_s_d = _dse[['Fecha', 'E_Total', 'E_Tr', 'E_12']].rename(
+                columns={"E_Total": "E_Seat_T", "E_Tr": "E_Seat_Tr", "E_12": "E_Seat_12"})
+        else:
+            df_s_d = pd.DataFrame(columns=["Fecha", "E_Seat_T", "E_Seat_Tr", "E_Seat_12"])
+            _seat_dups = 0
         
         for dff in [df_ops,df_f_d,df_p_d,df_s_d]: dff['Fecha']=pd.to_datetime(dff['Fecha']).dt.normalize()
         df_ops=(df_ops.merge(df_f_d,on="Fecha",how="left").merge(df_p_d,on="Fecha",how="left").merge(df_s_d,on="Fecha",how="left").fillna(0))
@@ -1920,7 +1969,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
-                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, '_mot_inval':_mot_inval})
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, '_mot_inval':_mot_inval, '_seat_dups':_seat_dups})
     st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
@@ -1938,7 +1987,7 @@ st.markdown("""<style>
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "⚖️ Fuentes de energía", "🧱 Constructor de datos", "🔮 Proyección de energía"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía"]
 
 with st.container(key="_topbar"):
     _cl, _cn = st.columns([1, 9], vertical_alignment="center")
@@ -3111,6 +3160,75 @@ if _seccion == _SECCIONES[2]:
             dv = df_ops.copy()
             dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
             _st_df(make_columns_unique(dv), use_container_width=True)
+    st.divider()
+    st.subheader("⚖️ Comparación de fuentes: Factura · PRMTE · SEAT")
+    _fcols = [c for c in ['E_Fact', 'E_Prmte', 'E_Seat_T'] if c in df_ops.columns] if (df_ops is not None and not df_ops.empty) else []
+    _renf = {'E_Fact': 'Factura', 'E_Prmte': 'PRMTE', 'E_Seat_T': 'SEAT'}
+    if not _fcols:
+        st.info("No hay datos de energía cargados. Sube los archivos de Facturación/PRMTE y de SEAT.")
+    else:
+        _cmp = df_ops[['Fecha'] + _fcols].rename(columns=_renf)
+        _srcs = [_renf[c] for c in _fcols]
+        _cmp = _cmp[_cmp[_srcs].sum(axis=1) > 0]
+        if _cmp.empty:
+            st.info("No hay datos de fuentes (Factura/PRMTE/SEAT) en el período seleccionado.")
+        else:
+            _cmap_f = {'Factura': '#7c3aed', 'PRMTE': '#0891b2', 'SEAT': '#ca8a04'}
+            st.caption("Las tres fuentes miden la misma energía por métodos distintos: factura eléctrica, medidor PRMTE (cada 15 min) y reporte SEAT. Lo ideal es que coincidan; las diferencias revelan discrepancias de medición o de cobertura de días.")
+            if _seat_dups > 0:
+                st.caption(f"ℹ️ SEAT: {_seat_dups} fecha(s) venían repetidas en más de un archivo. Se usó el valor del archivo del mes que corresponde a cada fecha (antes se sumaban y el día quedaba duplicado).")
+            _kc = st.columns(len(_srcs))
+            for _i, _s in enumerate(_srcs):
+                _tot = float(_cmp[_s].sum()); _dias = int((_cmp[_s] > 0).sum())
+                _prom = (_tot / _dias) if _dias > 0 else 0.0
+                _kc[_i].metric(_s, f"{_ncl(_tot, 0)} kWh", f"{_dias} días · prom {_ncl(_prom, 0)} kWh/día", delta_color="off")
+            _g1, _g2 = st.columns([1, 2])
+            with _g1:
+                _tot_df = pd.DataFrame({'Fuente': _srcs, 'kWh': [float(_cmp[_s].sum()) for _s in _srcs]})
+                _fb = px.bar(_tot_df, x='Fuente', y='kWh', color='Fuente', text='kWh', color_discrete_map=_cmap_f)
+                _fb.update_traces(texttemplate='%{text:,.0f}', textposition='outside', cliponaxis=False)
+                _fb.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', showlegend=False, title="Total por fuente")
+                _pc(_fb, use_container_width=True, config={'locale': 'es'})
+            with _g2:
+                _mvf = _cmp.melt(id_vars='Fecha', value_vars=_srcs, var_name='Fuente', value_name='kWh')
+                _mvf = _mvf[_mvf['kWh'] > 0]
+                _ff = px.line(_mvf, x='Fecha', y='kWh', color='Fuente', markers=True, color_discrete_map=_cmap_f)
+                _ff.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='', title="Evolución diaria por fuente")
+                _pc(_no_huecos(_ff), use_container_width=True, config={'locale': 'es'})
+            _multi = _cmp[(_cmp[_srcs] > 0).sum(axis=1) >= 2].copy()
+            if not _multi.empty and len(_srcs) >= 2:
+                _ref = _srcs[0]
+                _difcols = []; _pctcols = []
+                for _s in _srcs[1:]:
+                    _cd = f"Δ {_s} − {_ref}"
+                    _cp = f"% {_s} vs {_ref}"
+                    _ok = (_multi[_s] > 0) & (_multi[_ref] > 0)
+                    _multi[_cd] = np.where(_ok, _multi[_s] - _multi[_ref], np.nan)
+                    _multi[_cp] = np.where(_ok, (_multi[_s] - _multi[_ref]) / _multi[_ref] * 100, np.nan)
+                    _difcols.append(_cd); _pctcols.append(_cp)
+                _mvd = _multi.melt(id_vars='Fecha', value_vars=_difcols, var_name='Comparación', value_name='kWh').dropna(subset=['kWh'])
+                _mvp = _multi.melt(id_vars='Fecha', value_vars=_pctcols, var_name='Comparación', value_name='%').dropna(subset=['%'])
+                if not _mvd.empty:
+                    _dd1, _dd2 = st.columns(2)
+                    with _dd1:
+                        _fd = px.bar(_mvd, x='Fecha', y='kWh', color='Comparación', barmode='group')
+                        _fd.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (kWh)")
+                        _pc(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
+                    with _dd2:
+                        _fp = px.bar(_mvp, x='Fecha', y='%', color='Comparación', barmode='group')
+                        _fp.update_traces(hovertemplate='%{x}: %{y:.2f}%<extra></extra>')
+                        _fp.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='% (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (%)")
+                        _pc(_no_huecos(_fp), use_container_width=True, config={'locale': 'es'})
+                    st.caption(f"Diferencia = fuente − {_ref}, en kWh y en % sobre {_ref}. Cerca de 0 = coinciden; positivo = la fuente mide más que {_ref}.")
+            else:
+                st.caption("No hay días con 2 o más fuentes simultáneas para calcular diferencias.")
+            with st.expander("Ver tabla comparativa por día — mostrar / ocultar", expanded=False):
+                _tc = _cmp.copy()
+                _tc['Fecha'] = _tc['Fecha'].dt.strftime('%d-%m-%Y')
+                for _s in _srcs:
+                    _tc[_s] = _tc[_s].map(lambda _v: _ncl(_v, 0) if _v > 0 else '—')
+                _st_df(_tc, use_container_width=True, hide_index=True)
+
 
 if _seccion == _SECCIONES[3]:
     if all_prmte_full:
@@ -4688,75 +4806,7 @@ if _seccion == _SECCIONES[12]:
                                    file_name="ahorros_energia.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# --- Pestaña: Fuentes de energía (Factura vs PRMTE vs SEAT) ---
 if _seccion == _SECCIONES[13]:
-    st.header("⚖️ Comparación de fuentes de energía: Factura · PRMTE · SEAT")
-    _fcols = [c for c in ['E_Fact', 'E_Prmte', 'E_Seat_T'] if c in df_ops.columns] if (df_ops is not None and not df_ops.empty) else []
-    _renf = {'E_Fact': 'Factura', 'E_Prmte': 'PRMTE', 'E_Seat_T': 'SEAT'}
-    if not _fcols:
-        st.info("No hay datos de energía cargados. Sube los archivos de Facturación/PRMTE y de SEAT.")
-    else:
-        _cmp = df_ops[['Fecha'] + _fcols].rename(columns=_renf)
-        _srcs = [_renf[c] for c in _fcols]
-        _cmp = _cmp[_cmp[_srcs].sum(axis=1) > 0]
-        if _cmp.empty:
-            st.info("No hay datos de fuentes (Factura/PRMTE/SEAT) en el período seleccionado.")
-        else:
-            _cmap_f = {'Factura': '#7c3aed', 'PRMTE': '#0891b2', 'SEAT': '#ca8a04'}
-            st.caption("Las tres fuentes miden la misma energía por métodos distintos: factura eléctrica, medidor PRMTE (cada 15 min) y reporte SEAT. Lo ideal es que coincidan; las diferencias revelan discrepancias de medición o de cobertura de días.")
-            _kc = st.columns(len(_srcs))
-            for _i, _s in enumerate(_srcs):
-                _tot = float(_cmp[_s].sum()); _dias = int((_cmp[_s] > 0).sum())
-                _prom = (_tot / _dias) if _dias > 0 else 0.0
-                _kc[_i].metric(_s, f"{_ncl(_tot, 0)} kWh", f"{_dias} días · prom {_ncl(_prom, 0)} kWh/día", delta_color="off")
-            _g1, _g2 = st.columns([1, 2])
-            with _g1:
-                _tot_df = pd.DataFrame({'Fuente': _srcs, 'kWh': [float(_cmp[_s].sum()) for _s in _srcs]})
-                _fb = px.bar(_tot_df, x='Fuente', y='kWh', color='Fuente', text='kWh', color_discrete_map=_cmap_f)
-                _fb.update_traces(texttemplate='%{text:,.0f}', textposition='outside', cliponaxis=False)
-                _fb.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', showlegend=False, title="Total por fuente")
-                _pc(_fb, use_container_width=True, config={'locale': 'es'})
-            with _g2:
-                _mvf = _cmp.melt(id_vars='Fecha', value_vars=_srcs, var_name='Fuente', value_name='kWh')
-                _mvf = _mvf[_mvf['kWh'] > 0]
-                _ff = px.line(_mvf, x='Fecha', y='kWh', color='Fuente', markers=True, color_discrete_map=_cmap_f)
-                _ff.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh', xaxis_title='', legend_title='', title="Evolución diaria por fuente")
-                _pc(_no_huecos(_ff), use_container_width=True, config={'locale': 'es'})
-            _multi = _cmp[(_cmp[_srcs] > 0).sum(axis=1) >= 2].copy()
-            if not _multi.empty and len(_srcs) >= 2:
-                _ref = _srcs[0]
-                _difcols = []; _pctcols = []
-                for _s in _srcs[1:]:
-                    _cd = f"Δ {_s} − {_ref}"
-                    _cp = f"% {_s} vs {_ref}"
-                    _ok = (_multi[_s] > 0) & (_multi[_ref] > 0)
-                    _multi[_cd] = np.where(_ok, _multi[_s] - _multi[_ref], np.nan)
-                    _multi[_cp] = np.where(_ok, (_multi[_s] - _multi[_ref]) / _multi[_ref] * 100, np.nan)
-                    _difcols.append(_cd); _pctcols.append(_cp)
-                _mvd = _multi.melt(id_vars='Fecha', value_vars=_difcols, var_name='Comparación', value_name='kWh').dropna(subset=['kWh'])
-                _mvp = _multi.melt(id_vars='Fecha', value_vars=_pctcols, var_name='Comparación', value_name='%').dropna(subset=['%'])
-                if not _mvd.empty:
-                    _dd1, _dd2 = st.columns(2)
-                    with _dd1:
-                        _fd = px.bar(_mvd, x='Fecha', y='kWh', color='Comparación', barmode='group')
-                        _fd.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='kWh (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (kWh)")
-                        _pc(_no_huecos(_fd), use_container_width=True, config={'locale': 'es'})
-                    with _dd2:
-                        _fp = px.bar(_mvp, x='Fecha', y='%', color='Comparación', barmode='group')
-                        _fp.update_traces(hovertemplate='%{x}: %{y:.2f}%<extra></extra>')
-                        _fp.update_layout(height=330, margin=dict(t=34, b=0, l=0, r=0), yaxis_title='% (diferencia)', xaxis_title='', legend_title='', title=f"Diferencia vs {_ref} (%)")
-                        _pc(_no_huecos(_fp), use_container_width=True, config={'locale': 'es'})
-                    st.caption(f"Diferencia = fuente − {_ref}, en kWh y en % sobre {_ref}. Cerca de 0 = coinciden; positivo = la fuente mide más que {_ref}.")
-            else:
-                st.caption("No hay días con 2 o más fuentes simultáneas para calcular diferencias.")
-            with st.expander("Ver tabla comparativa por día — mostrar / ocultar", expanded=False):
-                _tc = _cmp.copy()
-                _tc['Fecha'] = _tc['Fecha'].dt.strftime('%d-%m-%Y')
-                for _s in _srcs:
-                    _tc[_s] = _tc[_s].map(lambda _v: _ncl(_v, 0) if _v > 0 else '—')
-                _st_df(_tc, use_container_width=True, hide_index=True)
-
-if _seccion == _SECCIONES[14]:
     st.header("🧱 Constructor de datos por fecha")
     st.caption("Armá tu propia tabla: elegí qué datos incluir y descargala en Excel. Una fila por fecha, respeta los filtros de arriba.")
     if df_ops is None or df_ops.empty:
@@ -5022,7 +5072,7 @@ if _seccion == _SECCIONES[14]:
                                key="_dl_master")
 
 
-if _seccion == _SECCIONES[15]:
+if _seccion == _SECCIONES[14]:
     st.header("🔮 Proyección de energía")
     _fuente = st.radio("Fuente de energía", ["SEAT (tracción + 12 kV)", "Limache (SAF LI)"], horizontal=True, key="_proj_fuente")
     _es_seat = _fuente.startswith("SEAT")
