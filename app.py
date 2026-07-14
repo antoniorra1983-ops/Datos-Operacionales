@@ -1602,15 +1602,16 @@ with st.sidebar:
             
     st.divider()
     with st.expander("🗂️ Archivos guardados"):
-        _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación", "carga_v1":"Pasajeros V1", "carga_v2":"Pasajeros V2", "viajes":"Viajes Contrato", "ide_lb":"IDE Línea Base", "incid":"Incidentes"}
+        _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación", "carga_v1":"Pasajeros V1", "carga_v2":"Pasajeros V2", "viajes":"Viajes Contrato", "ide_lb":"IDE Línea Base", "incid":"Incidentes", "oit":"Consulta OIT"}
         for _key,_carpeta in DATA_DIRS.items():
+            _nom_k = _labels.get(_key, _key)
             _arch=listar_archivos(_carpeta)
             if _arch:
-                st.markdown(f"**{_labels[_key]}** — {len(_arch)} archivo(s)")
+                st.markdown(f"**{_nom_k}** — {len(_arch)} archivo(s)")
                 for _a in _arch:
                     ca2,cb2=st.columns([5,1]); ca2.caption(os.path.basename(_a))
                     if cb2.button("🗑️",key=f"del_{_a}"): os.remove(_a); st.rerun()
-            else: st.caption(f"{_labels[_key]}: sin archivos")
+            else: st.caption(f"{_nom_k}: sin archivos")
 
 # Combinar uploads
 f_v1_all   = combinar_fuentes(f_v1,         DATA_DIRS["v1"])
