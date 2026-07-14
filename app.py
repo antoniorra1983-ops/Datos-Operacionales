@@ -1032,8 +1032,15 @@ def _km_por_tren(all_tr, excluir_sfe=True):
         _km = _d[_d['Clase'] == 'km']
         _odo = _d[_d['Clase'] == 'odo']
     else:
-        _km = _d[_d['Valor'] < 50000]
+        _km = _d[(_d['Valor'] >= 0) & (_d['Valor'] < 50000)]
         _odo = _d[_d['Valor'] >= 50000]
+    # Un km diario negativo es una lectura errónea del odómetro (un tren no puede recorrer
+    # km negativos): se descarta para que no reste del total ni del promedio.
+    _n_neg = int((pd.to_numeric(_km['Valor'], errors='coerce') < 0).sum()) if not _km.empty else 0
+    _km = _km[pd.to_numeric(_km['Valor'], errors='coerce') >= 0]
+    if not _odo.empty:
+        _n_neg += int((pd.to_numeric(_odo['Valor'], errors='coerce') < 0).sum())
+        _odo = _odo[pd.to_numeric(_odo['Valor'], errors='coerce') >= 0]
     if _km.empty:
         return _vacio
     _pivk = _km.pivot_table(index='Tren', columns='Fecha', values='Valor', aggfunc='mean').sort_index(axis=1)
@@ -1054,6 +1061,7 @@ def _km_por_tren(all_tr, excluir_sfe=True):
     _res.insert(1, 'Tipo', _res['Tren'].map(_tipo_id))
     _flota = _pivk.sum(axis=0, min_count=1).reset_index()
     _flota.columns = ['Fecha', 'Km flota']
+    _res.attrs['negativos'] = _n_neg
     return _res, _flota, _pivk
 
 def _orden_serv_key(s):
@@ -2577,7 +2585,7 @@ if _seccion == _SECCIONES[1]:
                                   yaxis=dict(autorange='reversed', title=''), title='')
             _fig_kt.update_traces(textposition='outside', cliponaxis=False)
             _pc(_fig_kt, use_container_width=True, config={'locale': 'es'})
-            st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención.")
+            st.caption("Km recorridos por cada tren en el período (kilometraje diario del odómetro UMR). Color por tipo: XT-100 (azul), XT-M (verde), SFE (naranja). Los trenes en 0 estuvieron detenidos o en mantención." + (f" Se descartaron {_res_tr.attrs.get('negativos', 0)} lecturas con kilometraje negativo (error del odómetro): no se cuentan en los totales." if _res_tr.attrs.get('negativos', 0) else ""))
             if not _tk_tren.empty:
                 st.markdown("#### Tren-Km por tren")
                 _tkm_tot = float(_res_tr['Tren-Km THDR'].sum())
