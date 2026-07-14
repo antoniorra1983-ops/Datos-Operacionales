@@ -460,7 +460,8 @@ DATA_DIRS = {
     "v1":"data/thdr_v1","v2":"data/thdr_v2","umr":"data/umr",
     "seat":"data/seat","bill":"data/facturacion",
     "carga_v1":"data/carga_v1", "carga_v2":"data/carga_v2",
-    "viajes":"data/viajes", "ide_lb":"data/ide_lb", "incid":"data/incidentes"
+    "viajes":"data/viajes", "ide_lb":"data/ide_lb", "incid":"data/incidentes",
+    "oit":"data/oit"
 }
 for _d in DATA_DIRS.values(): os.makedirs(_d, exist_ok=True)
 
@@ -1589,6 +1590,7 @@ with st.sidebar:
     f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True)
     f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True)
     f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True)
+    f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True)
     
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
                     (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
@@ -1621,9 +1623,10 @@ f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
 f_viajes_all = combinar_fuentes(f_viajes, DATA_DIRS["viajes"])
 f_ide_all = combinar_fuentes(f_ide, DATA_DIRS["ide_lb"])
 f_incid_all = combinar_fuentes(f_incid, DATA_DIRS["incid"])
+f_oit_all = combinar_fuentes(f_oit, DATA_DIRS["oit"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v20_tipo_servicio"
+_CACHE_VERSION = "v21_oit_sfe"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
               tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
@@ -1631,14 +1634,15 @@ _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               tuple(sorted(f.name for f in f_carga_v1_all)), tuple(sorted(f.name for f in f_carga_v2_all)),
               tuple(sorted(f.name for f in f_viajes_all)),
               tuple(sorted(f.name for f in f_ide_all)),
-              tuple(sorted(f.name for f in f_incid_all)))
+              tuple(sorted(f.name for f in f_incid_all)),
+              tuple(sorted(f.name for f in f_oit_all)))
               
-_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all,f_viajes_all,f_ide_all,f_incid_all])
+_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all,f_viajes_all,f_ide_all,f_incid_all,f_oit_all])
 _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame(); df_viajes=pd.DataFrame()
-df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); _mot_inval=0; _seat_dups=0
+df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); df_oit=pd.DataFrame(); _mot_inval=0; _seat_dups=0
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
@@ -1664,6 +1668,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_incid=st.session_state.get('df_incid', pd.DataFrame())
     _mot_inval=st.session_state.get('_mot_inval', 0)
     _seat_dups=st.session_state.get('_seat_dups', 0)
+    df_oit=st.session_state.get('df_oit', pd.DataFrame())
     df_serv_tipo=st.session_state.get('df_serv_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']))
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
@@ -2055,6 +2060,97 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         if _inc_rows:
             df_incid = pd.DataFrame(_inc_rows).drop_duplicates(subset=['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Viaje']).sort_values(['Fecha', 'Servicio', 'Viaje']).reset_index(drop=True)
 
+    # --- Consulta OIT: circulación nocturna de SFE ---
+    # Criterio: Área = Material Rodante, y que sea SFE (por la columna Sistema o por Trabajos),
+    # con FECHA DE CIERRE en la madrugada (00:00–07:00). La fecha de referencia es la de cierre.
+    _OIT_H_INI, _OIT_H_FIN = 0, 7
+    if f_oit_all:
+        _oit_rows = []
+        for f in f_oit_all:
+            try:
+                _eng = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+                _raw_o = pd.read_excel(f, header=None, engine=_eng)
+                # Detectar la fila de encabezado: la que trae Área / Sistema / Trabajos
+                _hdr = None
+                for _r in range(min(15, len(_raw_o))):
+                    _fila = " | ".join(_norm(v) for v in _raw_o.iloc[_r].tolist() if pd.notna(v))
+                    if ('AREA' in _fila) and ('SISTEMA' in _fila or 'TRABAJO' in _fila):
+                        _hdr = _r
+                        break
+                if _hdr is None:
+                    for _r in range(min(15, len(_raw_o))):
+                        _fila = " | ".join(_norm(v) for v in _raw_o.iloc[_r].tolist() if pd.notna(v))
+                        if 'SISTEMA' in _fila or 'TRABAJO' in _fila:
+                            _hdr = _r
+                            break
+                if _hdr is None:
+                    _errores_proc[f.name] = "OIT: no se encontró la fila de encabezados (Área / Sistema / Trabajos)"
+                    continue
+                _do = pd.read_excel(f, header=_hdr, engine=_eng)
+                _do = _do.dropna(how='all')
+
+                def _col_oit(*_claves):
+                    """Busca una columna por nombre, tolerando acentos y variantes."""
+                    for _c in _do.columns:
+                        _cn = _norm(_c)
+                        if any(_k in _cn for _k in _claves):
+                            return _c
+                    return None
+                _c_area = _col_oit('AREA')
+                _c_sist = _col_oit('SISTEMA')
+                _c_trab = _col_oit('TRABAJO')
+                # Fecha de cierre: se prioriza la que diga CIERRE (no la de apertura/creación)
+                _c_cierre = None
+                for _c in _do.columns:
+                    _cn = _norm(_c)
+                    if 'CIERRE' in _cn or ('FECHA' in _cn and 'CIERR' in _cn):
+                        _c_cierre = _c
+                        break
+                if _c_cierre is None:
+                    _c_cierre = _col_oit('F.CIERRE', 'FCIERRE')
+                if _c_cierre is None:
+                    _errores_proc[f.name] = "OIT: no se encontró la columna de fecha de cierre"
+                    continue
+                _c_ot = _col_oit('OIT', 'OT', 'NUMERO', 'FOLIO')
+                _c_eq = _col_oit('EQUIPO', 'UNIDAD', 'MOVIL')
+
+                _txt_sist = _do[_c_sist].astype(str) if _c_sist else pd.Series([''] * len(_do), index=_do.index)
+                _txt_trab = _do[_c_trab].astype(str) if _c_trab else pd.Series([''] * len(_do), index=_do.index)
+                _txt_eq = _do[_c_eq].astype(str) if _c_eq else pd.Series([''] * len(_do), index=_do.index)
+                _txt_all = (_txt_sist + ' ' + _txt_trab + ' ' + _txt_eq).map(_norm)
+                # Área = Material Rodante
+                _es_mr = _do[_c_area].map(_norm).str.contains('MATERIAL RODANTE', na=False) if _c_area else pd.Series([True] * len(_do), index=_do.index)
+                # SFE en Sistema o en Trabajos
+                _es_sfe = _txt_all.str.contains(r'\bSFE\b', regex=True, na=False)
+                # Fecha y hora de cierre
+                _fc = pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True)
+                _hora_c = _fc.dt.hour + _fc.dt.minute / 60.0
+                _es_madrugada = (_hora_c >= _OIT_H_INI) & (_hora_c < _OIT_H_FIN)
+                _sel = _es_mr & _es_sfe & _fc.notna() & _es_madrugada
+                for _i in _do.index[_sel]:
+                    _f_cierre = _fc.loc[_i]
+                    if not (start_date <= _f_cierre.date() <= end_date):
+                        continue
+                    # Número de SFE: se busca junto a la palabra SFE (410–414, o cualquier 4xx)
+                    _txt_i = _txt_all.loc[_i]
+                    _mn = re.search(r'SFE[\s\-_.]*(\d{3})', _txt_i)
+                    if not _mn:
+                        _mn = re.search(r'\b(4[01]\d)\b', _txt_i)
+                    _n_sfe = int(_mn.group(1)) if _mn else np.nan
+                    _oit_rows.append({
+                        'Fecha': _f_cierre.normalize(),
+                        'Hora cierre': _f_cierre.strftime('%H:%M'),
+                        'Hora_n': float(_hora_c.loc[_i]),
+                        'SFE': (f"SFE {_n_sfe}" if pd.notna(_n_sfe) else "SFE (sin número)"),
+                        'N_SFE': _n_sfe,
+                        'Sistema': (str(_do.at[_i, _c_sist])[:80] if _c_sist else ''),
+                        'Trabajos': (str(_do.at[_i, _c_trab])[:120] if _c_trab else ''),
+                        'OT': (str(_do.at[_i, _c_ot]) if _c_ot else '')})
+            except Exception as _e:
+                _errores_proc[f.name] = f"OIT: {_e}"
+        if _oit_rows:
+            df_oit = pd.DataFrame(_oit_rows).drop_duplicates().sort_values(['Fecha', 'Hora_n']).reset_index(drop=True)
+
     df_serv_tipo = pd.DataFrame(columns=['Fecha', 'Tipo_Servicio', 'Servicios', 'TrenKm'])
     df_pax_tipo = pd.DataFrame(columns=['Fecha', 'Tipo_Servicio', 'PAX'])
 
@@ -2108,7 +2204,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
-                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, '_mot_inval':_mot_inval, '_seat_dups':_seat_dups})
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, 'df_oit':df_oit, '_mot_inval':_mot_inval, '_seat_dups':_seat_dups})
     st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
@@ -3614,6 +3710,87 @@ if _seccion == _SECCIONES[4]:
                 _st_df(_ph.pivot(index='Hora', columns='Tipo', values='Consumo').round(1), use_container_width=True)
     else:
         st.info("Se necesita cargar el archivo de **PRMTE (Energía cada 15 min)** para este análisis de consumo nocturno.")
+
+    # ===== Circulación nocturna de SFE (desde la consulta OIT) =====
+    st.divider()
+    st.markdown("### 🚄 Circulación nocturna de SFE")
+    if df_oit is None or df_oit.empty:
+        st.info("Carga el archivo **11. Consulta OIT** para detectar la circulación nocturna de trenes SFE. "
+                "Se toman las órdenes con **Área = Material Rodante**, que mencionen **SFE** en Sistema o en Trabajos, "
+                "y cuya **fecha de cierre** caiga entre las **00:00 y las 07:00**. La fecha considerada es la de cierre.")
+    else:
+        _oit = df_oit.copy()
+        _oit['Fecha'] = pd.to_datetime(_oit['Fecha']).dt.normalize()
+        _n_noches = int(_oit['Fecha'].nunique())
+        _n_ot = len(_oit)
+        _o1, _o2, _o3, _o4 = st.columns(4)
+        _o1.metric("Órdenes SFE de madrugada", _ncl(_n_ot, 0))
+        _o2.metric("Noches con SFE", _ncl(_n_noches, 0))
+        _o3.metric("Ventana", "00:00 – 07:00", "por fecha de cierre", delta_color="off")
+        _uni_sfe = sorted(_oit.loc[_oit['N_SFE'].notna(), 'N_SFE'].astype(int).unique().tolist())
+        _o4.metric("Unidades SFE", _ncl(len(_uni_sfe), 0), ", ".join(str(_u) for _u in _uni_sfe) if _uni_sfe else "sin número", delta_color="off")
+
+        _cs1, _cs2 = st.columns(2)
+        with _cs1:
+            st.markdown("**Órdenes por unidad SFE**")
+            _por_sfe = _oit.groupby('SFE', as_index=False).agg(**{'Órdenes': ('SFE', 'size'), 'Noches': ('Fecha', 'nunique')})
+            _por_sfe = _por_sfe.sort_values('Órdenes', ascending=False)
+            _fsfe = px.bar(_por_sfe, x='SFE', y='Órdenes', color_discrete_sequence=['#E85500'])
+            _fsfe.update_traces(hovertemplate='%{x}: %{y} órdenes<extra></extra>')
+            _fsfe.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0), xaxis_title='', yaxis_title='Órdenes')
+            _pc(_fsfe, use_container_width=True, config={'locale': 'es'})
+        with _cs2:
+            st.markdown("**Hora de cierre**")
+            _oit['_hbin'] = _oit['Hora_n'].astype(float).apply(lambda _h: int(_h))
+            _por_h = _oit.groupby('_hbin', as_index=False).size().rename(columns={'size': 'Órdenes'})
+            _por_h['Hora'] = _por_h['_hbin'].map(lambda _h: f"{int(_h):02d}:00")
+            _fhc = px.bar(_por_h, x='Hora', y='Órdenes', color_discrete_sequence=['#005195'])
+            _fhc.update_traces(hovertemplate='%{x}: %{y} órdenes<extra></extra>')
+            _fhc.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0), xaxis_title='', yaxis_title='Órdenes')
+            _pc(_fhc, use_container_width=True, config={'locale': 'es'})
+
+        # Cruce con el consumo nocturno: ¿las noches con SFE consumen más?
+        if all_prmte_full:
+            _bg, _mh_x, _mhj_x, _mj_x, _mq_x, _mqj_x, _hd_x = _base_noche_2025(all_prmte_full, df_ops)
+            if _bg is not None and not _hd_x.empty:
+                _noche = _hd_x.groupby('Fecha', as_index=False)['Consumo'].sum().rename(columns={'Consumo': 'Consumo noche'})
+                _noche['Fecha'] = pd.to_datetime(_noche['Fecha']).dt.normalize()
+                _fechas_sfe = set(_oit['Fecha'])
+                _noche['Con SFE'] = _noche['Fecha'].isin(_fechas_sfe)
+                _con = _noche.loc[_noche['Con SFE'], 'Consumo noche']
+                _sin = _noche.loc[~_noche['Con SFE'], 'Consumo noche']
+                if len(_con) and len(_sin):
+                    _md_con, _md_sin = float(_con.median()), float(_sin.median())
+                    _dif = _md_con - _md_sin
+                    st.markdown("**¿Las noches con SFE circulando consumen más?**")
+                    _x1, _x2, _x3 = st.columns(3)
+                    _x1.metric("Mediana noches CON SFE", f"{_ncl(_md_con, 0)} kWh", f"{len(_con)} noches", delta_color="off")
+                    _x2.metric("Mediana noches SIN SFE", f"{_ncl(_md_sin, 0)} kWh", f"{len(_sin)} noches", delta_color="off")
+                    _x3.metric("Diferencia", f"{_ncl(_dif, 0)} kWh",
+                               "más consumo con SFE" if _dif > 0 else "sin sobreconsumo aparente", delta_color="off")
+                    _bx = _noche.copy()
+                    _bx['Tipo de noche'] = np.where(_bx['Con SFE'], 'Con SFE', 'Sin SFE')
+                    _fbx = px.box(_bx, x='Tipo de noche', y='Consumo noche', color='Tipo de noche',
+                                  color_discrete_map={'Con SFE': '#E85500', 'Sin SFE': '#005195'}, points='all')
+                    _fbx.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), showlegend=False,
+                                       yaxis_title='Consumo nocturno (kWh)', xaxis_title='')
+                    _pc(_fbx, use_container_width=True, config={'locale': 'es'})
+                    st.caption("Consumo total de la ventana nocturna (00:00–05:00) de cada día, separando las noches en que hubo órdenes SFE cerradas de madrugada. Si la mediana con SFE es claramente mayor, la circulación nocturna de estos trenes está aportando consumo extra sobre la base.")
+
+        with st.expander(f"Ver las {_n_ot} órdenes detectadas", expanded=False):
+            _tab_o = _oit[['Fecha', 'Hora cierre', 'SFE', 'Sistema', 'Trabajos', 'OT']].copy()
+            _tab_o['Fecha'] = pd.to_datetime(_tab_o['Fecha']).dt.strftime('%d-%m-%Y')
+            _st_df(_tab_o, use_container_width=True, hide_index=True)
+            st.caption("Criterio: Área = Material Rodante · «SFE» en la columna Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha mostrada es la de cierre.")
+        _buf_o = BytesIO()
+        with pd.ExcelWriter(_buf_o, engine='openpyxl') as _w:
+            _ex_o = _oit.drop(columns=['_hbin'], errors='ignore').copy()
+            _ex_o['Fecha'] = pd.to_datetime(_ex_o['Fecha']).dt.strftime('%d-%m-%Y')
+            _ex_o.to_excel(_w, sheet_name='SFE nocturno', index=False)
+        st.download_button("⬇️ Descargar circulación nocturna SFE", data=_buf_o.getvalue(),
+                           file_name="circulacion_nocturna_sfe.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="_dl_oit")
 
 if _seccion == _SECCIONES[5]:
     if not df_ops.empty and df_ops['IDE (kWh/km)'].sum() > 0:
