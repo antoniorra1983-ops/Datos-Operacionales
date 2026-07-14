@@ -1064,12 +1064,31 @@ def _km_por_tren(all_tr, excluir_sfe=True):
     _res.attrs['negativos'] = _n_neg
     return _res, _flota, _pivk
 
-def km_por_hora_thdr(_pts_thdr):
+def km_por_hora_thdr(_pts_thdr, _eventos=None):
     """Reparte el kilometraje de cada viaje del THDR en la hora del día en que se recorrió.
     Usa las horas de paso por estación: entre dos estaciones consecutivas se sabe cuántos km
     hay y en qué minutos se recorrieron, así que el km se asigna a esa hora (y si el tramo
     cruza de una hora a otra, se prorratea por el tiempo que pasó en cada una).
-    Devuelve un DataFrame con Fecha, Hora, Km (recorrido) y TrenKm (×2 en tracción doble)."""
+
+    _eventos: DataFrame de incidentes (Fecha, Viaje, Tipo, Lugar, M2). Si se pasa, el Tren-Km
+    refleja los cortes y acoples: tras un desacople la segunda motriz deja de sumar, y antes
+    de un acople todavía no sumaba. Un evento en el origen o el término del viaje no cambia
+    nada (el tren sale o llega con esa composición).
+
+    Devuelve Fecha, Hora, Km (recorrido), TrenKm (bruto, ×2 en dobles) y TrenKm_neto
+    (con cortes y acoples aplicados)."""
+    _KM_EV = {'PU': 0.0, 'EB': 25.4, 'SA': 29.11, 'PE': 30.4, 'PB': 30.4, 'LI': 43.13}
+    _ev_map = {}
+    if _eventos is not None and not getattr(_eventos, 'empty', True):
+        for _, _re_ in _eventos.iterrows():
+            _fe_e = pd.to_datetime(_re_.get('Fecha'), errors='coerce')
+            _vj_e = pd.to_numeric(_re_.get('Viaje'), errors='coerce')
+            _km_e = _KM_EV.get(str(_re_.get('Lugar', '')).strip().upper())
+            if pd.isna(_fe_e) or pd.isna(_vj_e) or _km_e is None:
+                continue
+            if pd.isna(_re_.get('M2')):  # sin segunda motriz: la composición no cambia
+                continue
+            _ev_map.setdefault((_fe_e.normalize(), int(_vj_e)), []).append((str(_re_.get('Tipo')), _km_e))
     _acc = []
     for _dth in _pts_thdr:
         if _dth is None or getattr(_dth, 'empty', True) or 'Fecha_Op' not in _dth.columns:
@@ -1088,6 +1107,8 @@ def km_por_hora_thdr(_pts_thdr):
             continue
         _fop = pd.to_datetime(_dth['Fecha_Op'], errors='coerce').dt.normalize()
         _uni = _dth['Unidad'].astype(str).str.strip() if 'Unidad' in _dth.columns else pd.Series(['S'] * len(_dth), index=_dth.index)
+        _cvj = next((c for c in _dth.columns if str(c).strip().upper() == 'VIAJE'), None)
+        _vjs = pd.to_numeric(_dth[_cvj], errors='coerce') if _cvj else pd.Series([np.nan] * len(_dth), index=_dth.index)
         _M = _dth[[_c for _c, _ in _cols_pt]].apply(pd.to_numeric, errors='coerce')
         _kms = np.array([_k for _, _k in _cols_pt])
         for _i in _dth.index:
@@ -1096,8 +1117,12 @@ def km_por_hora_thdr(_pts_thdr):
             if _ok.sum() < 2:
                 continue
             _seq = sorted(zip(_h[_ok], _kms[_ok]))
-            _mult = 2 if str(_uni.loc[_i]) == 'M' else 1
+            _mult0 = 2 if str(_uni.loc[_i]) == 'M' else 1
             _fe = _fop.loc[_i]
+            # Eventos de ese viaje (solo importan si el tren venía doble)
+            _evs = []
+            if _mult0 == 2 and _ev_map and pd.notna(_vjs.loc[_i]):
+                _evs = _ev_map.get((_fe, int(_vjs.loc[_i])), [])
             for _j in range(len(_seq) - 1):
                 _t1, _k1 = _seq[_j]
                 _t2, _k2 = _seq[_j + 1]
@@ -1105,17 +1130,32 @@ def km_por_hora_thdr(_pts_thdr):
                 _dt = _t2 - _t1
                 if _dkm <= 0 or _dt <= 0:
                     continue
+                # Multiplicador real de este tramo según los cortes/acoples del viaje
+                _mult = _mult0
+                for _tp_e, _km_e in _evs:
+                    _idxs = [_p for _p, (_tt, _kk) in enumerate(_seq) if abs(_kk - _km_e) < 0.05]
+                    if not _idxs:
+                        continue
+                    if _tp_e == 'Desacople':
+                        # desde que sale de esa estación, la 2ª motriz ya no va
+                        if _j >= max(_idxs):
+                            _mult = 1
+                    else:
+                        # antes de llegar a esa estación, la 2ª motriz todavía no se había sumado
+                        if _j < min(_idxs):
+                            _mult = 1
                 for _hh in range(int(_t1 // 60), int((_t2 - 1e-9) // 60) + 1):
                     _ini = max(_t1, _hh * 60)
                     _fin = min(_t2, (_hh + 1) * 60)
                     if _fin <= _ini:
                         continue
                     _fr = (_fin - _ini) / _dt
-                    _acc.append({'Fecha': _fe, 'Hora': _hh % 24,
-                                 'Km': _dkm * _fr, 'TrenKm': _dkm * _fr * _mult})
+                    _acc.append({'Fecha': _fe, 'Hora': _hh % 24, 'Km': _dkm * _fr,
+                                 'TrenKm': _dkm * _fr * _mult0, 'TrenKm_neto': _dkm * _fr * _mult})
     if not _acc:
-        return pd.DataFrame(columns=['Fecha', 'Hora', 'Km', 'TrenKm'])
-    return pd.DataFrame(_acc).groupby(['Fecha', 'Hora'], as_index=False).agg({'Km': 'sum', 'TrenKm': 'sum'})
+        return pd.DataFrame(columns=['Fecha', 'Hora', 'Km', 'TrenKm', 'TrenKm_neto'])
+    return pd.DataFrame(_acc).groupby(['Fecha', 'Hora'], as_index=False).agg(
+        {'Km': 'sum', 'TrenKm': 'sum', 'TrenKm_neto': 'sum'})
 
 
 def _orden_serv_key(s):
@@ -3583,30 +3623,49 @@ if _seccion == _SECCIONES[6]:
     st.divider()
     st.markdown("#### 🕐 Kilometraje por hora del día")
     _pth_h = [d for d in [df_thdr_v1, df_thdr_v2] if d is not None and not getattr(d, 'empty', True)]
-    _kmh = km_por_hora_thdr(_pth_h) if _pth_h else pd.DataFrame()
+    _kmh = km_por_hora_thdr(_pth_h, df_incid) if _pth_h else pd.DataFrame()
     if _kmh.empty:
         st.info("No hay horas de paso por estación en el THDR del período para repartir el kilometraje.")
     else:
-        _met_h = st.radio("Métrica", ["Km recorrido", "Tren-Km (×2 en dobles)"], horizontal=True, key="_kmh_met")
-        _cval = 'Km' if _met_h == "Km recorrido" else 'TrenKm'
+        _hay_ev = bool(df_incid is not None and not df_incid.empty)
+        _desc_h = float(_kmh['TrenKm'].sum() - _kmh['TrenKm_neto'].sum())
+        _opts_h = ["Km recorrido", "Tren-Km bruto", "Tren-Km neto (con cortes y acoples)"] if _hay_ev else ["Km recorrido", "Tren-Km bruto"]
+        _met_h = st.radio("Métrica", _opts_h, horizontal=True, key="_kmh_met",
+                          index=(2 if _hay_ev else 0))
+        _cval = {'Km recorrido': 'Km', 'Tren-Km bruto': 'TrenKm',
+                 'Tren-Km neto (con cortes y acoples)': 'TrenKm_neto'}[_met_h]
         _ndias_h = int(_kmh['Fecha'].nunique())
         _tot_h = float(_kmh[_cval].sum())
         _hh = _kmh.groupby('Hora', as_index=False)[_cval].sum()
         _hh['Promedio diario'] = _hh[_cval] / max(_ndias_h, 1)
-        _pico = _hh.loc[_hh[_cval].idxmax()]
+        _pico = _hh.loc[_hh['Promedio diario'].idxmax()]
         _k1h, _k2h, _k3h, _k4h = st.columns(4)
         _k1h.metric("Total del período", f"{_ncl(_tot_h, 0)} km")
-        _k2h.metric("Días", _ncl(_ndias_h, 0))
-        _k3h.metric("Promedio por día", f"{_ncl(_tot_h / max(_ndias_h, 1), 0)} km")
-        _k4h.metric("Hora punta", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 0)} km/día", delta_color="off")
+        _k2h.metric("Promedio por día", f"{_ncl(_tot_h / max(_ndias_h, 1), 0)} km", f"{_ndias_h} días", delta_color="off")
+        _k3h.metric("Hora punta", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 0)} km/día", delta_color="off")
+        _k4h.metric("Descuento por cortes/acoples", f"{_ncl(_desc_h, 0)} km",
+                    "Tren-Km bruto − neto" if _desc_h > 0 else "sin eventos en ruta", delta_color="off")
         _fkh = px.bar(_hh, x='Hora', y='Promedio diario', color_discrete_sequence=['#005195'])
         _fkh.update_traces(hovertemplate='%{x}:00 — %{y:,.1f} km<extra></extra>')
         _fkh.update_layout(height=340, margin=dict(t=10, b=0, l=0, r=0),
-                           yaxis_title=f"{_cval if _cval == 'Km' else 'Tren-Km'} promedio por día",
+                           yaxis_title=f"{_met_h} — promedio por día",
                            xaxis_title='Hora del día',
                            xaxis=dict(tickmode='linear', dtick=1, range=[-0.5, 23.5]))
         _pc(_fkh, use_container_width=True, config={'locale': 'es'})
-        st.caption("El kilometraje de cada viaje se reparte en la hora en que efectivamente se recorrió, según las horas de paso por cada estación del THDR. Si un tramo entre dos estaciones cruza de una hora a otra, los km se prorratean por el tiempo que estuvo en cada una. La suma de todas las horas da exactamente el kilometraje total del THDR.")
+        if _hay_ev and _desc_h > 0:
+            _cmp_h = _kmh.groupby('Hora', as_index=False)[['TrenKm', 'TrenKm_neto']].sum()
+            _cmp_h['Descuento'] = _cmp_h['TrenKm'] - _cmp_h['TrenKm_neto']
+            _cmp_h = _cmp_h[_cmp_h['Descuento'] > 0.01]
+            if not _cmp_h.empty:
+                with st.expander("¿En qué horas se descuenta por cortes y acoples?", expanded=False):
+                    _fdh = px.bar(_cmp_h, x='Hora', y='Descuento', color_discrete_sequence=['#c62828'])
+                    _fdh.update_traces(hovertemplate='%{x}:00 — %{y:,.1f} km descontados<extra></extra>')
+                    _fdh.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0),
+                                       yaxis_title='Tren-Km descontado', xaxis_title='Hora del día',
+                                       xaxis=dict(tickmode='linear', dtick=1))
+                    _pc(_fdh, use_container_width=True, config={'locale': 'es'})
+                    st.caption("Tras un desacople, la segunda motriz deja de sumar Tren-Km en las horas que quedan del viaje. Antes de un acople, todavía no sumaba. Por eso el descuento se concentra en las horas en que el tren circuló con menos composición.")
+        st.caption("El kilometraje de cada viaje se reparte en la hora en que efectivamente se recorrió, según las horas de paso por cada estación del THDR. Si un tramo entre dos estaciones cruza de una hora a otra, los km se prorratean por el tiempo que estuvo en cada una. El «Tren-Km neto» descuenta los cortes y acoples: la segunda motriz solo suma en el tramo que realmente recorrió. Un evento en el origen o el término del viaje no descuenta nada (el tren sale o llega con esa composición).")
         if _ndias_h > 1:
             with st.expander("Ver detalle por día y hora", expanded=False):
                 _piv_h = _kmh.pivot_table(index='Fecha', columns='Hora', values=_cval, aggfunc='sum').fillna(0.0)
@@ -3628,6 +3687,9 @@ if _seccion == _SECCIONES[6]:
         with pd.ExcelWriter(_buf_h, engine='openpyxl') as _w:
             _ex = _kmh.copy()
             _ex['Fecha'] = pd.to_datetime(_ex['Fecha']).dt.strftime('%d-%m-%Y')
+            _ex = _ex.rename(columns={'Km': 'Km recorrido', 'TrenKm': 'Tren-Km bruto',
+                                      'TrenKm_neto': 'Tren-Km neto (con cortes y acoples)'})
+            _ex['Descuento cortes/acoples'] = _ex['Tren-Km bruto'] - _ex['Tren-Km neto (con cortes y acoples)']
             _ex.to_excel(_w, sheet_name='Km por hora', index=False)
             _hh.to_excel(_w, sheet_name='Resumen por hora', index=False)
         st.download_button("⬇️ Descargar kilometraje por hora", data=_buf_h.getvalue(),
