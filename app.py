@@ -4823,6 +4823,99 @@ if _seccion == _SECCIONES[14]:
             _cols_pax.append('Total Viajes')
             _master = _master.merge(_vjg, on='Fecha', how='left')
 
+        # --- Pasajeros por tipo de servicio ---
+        _cols_paxtipo = []
+        if df_pax_tipo is not None and not df_pax_tipo.empty and 'Tipo_Servicio' in df_pax_tipo.columns and 'PAX' in df_pax_tipo.columns:
+            _ptt = df_pax_tipo.copy()
+            _ptt['Fecha'] = pd.to_datetime(_ptt['Fecha'], errors='coerce').dt.normalize()
+            _ptv = _ptt.pivot_table(index='Fecha', columns='Tipo_Servicio', values='PAX', aggfunc='sum', fill_value=0)
+            _ptv.columns = [f"PAX {c}" for c in _ptv.columns]
+            _cols_paxtipo = list(_ptv.columns)
+            _master = _master.merge(_ptv.reset_index(), on='Fecha', how='left')
+
+        # --- Incidentes PCC: cortes y acoples por día ---
+        _cols_incid = []
+        if df_incid is not None and not df_incid.empty and {'Fecha', 'Tipo'}.issubset(df_incid.columns):
+            _dic = df_incid.copy()
+            _dic['Fecha'] = pd.to_datetime(_dic['Fecha'], errors='coerce').dt.normalize()
+            _dic['_cor'] = (_dic['Tipo'].astype(str) == 'Desacople').astype(int)
+            _dic['_aco'] = (_dic['Tipo'].astype(str) == 'Acople').astype(int)
+            _dicg = _dic.dropna(subset=['Fecha']).groupby('Fecha', as_index=False).agg(**{
+                'Cortes (incidentes)': ('_cor', 'sum'), 'Acoples (incidentes)': ('_aco', 'sum')})
+            _dicg['Eventos (incidentes)'] = _dicg['Cortes (incidentes)'] + _dicg['Acoples (incidentes)']
+            _cols_incid = ['Cortes (incidentes)', 'Acoples (incidentes)', 'Eventos (incidentes)']
+            _master = _master.merge(_dicg, on='Fecha', how='left')
+
+        # --- THDR: viajes, km, tren-km y servicios por tipo O-D real ---
+        _cols_thdr = []
+        _pt_c = [d for d in [df_thdr_v1, df_thdr_v2] if d is not None and not getattr(d, 'empty', True) and 'Km_Recorrido' in d.columns]
+        if _pt_c:
+            _acc_c = []
+            for _dthc in _pt_c:
+                if 'Fecha_Op' not in _dthc.columns:
+                    continue
+                _unic = _dthc['Unidad'].astype(str).str.strip() if 'Unidad' in _dthc.columns else pd.Series(['S'] * len(_dthc))
+                _acc_c.append(pd.DataFrame({
+                    'Fecha': pd.to_datetime(_dthc['Fecha_Op'], errors='coerce').dt.normalize().values,
+                    'Km': pd.to_numeric(_dthc['Km_Recorrido'], errors='coerce').values,
+                    'TrenKm': (pd.to_numeric(_dthc['Tren-Km'], errors='coerce').values if 'Tren-Km' in _dthc.columns else np.nan),
+                    'TS': (_dthc['Tipo_Servicio'].astype(str).values if 'Tipo_Servicio' in _dthc.columns else '—'),
+                    'Doble': (_unic == 'M').values}))
+            if _acc_c:
+                _dcc = pd.concat(_acc_c, ignore_index=True).dropna(subset=['Fecha'])
+                _dccg = _dcc.groupby('Fecha', as_index=False).agg(**{
+                    'Viajes (THDR)': ('Km', 'size'),
+                    'Km recorrido (THDR)': ('Km', 'sum'),
+                    'Tren-Km bruto (THDR)': ('TrenKm', 'sum'),
+                    'Dobles (THDR)': ('Doble', 'sum')})
+                _dccg['Simples (THDR)'] = _dccg['Viajes (THDR)'] - _dccg['Dobles (THDR)']
+                _cols_thdr = ['Viajes (THDR)', 'Simples (THDR)', 'Dobles (THDR)', 'Km recorrido (THDR)', 'Tren-Km bruto (THDR)']
+                _master = _master.merge(_dccg, on='Fecha', how='left')
+                _S2Oc = {'PUE': 'PU', 'LIM': 'LI', 'S.ALD': 'SA', 'E.BEL': 'EB', 'PEÑ': 'PE'}
+                def _od_c(_s):
+                    _s = str(_s)
+                    if '→' not in _s:
+                        return None
+                    _o, _dd = [_p.strip() for _p in _s.split('→', 1)]
+                    return f"{_S2Oc.get(_o, _o)}-{_S2Oc.get(_dd, _dd)}"
+                _dcc['OD'] = _dcc['TS'].map(_od_c)
+                _dodc = _dcc.dropna(subset=['OD']).pivot_table(index='Fecha', columns='OD', values='Km', aggfunc='size', fill_value=0)
+                if not _dodc.empty:
+                    _dodc.columns = [f"Serv {c} (THDR)" for c in _dodc.columns]
+                    _cols_thdr += list(_dodc.columns)
+                    _master = _master.merge(_dodc.reset_index(), on='Fecha', how='left')
+
+        # --- IDE Línea Base (coeficientes del archivo) ---
+        _cols_lb = []
+        if df_ide_lb is not None and not df_ide_lb.empty and 'Fecha' in df_ide_lb.columns:
+            _lbc = df_ide_lb.copy()
+            _lbc['Fecha'] = pd.to_datetime(_lbc['Fecha'], errors='coerce').dt.normalize()
+            _numlb = [c for c in _lbc.columns if c != 'Fecha' and pd.api.types.is_numeric_dtype(_lbc[c])]
+            if _numlb:
+                _lbg = _lbc.dropna(subset=['Fecha']).groupby('Fecha')[_numlb].mean().reset_index()
+                _lbg = _lbg.rename(columns={c: f"LB {c}" for c in _numlb})
+                _cols_lb = [f"LB {c}" for c in _numlb]
+                _master = _master.merge(_lbg, on='Fecha', how='left')
+
+        # --- Km diario de cada tren (M01 … XM35, SFE) ---
+        _cols_trenes = []
+        if all_tr:
+            _dtx = pd.DataFrame(all_tr)
+            if {'Tren', 'Fecha', 'Valor'}.issubset(_dtx.columns):
+                _dtx['Fecha'] = pd.to_datetime(_dtx['Fecha'], errors='coerce').dt.normalize()
+                _dtx['Valor'] = pd.to_numeric(_dtx['Valor'], errors='coerce')
+                if 'Clase' in _dtx.columns and _dtx['Clase'].notna().any():
+                    _dtx = _dtx[_dtx['Clase'] == 'km']
+                else:
+                    _dtx = _dtx[_dtx['Valor'] < 50000]
+                _dtx = _dtx[_dtx['Valor'] >= 0].dropna(subset=['Fecha', 'Valor'])
+                if not _dtx.empty:
+                    _ptr = _dtx.pivot_table(index='Fecha', columns='Tren', values='Valor', aggfunc='sum')
+                    _ptr = _ptr.reindex(sorted(_ptr.columns), axis=1)
+                    _ptr.columns = [f"Km {c}" for c in _ptr.columns]
+                    _cols_trenes = list(_ptr.columns)
+                    _master = _master.merge(_ptr.reset_index(), on='Fecha', how='left')
+
         # --- grupos de columnas disponibles ---
         # --- catálogo de cada dato por separado: nombre legible -> columna real ---
         _CATALOGO = {}
@@ -4851,8 +4944,25 @@ if _seccion == _SECCIONES[14]:
         _add_c("👥 Pasajeros (UMR)", "PAX")
         for _c in _cols_pax:
             _CATALOGO[f"👥 {_c}"] = _c
+        for _c in _cols_paxtipo:
+            _CATALOGO[f"👥 {_c}"] = _c
+        for _c in _cols_thdr:
+            _CATALOGO[f"📋 {_c}"] = _c
+        for _c in _cols_incid:
+            _CATALOGO[f"🚨 {_c}"] = _c
+        for _c in _cols_lb:
+            _CATALOGO[f"📉 {_c}"] = _c
+        for _c in _cols_trenes:
+            _CATALOGO[f"🚆 {_c}"] = _c
         _add_c("📅 Tipo de día", "Tipo Día")
         _add_c("📅 Feriado", "Nombre Feriado")
+        # Barrido final: cualquier otro dato del período que no haya entrado arriba
+        _ya_cat = set(_CATALOGO.values())
+        for _c in _master.columns:
+            if _c == 'Fecha' or _c in _ya_cat or str(_c).startswith('_'):
+                continue
+            if pd.api.types.is_numeric_dtype(_master[_c]) or _master[_c].dtype == object:
+                _CATALOGO[f"➕ {_c}"] = _c
 
         _RENOM = {'E_Tr': 'E_Tracción [kWh]', 'E_12': 'E_12kV [kWh]', 'E_Total': 'E_Total [kWh]',
                   'E_Fact': 'E_Factura [kWh]', 'E_Prmte': 'E_PRMTE [kWh]', 'E_Seat_T': 'E_SEAT [kWh]',
@@ -4860,10 +4970,19 @@ if _seccion == _SECCIONES[14]:
 
         st.markdown("**1 · Elegí los datos que querés (cada uno por separado)**")
         _opts_cat = list(_CATALOGO.keys())
+        _GRUPOS = {'📊 Operación': '📊', '⚡ Energía': '⚡', '⚖️ Fuentes': '⚖️', '📈 Servicios (UMR)': '📈',
+                   '📋 THDR': '📋', '📏 Km-Servicio (UMR)': '📏', '🚨 Incidentes': '🚨', '📉 Línea Base': '📉',
+                   '🚆 Trenes': '🚆', '👥 Pasajeros': '👥', '📅 Calendario': '📅', '➕ Otros': '➕'}
+        _gsel = st.multiselect("Filtrar por tipo de dato (opcional)", list(_GRUPOS.keys()), default=[],
+                               help="Deja vacío para ver todos los datos disponibles.")
+        if _gsel:
+            _pref = tuple(_GRUPOS[_g] for _g in _gsel)
+            _opts_cat = [o for o in _opts_cat if o.startswith(_pref)]
+        st.caption(f"{len(_CATALOGO)} datos disponibles en el período" + (f" · {len(_opts_cat)} en el filtro" if _gsel else ""))
         if '_cb_cols' not in st.session_state:
             st.session_state['_cb_cols'] = _opts_cat[:4]
         else:
-            st.session_state['_cb_cols'] = [x for x in st.session_state['_cb_cols'] if x in _opts_cat]
+            st.session_state['_cb_cols'] = [x for x in st.session_state['_cb_cols'] if x in _CATALOGO]
         _bca, _bcb, _bcc = st.columns([1.3, 1, 4])
         if _bca.button("✅ Seleccionar todos", key="_btn_all_cols", use_container_width=True):
             st.session_state['_cb_cols'] = _opts_cat; st.rerun()
