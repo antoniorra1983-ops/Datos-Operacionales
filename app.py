@@ -1064,6 +1064,60 @@ def _km_por_tren(all_tr, excluir_sfe=True):
     _res.attrs['negativos'] = _n_neg
     return _res, _flota, _pivk
 
+def km_por_hora_thdr(_pts_thdr):
+    """Reparte el kilometraje de cada viaje del THDR en la hora del día en que se recorrió.
+    Usa las horas de paso por estación: entre dos estaciones consecutivas se sabe cuántos km
+    hay y en qué minutos se recorrieron, así que el km se asigna a esa hora (y si el tramo
+    cruza de una hora a otra, se prorratea por el tiempo que pasó en cada una).
+    Devuelve un DataFrame con Fecha, Hora, Km (recorrido) y TrenKm (×2 en tracción doble)."""
+    _acc = []
+    for _dth in _pts_thdr:
+        if _dth is None or getattr(_dth, 'empty', True) or 'Fecha_Op' not in _dth.columns:
+            continue
+        _cols_pt = []
+        for _c in _dth.columns:
+            _cs = str(_c)
+            if not _cs.endswith('_min') or 'Programada' in _cs:
+                continue
+            if 'Hora Llegada' not in _cs and 'Hora Salida' not in _cs:
+                continue
+            _est = re.sub(r'\s+', ' ', _norm(_cs.split('_Hora')[0]).strip())
+            if _est in _KM_ESTACION:
+                _cols_pt.append((_c, _KM_ESTACION[_est]))
+        if not _cols_pt:
+            continue
+        _fop = pd.to_datetime(_dth['Fecha_Op'], errors='coerce').dt.normalize()
+        _uni = _dth['Unidad'].astype(str).str.strip() if 'Unidad' in _dth.columns else pd.Series(['S'] * len(_dth), index=_dth.index)
+        _M = _dth[[_c for _c, _ in _cols_pt]].apply(pd.to_numeric, errors='coerce')
+        _kms = np.array([_k for _, _k in _cols_pt])
+        for _i in _dth.index:
+            _h = _M.loc[_i].values
+            _ok = ~pd.isna(_h)
+            if _ok.sum() < 2:
+                continue
+            _seq = sorted(zip(_h[_ok], _kms[_ok]))
+            _mult = 2 if str(_uni.loc[_i]) == 'M' else 1
+            _fe = _fop.loc[_i]
+            for _j in range(len(_seq) - 1):
+                _t1, _k1 = _seq[_j]
+                _t2, _k2 = _seq[_j + 1]
+                _dkm = abs(_k2 - _k1)
+                _dt = _t2 - _t1
+                if _dkm <= 0 or _dt <= 0:
+                    continue
+                for _hh in range(int(_t1 // 60), int((_t2 - 1e-9) // 60) + 1):
+                    _ini = max(_t1, _hh * 60)
+                    _fin = min(_t2, (_hh + 1) * 60)
+                    if _fin <= _ini:
+                        continue
+                    _fr = (_fin - _ini) / _dt
+                    _acc.append({'Fecha': _fe, 'Hora': _hh % 24,
+                                 'Km': _dkm * _fr, 'TrenKm': _dkm * _fr * _mult})
+    if not _acc:
+        return pd.DataFrame(columns=['Fecha', 'Hora', 'Km', 'TrenKm'])
+    return pd.DataFrame(_acc).groupby(['Fecha', 'Hora'], as_index=False).agg({'Km': 'sum', 'TrenKm': 'sum'})
+
+
 def _orden_serv_key(s):
     s = str(s)
     if '→' not in s: return (9, 99, s)
@@ -3525,6 +3579,62 @@ if _seccion == _SECCIONES[6]:
             with _cb:
                 st.markdown("**Resumen (totales)**")
                 _st_df(_det.groupby(['Tipo de servicio', 'Tipo de tren', 'Composicion']).size().reset_index(name='Servicios'), use_container_width=True, hide_index=True)
+    # ===== Kilometraje por hora del día (desde las horas de paso del THDR) =====
+    st.divider()
+    st.markdown("#### 🕐 Kilometraje por hora del día")
+    _pth_h = [d for d in [df_thdr_v1, df_thdr_v2] if d is not None and not getattr(d, 'empty', True)]
+    _kmh = km_por_hora_thdr(_pth_h) if _pth_h else pd.DataFrame()
+    if _kmh.empty:
+        st.info("No hay horas de paso por estación en el THDR del período para repartir el kilometraje.")
+    else:
+        _met_h = st.radio("Métrica", ["Km recorrido", "Tren-Km (×2 en dobles)"], horizontal=True, key="_kmh_met")
+        _cval = 'Km' if _met_h == "Km recorrido" else 'TrenKm'
+        _ndias_h = int(_kmh['Fecha'].nunique())
+        _tot_h = float(_kmh[_cval].sum())
+        _hh = _kmh.groupby('Hora', as_index=False)[_cval].sum()
+        _hh['Promedio diario'] = _hh[_cval] / max(_ndias_h, 1)
+        _pico = _hh.loc[_hh[_cval].idxmax()]
+        _k1h, _k2h, _k3h, _k4h = st.columns(4)
+        _k1h.metric("Total del período", f"{_ncl(_tot_h, 0)} km")
+        _k2h.metric("Días", _ncl(_ndias_h, 0))
+        _k3h.metric("Promedio por día", f"{_ncl(_tot_h / max(_ndias_h, 1), 0)} km")
+        _k4h.metric("Hora punta", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 0)} km/día", delta_color="off")
+        _fkh = px.bar(_hh, x='Hora', y='Promedio diario', color_discrete_sequence=['#005195'])
+        _fkh.update_traces(hovertemplate='%{x}:00 — %{y:,.1f} km<extra></extra>')
+        _fkh.update_layout(height=340, margin=dict(t=10, b=0, l=0, r=0),
+                           yaxis_title=f"{_cval if _cval == 'Km' else 'Tren-Km'} promedio por día",
+                           xaxis_title='Hora del día',
+                           xaxis=dict(tickmode='linear', dtick=1, range=[-0.5, 23.5]))
+        _pc(_fkh, use_container_width=True, config={'locale': 'es'})
+        st.caption("El kilometraje de cada viaje se reparte en la hora en que efectivamente se recorrió, según las horas de paso por cada estación del THDR. Si un tramo entre dos estaciones cruza de una hora a otra, los km se prorratean por el tiempo que estuvo en cada una. La suma de todas las horas da exactamente el kilometraje total del THDR.")
+        if _ndias_h > 1:
+            with st.expander("Ver detalle por día y hora", expanded=False):
+                _piv_h = _kmh.pivot_table(index='Fecha', columns='Hora', values=_cval, aggfunc='sum').fillna(0.0)
+                _fhm = px.imshow(_piv_h.values,
+                                 x=[f"{int(h):02d}" for h in _piv_h.columns],
+                                 y=[d.strftime('%d-%m') for d in _piv_h.index],
+                                 color_continuous_scale='Blues', aspect='auto',
+                                 labels=dict(x="Hora", y="Día", color="km"))
+                _fhm.update_layout(height=max(280, 22 * len(_piv_h) + 90), margin=dict(t=10, b=0, l=0, r=0))
+                _pc(_fhm, use_container_width=True, config={'locale': 'es'})
+                _tab_h = _piv_h.reset_index()
+                _tab_h['Fecha'] = pd.to_datetime(_tab_h['Fecha']).dt.strftime('%d-%m-%Y')
+                _tab_h.columns = ['Fecha'] + [f"{int(c):02d}:00" for c in _piv_h.columns]
+                _tab_h['Total'] = _piv_h.sum(axis=1).values
+                for _c in _tab_h.columns[1:]:
+                    _tab_h[_c] = _tab_h[_c].map(lambda _v: _ncl(_v, 1))
+                _st_df(_tab_h, use_container_width=True, hide_index=True)
+        _buf_h = BytesIO()
+        with pd.ExcelWriter(_buf_h, engine='openpyxl') as _w:
+            _ex = _kmh.copy()
+            _ex['Fecha'] = pd.to_datetime(_ex['Fecha']).dt.strftime('%d-%m-%Y')
+            _ex.to_excel(_w, sheet_name='Km por hora', index=False)
+            _hh.to_excel(_w, sheet_name='Resumen por hora', index=False)
+        st.download_button("⬇️ Descargar kilometraje por hora", data=_buf_h.getvalue(),
+                           file_name="km_por_hora_thdr.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="_dl_kmh")
+
     st.divider()
     st.markdown("#### Datos THDR crudos")
     c_v1, c_v2 = st.columns(2)
