@@ -2102,15 +2102,25 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _c_area = _col_oit('AREA')
                 _c_sist = _col_oit('SISTEMA')
                 _c_trab = _col_oit('TRABAJO', 'DESCRIP', 'DETALLE', 'GLOSA')
+                _c_ot = _col_oit('OIT', 'NUMERO', 'FOLIO', 'ORDEN')
+                _c_eq = _col_oit('EQUIPO', 'UNIDAD', 'MOVIL', 'SERIE', 'FLOTA')
+                # Fecha de cierre: primero la que tenga FECHA+CIERRE (evita "Comentarios cierre",
+                # que es texto). Si no, cualquier columna de fecha con hora que diga cierre/fin.
                 _c_cierre = None
                 for _c in _do.columns:
-                    if 'CIERRE' in _norm(_c):
+                    _cn = _norm(_c)
+                    if ('FECHA' in _cn or 'F.' in _cn) and ('CIERRE' in _cn or 'CIERR' in _cn or 'TERMINO' in _cn or 'FIN' in _cn):
                         _c_cierre = _c
                         break
                 if _c_cierre is None:
-                    _c_cierre = _col_oit('CIERR', 'TERMINO', 'FIN')
-                _c_ot = _col_oit('OIT', 'NUMERO', 'FOLIO', 'ORDEN')
-                _c_eq = _col_oit('EQUIPO', 'UNIDAD', 'MOVIL', 'SERIE', 'FLOTA')
+                    for _c in _do.columns:
+                        _cn = _norm(_c)
+                        if 'CIERRE' in _cn and 'COMENTARIO' not in _cn and 'RESPONSABLE' not in _cn and 'USUARIO' not in _cn:
+                            # que sea parseable como fecha antes de aceptarla
+                            _try = pd.to_datetime(_do[_c], errors='coerce', dayfirst=True)
+                            if _try.notna().sum() > 0:
+                                _c_cierre = _c
+                                break
 
                 _txt_sist = _do[_c_sist].astype(str) if _c_sist else pd.Series([''] * len(_do), index=_do.index)
                 _txt_trab = _do[_c_trab].astype(str) if _c_trab else pd.Series([''] * len(_do), index=_do.index)
@@ -2120,8 +2130,15 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _es_sfe = _txt_all.str.contains('SFE', na=False)
                 # Área = Material Rodante (si no hay columna de área, no se filtra por área)
                 _es_mr = _do[_c_area].map(_norm).str.contains('MATERIAL RODANTE', na=False) if _c_area else pd.Series([True] * len(_do), index=_do.index)
-                # Fecha y hora de cierre
-                _fc = pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True) if _c_cierre else pd.Series([pd.NaT] * len(_do), index=_do.index)
+                # Fecha y hora de cierre (formato típico "dd-mm-aaaa HH:MM")
+                if _c_cierre:
+                    _fc = pd.to_datetime(_do[_c_cierre], format='%d-%m-%Y %H:%M', errors='coerce')
+                    if _fc.isna().all():
+                        _fc = pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True)
+                    else:
+                        _fc = _fc.fillna(pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True))
+                else:
+                    _fc = pd.Series([pd.NaT] * len(_do), index=_do.index)
                 _hora_c = _fc.dt.hour + _fc.dt.minute / 60.0
                 _es_madrugada = (_hora_c >= _OIT_H_INI) & (_hora_c < _OIT_H_FIN)
                 _en_rango = _fc.dt.date.map(lambda _d: (pd.notna(_d) and start_date <= _d <= end_date))
