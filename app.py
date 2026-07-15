@@ -2128,8 +2128,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _txt_all = (_txt_sist + ' ' + _txt_trab + ' ' + _txt_eq).map(_norm)
                 # SFE en cualquier parte del texto (pegado o separado): "SFE", "SFE412", "SFE 413"…
                 _es_sfe = _txt_all.str.contains('SFE', na=False)
-                # Área = Material Rodante (si no hay columna de área, no se filtra por área)
-                _es_mr = _do[_c_area].map(_norm).str.contains('MATERIAL RODANTE', na=False) if _c_area else pd.Series([True] * len(_do), index=_do.index)
+                # Área: se registra a qué área pertenece cada orden, pero NO se filtra por ella.
+                # Las pruebas de SFE de madrugada pueden estar en Material Rodante, Vías u otra área.
+                _area_val = _do[_c_area].astype(str) if _c_area else pd.Series(['(sin área)'] * len(_do), index=_do.index)
                 # Fecha y hora de cierre (formato típico "dd-mm-aaaa HH:MM")
                 if _c_cierre:
                     _fc = pd.to_datetime(_do[_c_cierre], format='%d-%m-%Y %H:%M', errors='coerce')
@@ -2142,7 +2143,8 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _hora_c = _fc.dt.hour + _fc.dt.minute / 60.0
                 _es_madrugada = (_hora_c >= _OIT_H_INI) & (_hora_c < _OIT_H_FIN)
                 _en_rango = _fc.dt.date.map(lambda _d: (pd.notna(_d) and start_date <= _d <= end_date))
-                _sel = _es_mr & _es_sfe & _fc.notna() & _es_madrugada & _en_rango
+                # Filtro: SFE + fecha de cierre en madrugada + dentro del rango (sin filtrar por área)
+                _sel = _es_sfe & _fc.notna() & _es_madrugada & _en_rango
                 # Diagnóstico: cuántas filas sobreviven a cada filtro
                 _oit_diag[f.name] = {
                     'error': None,
@@ -2151,7 +2153,6 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                     'col_area': _c_area, 'col_sistema': _c_sist, 'col_trabajos': _c_trab,
                     'col_cierre': _c_cierre,
                     'filas': len(_do),
-                    'area_mr': int(_es_mr.sum()),
                     'con_sfe': int(_es_sfe.sum()),
                     'fecha_valida': int(_fc.notna().sum()),
                     'madrugada': int((_fc.notna() & _es_madrugada).sum()),
@@ -2168,8 +2169,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                         'Hora_n': float(_hora_c.loc[_i]),
                         'SFE': (f"SFE {_n_sfe}" if pd.notna(_n_sfe) else "SFE (sin número)"),
                         'N_SFE': _n_sfe,
+                        'Área': str(_area_val.loc[_i]).strip(),
                         'Sistema': (str(_do.at[_i, _c_sist])[:80] if _c_sist else ''),
-                        'Trabajos': (str(_do.at[_i, _c_trab])[:120] if _c_trab else ''),
+                        'Trabajos': (str(_do.at[_i, _c_trab])[:150] if _c_trab else ''),
                         'OT': (str(_do.at[_i, _c_ot]) if _c_ot else '')})
             except Exception as _e:
                 _oit_diag[f.name] = {'error': str(_e)}
@@ -3743,8 +3745,9 @@ if _seccion == _SECCIONES[4]:
     st.markdown("### 🚄 Circulación nocturna de SFE")
     if df_oit is None or df_oit.empty:
         st.info("Carga el archivo **11. Consulta OIT** para detectar la circulación nocturna de trenes SFE. "
-                "Se toman las órdenes con **Área = Material Rodante**, que mencionen **SFE** en Sistema o en Trabajos, "
-                "y cuya **fecha de cierre** caiga entre las **00:00 y las 07:00**. La fecha considerada es la de cierre.")
+                "Se toman las órdenes que mencionen **SFE** en Sistema o en Trabajos y cuya **fecha de cierre** "
+                "caiga entre las **00:00 y las 07:00**, sin importar el área (se registra a qué área pertenece cada una). "
+                "La fecha considerada es la de cierre.")
         # Si se cargó archivo pero no salió nada, mostrar el diagnóstico de dónde se cayeron las filas
         _diag = _oit_diag if _oit_diag else (df_oit.attrs.get('diag', {}) if df_oit is not None else {})
         if _diag:
@@ -3764,7 +3767,6 @@ if _seccion == _SECCIONES[4]:
                     _st_df(_cols_id, use_container_width=True, hide_index=True)
                     _emb = pd.DataFrame([
                         {'Filtro': 'Total de filas', 'Filas que pasan': _d.get('filas', 0)},
-                        {'Filtro': 'Área = Material Rodante', 'Filas que pasan': _d.get('area_mr', 0)},
                         {'Filtro': 'Mencionan SFE', 'Filas que pasan': _d.get('con_sfe', 0)},
                         {'Filtro': 'Fecha de cierre válida', 'Filas que pasan': _d.get('fecha_valida', 0)},
                         {'Filtro': 'Cierre entre 00:00 y 07:00', 'Filas que pasan': _d.get('madrugada', 0)},
@@ -3788,6 +3790,8 @@ if _seccion == _SECCIONES[4]:
     else:
         _oit = df_oit.copy()
         _oit['Fecha'] = pd.to_datetime(_oit['Fecha']).dt.normalize()
+        if 'Área' not in _oit.columns:
+            _oit['Área'] = '(sin área)'
         _n_noches = int(_oit['Fecha'].nunique())
         _n_ot = len(_oit)
         _o1, _o2, _o3, _o4 = st.columns(4)
@@ -3796,6 +3800,19 @@ if _seccion == _SECCIONES[4]:
         _o3.metric("Ventana", "00:00 – 07:00", "por fecha de cierre", delta_color="off")
         _uni_sfe = sorted(_oit.loc[_oit['N_SFE'].notna(), 'N_SFE'].astype(int).unique().tolist())
         _o4.metric("Unidades SFE", _ncl(len(_uni_sfe), 0), ", ".join(str(_u) for _u in _uni_sfe) if _uni_sfe else "sin número", delta_color="off")
+
+        # Desglose por área (registro de a qué área pertenece cada orden)
+        _por_area = _oit.groupby('Área', as_index=False).agg(**{'Órdenes': ('Área', 'size'), 'Noches': ('Fecha', 'nunique')}).sort_values('Órdenes', ascending=False)
+        st.markdown("**Órdenes por área**")
+        _cae, _cag = st.columns([1.2, 1])
+        with _cae:
+            _st_df(_por_area, use_container_width=True, hide_index=True)
+        with _cag:
+            _fare = px.pie(_por_area, names='Área', values='Órdenes', hole=0.45,
+                           color_discrete_sequence=['#005195', '#E85500', '#2CA02C', '#9467BD', '#8C564B'])
+            _fare.update_traces(hovertemplate='%{label}: %{value} órdenes<extra></extra>', textinfo='label+value')
+            _fare.update_layout(height=240, margin=dict(t=10, b=0, l=0, r=0), showlegend=False)
+            _pc(_fare, use_container_width=True, config={'locale': 'es'})
 
         _cs1, _cs2 = st.columns(2)
         with _cs1:
@@ -3845,10 +3862,10 @@ if _seccion == _SECCIONES[4]:
                     st.caption("Consumo total de la ventana nocturna (00:00–05:00) de cada día, separando las noches en que hubo órdenes SFE cerradas de madrugada. Si la mediana con SFE es claramente mayor, la circulación nocturna de estos trenes está aportando consumo extra sobre la base.")
 
         with st.expander(f"Ver las {_n_ot} órdenes detectadas", expanded=False):
-            _tab_o = _oit[['Fecha', 'Hora cierre', 'SFE', 'Sistema', 'Trabajos', 'OT']].copy()
+            _tab_o = _oit[['Fecha', 'Hora cierre', 'SFE', 'Área', 'Sistema', 'Trabajos', 'OT']].copy()
             _tab_o['Fecha'] = pd.to_datetime(_tab_o['Fecha']).dt.strftime('%d-%m-%Y')
             _st_df(_tab_o, use_container_width=True, hide_index=True)
-            st.caption("Criterio: Área = Material Rodante · «SFE» en la columna Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha mostrada es la de cierre.")
+            st.caption("Criterio: «SFE» en la columna Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha mostrada es la de cierre. Se registra el área de cada orden (Material Rodante, Vías u otra); no se filtra por área, porque las pruebas de SFE de madrugada pueden estar clasificadas en distintas áreas.")
         _buf_o = BytesIO()
         with pd.ExcelWriter(_buf_o, engine='openpyxl') as _w:
             _ex_o = _oit.drop(columns=['_hbin'], errors='ignore').copy()
