@@ -2385,6 +2385,7 @@ if not df_ops.empty and _seccion != _SECCIONES[6]:
     df_viajes = _filt_df(df_viajes, 'Fecha')
     df_ide_lb = _filt_df(df_ide_lb, 'Fecha')
     df_incid = _filt_df(df_incid, 'Fecha')
+    df_oit = _filt_df(df_oit, 'Fecha')
     df_serv_tipo = _filt_df(df_serv_tipo, 'Fecha')
     df_pax_tipo = _filt_df(df_pax_tipo, 'Fecha')
     all_prmte_full = _filt_regs(all_prmte_full)
@@ -3862,16 +3863,34 @@ if _seccion == _SECCIONES[4]:
                     st.caption("Consumo total de la ventana nocturna (00:00–05:00) de cada día, separando las noches en que hubo órdenes SFE cerradas de madrugada. Si la mediana con SFE es claramente mayor, la circulación nocturna de estos trenes está aportando consumo extra sobre la base.")
 
         with st.expander(f"Ver las {_n_ot} órdenes detectadas", expanded=True):
-            _tab_o = _oit[['Fecha', 'Hora cierre', 'SFE', 'Área', 'Sistema', 'Trabajos', 'OT']].copy()
-            _tab_o['_fkey'] = pd.to_datetime(_tab_o['Fecha']).dt.normalize()
-            # Consumo real de cada noche (00–05) + mediana de 2025 (línea base) → tracción SFE.
-            # Se usa el PRMTE COMPLETO (sin el filtro de fechas), porque las noches con SFE
-            # pueden caer fuera del rango que tengas activo en el filtro de arriba.
+            # Consolidar por fecha: si hay 2+ órdenes SFE el mismo día, el consumo nocturno
+            # de esa noche es UNO SOLO (no se repite por cada orden). Se juntan las unidades,
+            # las áreas y los trabajos de esa noche en una fila, y el consumo/tracción cuenta
+            # una vez por noche.
+            def _join_unicos(_s):
+                _vals = [str(_v).strip() for _v in _s if pd.notna(_v) and str(_v).strip() not in ('', 'nan')]
+                _out = []
+                for _v in _vals:
+                    if _v not in _out:
+                        _out.append(_v)
+                return " · ".join(_out)
+            _oit_d = _oit.copy()
+            _oit_d['_fkey'] = pd.to_datetime(_oit_d['Fecha']).dt.normalize()
+            _cons = _oit_d.groupby('_fkey', as_index=False).agg(**{
+                'Órdenes': ('SFE', 'size'),
+                'SFE': ('SFE', _join_unicos),
+                'Área': ('Área', _join_unicos),
+                'Hora cierre': ('Hora cierre', _join_unicos),
+                'Trabajos': ('Trabajos', _join_unicos)})
+            _cons = _cons.sort_values('_fkey').reset_index(drop=True)
+            # Consumo real de cada NOCHE (00–05) + mediana de 2025 (línea base) → tracción SFE.
+            # Se usa el PRMTE COMPLETO (sin el filtro de fechas) para el consumo de cada noche.
             _prmte_para_noche = st.session_state.get('all_prmte_full', []) or all_prmte_full
             _prmte_2025_full = st.session_state.get('all_prmte_2025', []) or all_prmte_2025
             _mediana_lb = None
             _src_lb = None
             _motivo_falta = None
+            _franjas_lb = None
             if not _prmte_para_noche:
                 _motivo_falta = "No hay datos de **PRMTE (energía cada 15 min)** cargados. Sube ese archivo y aprieta «🔄 Cargar / actualizar datos» para ver el consumo y la tracción de los SFE."
             else:
@@ -3882,11 +3901,8 @@ if _seccion == _SECCIONES[4]:
                     _noche_kwh = _hdt.groupby('Fecha', as_index=False)['Consumo'].sum().rename(columns={'Consumo': '_ckwh'})
                     _noche_kwh['Fecha'] = pd.to_datetime(_noche_kwh['Fecha']).dt.normalize()
                     _map_kwh = _noche_kwh.set_index('Fecha')['_ckwh'].to_dict()
-                    _tab_o['Consumo (00–05)'] = _tab_o['_fkey'].map(_map_kwh)
-                    # Línea base: TOTAL construido por franja horaria — se toma la mediana de
-                    # cada franja (00–01, 01–02, 02–03, 03–04, 04–05) en 2025 y se suman las 5.
-                    # (No es lo mismo que la mediana de los totales por noche: la mediana no es aditiva.)
-                    _franjas_lb = None
+                    _cons['Consumo (00–05)'] = _cons['_fkey'].map(_map_kwh)
+                    # Línea base: mediana de cada franja (00–01 … 04–05) en 2025, sumadas.
                     if _prmte_2025_full:
                         _bg25, _mh25b, _mhj25b, _mj25b, _mq25b, _mqj25b, _hd25b = _base_noche_2025(_prmte_2025_full, df_ops)
                         if _bg25 is not None and not _mh25b.empty:
@@ -3897,15 +3913,20 @@ if _seccion == _SECCIONES[4]:
                         _mediana_lb = float(_mht['Mediana'].sum()) if _mht is not None and not _mht.empty else float(_noche_kwh['_ckwh'].median())
                         _franjas_lb = _mht.copy() if _mht is not None and not _mht.empty else None
                         _src_lb = "período cargado"
-                    _tab_o['Mediana 2025 (00–05)'] = _mediana_lb
-                    _tab_o['Tracción SFE'] = _tab_o['Consumo (00–05)'] - _mediana_lb
+                    _cons['Mediana 2025 (00–05)'] = _mediana_lb
+                    _cons['Tracción SFE'] = _cons['Consumo (00–05)'] - _mediana_lb
+            _n_noches_cons = len(_cons)
+            _tab_o = _cons.copy()
+            _tab_o.insert(0, 'Fecha', pd.to_datetime(_tab_o['_fkey']).dt.strftime('%d-%m-%Y'))
             _tab_o = _tab_o.drop(columns=['_fkey'])
-            _tab_o['Fecha'] = pd.to_datetime(_tab_o['Fecha']).dt.strftime('%d-%m-%Y')
-            _tab_fmt = _tab_o.copy()
+            _cols_show = ['Fecha', 'Órdenes', 'SFE', 'Área', 'Hora cierre'] + \
+                         [c for c in ['Consumo (00–05)', 'Mediana 2025 (00–05)', 'Tracción SFE'] if c in _tab_o.columns] + ['Trabajos']
+            _tab_fmt = _tab_o[_cols_show].copy()
             for _c in ['Consumo (00–05)', 'Mediana 2025 (00–05)', 'Tracción SFE']:
                 if _c in _tab_fmt.columns:
                     _tab_fmt[_c] = _tab_fmt[_c].map(lambda _v: _ncl(_v, 1) if pd.notna(_v) else '—')
             _st_df(_tab_fmt, use_container_width=True, hide_index=True)
+            st.caption(f"Una fila por **noche** ({_n_noches_cons} noches): si hubo varias órdenes SFE el mismo día, el consumo y la tracción cuentan una sola vez (la columna «Órdenes» indica cuántas hubo esa noche).")
             if _motivo_falta:
                 st.warning(_motivo_falta)
             if _mediana_lb is not None and 'Tracción SFE' in _tab_o.columns:
@@ -3913,32 +3934,32 @@ if _seccion == _SECCIONES[4]:
                 _n_con = int((pd.to_numeric(_tab_o['Consumo (00–05)'], errors='coerce').notna()).sum())
                 _tt1, _tt2, _tt3 = st.columns(3)
                 _tt1.metric(f"Mediana nocturna {_src_lb} (00–05)", f"{_ncl(_mediana_lb, 1)} kWh", "línea base", delta_color="off")
-                _tt2.metric("Tracción SFE total", f"{_ncl(_tot_trac, 0)} kWh", f"{_n_con} de {_n_ot} noches con dato", delta_color="off")
+                _tt2.metric("Tracción SFE total", f"{_ncl(_tot_trac, 0)} kWh", f"{_n_con} de {_n_noches_cons} noches con dato", delta_color="off")
                 _tt3.metric("Tracción SFE promedio/noche", f"{_ncl(_tot_trac / max(_n_con, 1), 0)} kWh", delta_color="off")
                 if _src_lb != "2025":
                     st.warning("No hay PRMTE de **2025** cargado: la línea base usa la mediana del período cargado. Sube el PRMTE de 2025 para anclar la tracción SFE a tu año base.")
-                # Desglose de cómo se compone la mediana total (suma de las medianas por franja)
+                if _n_con < _n_noches_cons:
+                    st.caption(f"⚠️ {_n_noches_cons - _n_con} noche(s) con SFE no tienen consumo PRMTE en esas fechas (aparecen con «—»). Verifica que el PRMTE cubra esos días.")
                 if _franjas_lb is not None and not _franjas_lb.empty:
                     with st.expander("Ver la mediana por franja horaria que compone la línea base", expanded=False):
                         _fr_lbl = {0: '00–01', 1: '01–02', 2: '02–03', 3: '03–04', 4: '04–05'}
                         _fb = _franjas_lb.copy()
                         _fb['Franja'] = _fb['Hora_n'].map(_fr_lbl)
                         _fb = _fb[['Franja', 'Mediana']].copy()
-                        _fila_s = pd.DataFrame([{'Franja': 'TOTAL (00–05)', 'Mediana': _mediana_lb}])
-                        _fb = pd.concat([_fb, _fila_s], ignore_index=True)
+                        _fb = pd.concat([_fb, pd.DataFrame([{'Franja': 'TOTAL (00–05)', 'Mediana': _mediana_lb}])], ignore_index=True)
                         _fb['Mediana'] = _fb['Mediana'].map(lambda _v: _ncl(_v, 1))
                         _st_df(_fb.rename(columns={'Mediana': f'Mediana {_src_lb} (kWh)'}), use_container_width=True, hide_index=True)
-                        st.caption("La línea base es la SUMA de las medianas de cada franja (mediana de 00–01 + mediana de 01–02 + … + mediana de 04–05), no la mediana de los totales por noche. Así el total se construye franja por franja.")
-                if _n_con < _n_ot:
-                    st.caption(f"⚠️ {_n_ot - _n_con} noche(s) con SFE no tienen consumo PRMTE en esas fechas (aparecen con «—»). Verifica que el PRMTE cubra esos días.")
-                st.caption("**Consumo (00–05)**: energía real total de esa madrugada. **Mediana 2025 (00–05)**: mediana del consumo nocturno (00–05) de tu año base 2025 — la línea base. **Tracción SFE** = Consumo − Mediana 2025: el consumo estimado de tracción del SFE esa noche.")
+                        st.caption("La línea base es la SUMA de las medianas de cada franja (mediana de 00–01 + mediana de 01–02 + … + mediana de 04–05), no la mediana de los totales por noche.")
+                st.caption("**Consumo (00–05)**: energía real total de esa madrugada (una vez por noche). **Mediana 2025 (00–05)**: suma de las medianas por franja de tu año base 2025 — la línea base. **Tracción SFE** = Consumo − Mediana 2025: el consumo estimado de tracción del SFE esa noche.")
             else:
                 st.caption("Criterio: «SFE» en Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha es la de cierre; se registra el área de cada orden.")
         _buf_o = BytesIO()
         with pd.ExcelWriter(_buf_o, engine='openpyxl') as _w:
-            _ex_o = _oit.drop(columns=['_hbin'], errors='ignore').copy()
+            _ex_o = _oit.drop(columns=['_hbin', '_fkey'], errors='ignore').copy()
             _ex_o['Fecha'] = pd.to_datetime(_ex_o['Fecha']).dt.strftime('%d-%m-%Y')
-            _ex_o.to_excel(_w, sheet_name='SFE nocturno', index=False)
+            _ex_o.to_excel(_w, sheet_name='Órdenes SFE', index=False)
+            if '_tab_o' in dir() and not _tab_o.empty:
+                _tab_o[[c for c in _cols_show if c in _tab_o.columns]].to_excel(_w, sheet_name='Por noche (consolidado)', index=False)
         st.download_button("⬇️ Descargar circulación nocturna SFE", data=_buf_o.getvalue(),
                            file_name="circulacion_nocturna_sfe.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
