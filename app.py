@@ -3883,14 +3883,19 @@ if _seccion == _SECCIONES[4]:
                     _noche_kwh['Fecha'] = pd.to_datetime(_noche_kwh['Fecha']).dt.normalize()
                     _map_kwh = _noche_kwh.set_index('Fecha')['_ckwh'].to_dict()
                     _tab_o['Consumo (00–05)'] = _tab_o['_fkey'].map(_map_kwh)
-                    # Línea base: mediana del consumo nocturno (00–05) de 2025
+                    # Línea base: TOTAL construido por franja horaria — se toma la mediana de
+                    # cada franja (00–01, 01–02, 02–03, 03–04, 04–05) en 2025 y se suman las 5.
+                    # (No es lo mismo que la mediana de los totales por noche: la mediana no es aditiva.)
+                    _franjas_lb = None
                     if _prmte_2025_full:
                         _bg25, _mh25b, _mhj25b, _mj25b, _mq25b, _mqj25b, _hd25b = _base_noche_2025(_prmte_2025_full, df_ops)
-                        if _bg25 is not None and not _hd25b.empty:
-                            _mediana_lb = float(_hd25b.groupby('Fecha')['Consumo'].sum().median())
+                        if _bg25 is not None and not _mh25b.empty:
+                            _mediana_lb = float(_mh25b['Mediana'].sum())
+                            _franjas_lb = _mh25b.copy()
                             _src_lb = "2025"
                     if _mediana_lb is None:
-                        _mediana_lb = float(_noche_kwh['_ckwh'].median())
+                        _mediana_lb = float(_mht['Mediana'].sum()) if _mht is not None and not _mht.empty else float(_noche_kwh['_ckwh'].median())
+                        _franjas_lb = _mht.copy() if _mht is not None and not _mht.empty else None
                         _src_lb = "período cargado"
                     _tab_o['Mediana 2025 (00–05)'] = _mediana_lb
                     _tab_o['Tracción SFE'] = _tab_o['Consumo (00–05)'] - _mediana_lb
@@ -3912,6 +3917,18 @@ if _seccion == _SECCIONES[4]:
                 _tt3.metric("Tracción SFE promedio/noche", f"{_ncl(_tot_trac / max(_n_con, 1), 0)} kWh", delta_color="off")
                 if _src_lb != "2025":
                     st.warning("No hay PRMTE de **2025** cargado: la línea base usa la mediana del período cargado. Sube el PRMTE de 2025 para anclar la tracción SFE a tu año base.")
+                # Desglose de cómo se compone la mediana total (suma de las medianas por franja)
+                if _franjas_lb is not None and not _franjas_lb.empty:
+                    with st.expander("Ver la mediana por franja horaria que compone la línea base", expanded=False):
+                        _fr_lbl = {0: '00–01', 1: '01–02', 2: '02–03', 3: '03–04', 4: '04–05'}
+                        _fb = _franjas_lb.copy()
+                        _fb['Franja'] = _fb['Hora_n'].map(_fr_lbl)
+                        _fb = _fb[['Franja', 'Mediana']].copy()
+                        _fila_s = pd.DataFrame([{'Franja': 'TOTAL (00–05)', 'Mediana': _mediana_lb}])
+                        _fb = pd.concat([_fb, _fila_s], ignore_index=True)
+                        _fb['Mediana'] = _fb['Mediana'].map(lambda _v: _ncl(_v, 1))
+                        _st_df(_fb.rename(columns={'Mediana': f'Mediana {_src_lb} (kWh)'}), use_container_width=True, hide_index=True)
+                        st.caption("La línea base es la SUMA de las medianas de cada franja (mediana de 00–01 + mediana de 01–02 + … + mediana de 04–05), no la mediana de los totales por noche. Así el total se construye franja por franja.")
                 if _n_con < _n_ot:
                     st.caption(f"⚠️ {_n_ot - _n_con} noche(s) con SFE no tienen consumo PRMTE en esas fechas (aparecen con «—»). Verifica que el PRMTE cubra esos días.")
                 st.caption("**Consumo (00–05)**: energía real total de esa madrugada. **Mediana 2025 (00–05)**: mediana del consumo nocturno (00–05) de tu año base 2025 — la línea base. **Tracción SFE** = Consumo − Mediana 2025: el consumo estimado de tracción del SFE esa noche.")
