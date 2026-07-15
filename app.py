@@ -3861,11 +3861,41 @@ if _seccion == _SECCIONES[4]:
                     _pc(_fbx, use_container_width=True, config={'locale': 'es'})
                     st.caption("Consumo total de la ventana nocturna (00:00–05:00) de cada día, separando las noches en que hubo órdenes SFE cerradas de madrugada. Si la mediana con SFE es claramente mayor, la circulación nocturna de estos trenes está aportando consumo extra sobre la base.")
 
-        with st.expander(f"Ver las {_n_ot} órdenes detectadas", expanded=False):
+        with st.expander(f"Ver las {_n_ot} órdenes detectadas", expanded=True):
             _tab_o = _oit[['Fecha', 'Hora cierre', 'SFE', 'Área', 'Sistema', 'Trabajos', 'OT']].copy()
+            # Consumo nocturno real (00–05) de cada noche + mediana del período → tracción SFE
+            _mediana_noche = None
+            if all_prmte_full:
+                _bgt, _mht, _mhjt, _mjt, _mqt, _mqjt, _hdt = _base_noche_2025(all_prmte_full, df_ops)
+                if _bgt is not None and not _hdt.empty:
+                    # Consumo total de la ventana 00–05 por noche
+                    _noche_kwh = _hdt.groupby('Fecha', as_index=False)['Consumo'].sum().rename(columns={'Consumo': '_ckwh'})
+                    _noche_kwh['Fecha'] = pd.to_datetime(_noche_kwh['Fecha']).dt.normalize()
+                    # Mediana del período: mediana del consumo nocturno de las noches SIN SFE
+                    # (línea base sin circulación de SFE, para aislar su aporte)
+                    _fechas_sfe_set = set(pd.to_datetime(_oit['Fecha']).dt.normalize())
+                    _sin_sfe = _noche_kwh[~_noche_kwh['Fecha'].isin(_fechas_sfe_set)]
+                    _mediana_noche = float(_sin_sfe['_ckwh'].median()) if len(_sin_sfe) else float(_noche_kwh['_ckwh'].median())
+                    _map_kwh = _noche_kwh.set_index('Fecha')['_ckwh'].to_dict()
+                    _tab_o['Consumo noche (00–05)'] = pd.to_datetime(_tab_o['Fecha']).dt.normalize().map(_map_kwh)
+                    _tab_o['Mediana período (00–05)'] = _mediana_noche
+                    _tab_o['Tracción SFE'] = _tab_o['Consumo noche (00–05)'] - _mediana_noche
             _tab_o['Fecha'] = pd.to_datetime(_tab_o['Fecha']).dt.strftime('%d-%m-%Y')
-            _st_df(_tab_o, use_container_width=True, hide_index=True)
-            st.caption("Criterio: «SFE» en la columna Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha mostrada es la de cierre. Se registra el área de cada orden (Material Rodante, Vías u otra); no se filtra por área, porque las pruebas de SFE de madrugada pueden estar clasificadas en distintas áreas.")
+            _tab_fmt = _tab_o.copy()
+            for _c in ['Consumo noche (00–05)', 'Mediana período (00–05)', 'Tracción SFE']:
+                if _c in _tab_fmt.columns:
+                    _tab_fmt[_c] = _tab_fmt[_c].map(lambda _v: _ncl(_v, 1) if pd.notna(_v) else '—')
+            _st_df(_tab_fmt, use_container_width=True, hide_index=True)
+            if _mediana_noche is not None and 'Tracción SFE' in _tab_o.columns:
+                _tot_trac = float(pd.to_numeric(_tab_o['Tracción SFE'], errors='coerce').clip(lower=0).sum())
+                _tt1, _tt2 = st.columns(2)
+                _tt1.metric("Mediana nocturna del período (00–05)", f"{_ncl(_mediana_noche, 1)} kWh",
+                            "noches sin SFE", delta_color="off")
+                _tt2.metric("Tracción SFE total estimada", f"{_ncl(_tot_trac, 0)} kWh",
+                            f"{len([v for v in _tab_o['Tracción SFE'] if pd.notna(v) and v > 0])} noches con exceso", delta_color="off")
+                st.caption("**Consumo noche (00–05)**: energía real de esa madrugada. **Mediana período (00–05)**: mediana del consumo nocturno de las noches SIN circulación de SFE (línea base). **Tracción SFE** = consumo de la noche − mediana: la energía extra atribuible a la circulación del SFE esa noche. Un valor cercano a cero indica que el SFE consumió poco o que esa noche no se separa de una noche normal.")
+            else:
+                st.caption("Criterio: «SFE» en Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha es la de cierre; se registra el área de cada orden. Carga el PRMTE para ver el consumo de tracción de los SFE.")
         _buf_o = BytesIO()
         with pd.ExcelWriter(_buf_o, engine='openpyxl') as _w:
             _ex_o = _oit.drop(columns=['_hbin'], errors='ignore').copy()
