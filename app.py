@@ -3863,39 +3863,60 @@ if _seccion == _SECCIONES[4]:
 
         with st.expander(f"Ver las {_n_ot} órdenes detectadas", expanded=True):
             _tab_o = _oit[['Fecha', 'Hora cierre', 'SFE', 'Área', 'Sistema', 'Trabajos', 'OT']].copy()
-            # Consumo nocturno real (00–05) de cada noche + mediana del período → tracción SFE
-            _mediana_noche = None
-            if all_prmte_full:
-                _bgt, _mht, _mhjt, _mjt, _mqt, _mqjt, _hdt = _base_noche_2025(all_prmte_full, df_ops)
-                if _bgt is not None and not _hdt.empty:
-                    # Consumo total de la ventana 00–05 por noche
+            _tab_o['_fkey'] = pd.to_datetime(_tab_o['Fecha']).dt.normalize()
+            # Consumo real de cada noche (00–05) + mediana de 2025 (línea base) → tracción SFE.
+            # Se usa el PRMTE COMPLETO (sin el filtro de fechas), porque las noches con SFE
+            # pueden caer fuera del rango que tengas activo en el filtro de arriba.
+            _prmte_para_noche = st.session_state.get('all_prmte_full', []) or all_prmte_full
+            _prmte_2025_full = st.session_state.get('all_prmte_2025', []) or all_prmte_2025
+            _mediana_lb = None
+            _src_lb = None
+            _motivo_falta = None
+            if not _prmte_para_noche:
+                _motivo_falta = "No hay datos de **PRMTE (energía cada 15 min)** cargados. Sube ese archivo y aprieta «🔄 Cargar / actualizar datos» para ver el consumo y la tracción de los SFE."
+            else:
+                _bgt, _mht, _mhjt, _mjt, _mqt, _mqjt, _hdt = _base_noche_2025(_prmte_para_noche, df_ops)
+                if _bgt is None or _hdt.empty:
+                    _motivo_falta = "El PRMTE cargado no tiene registros entre las 00:00 y las 05:00 para calcular el consumo nocturno."
+                else:
                     _noche_kwh = _hdt.groupby('Fecha', as_index=False)['Consumo'].sum().rename(columns={'Consumo': '_ckwh'})
                     _noche_kwh['Fecha'] = pd.to_datetime(_noche_kwh['Fecha']).dt.normalize()
-                    # Mediana del período: mediana del consumo nocturno de las noches SIN SFE
-                    # (línea base sin circulación de SFE, para aislar su aporte)
-                    _fechas_sfe_set = set(pd.to_datetime(_oit['Fecha']).dt.normalize())
-                    _sin_sfe = _noche_kwh[~_noche_kwh['Fecha'].isin(_fechas_sfe_set)]
-                    _mediana_noche = float(_sin_sfe['_ckwh'].median()) if len(_sin_sfe) else float(_noche_kwh['_ckwh'].median())
                     _map_kwh = _noche_kwh.set_index('Fecha')['_ckwh'].to_dict()
-                    _tab_o['Consumo noche (00–05)'] = pd.to_datetime(_tab_o['Fecha']).dt.normalize().map(_map_kwh)
-                    _tab_o['Mediana período (00–05)'] = _mediana_noche
-                    _tab_o['Tracción SFE'] = _tab_o['Consumo noche (00–05)'] - _mediana_noche
+                    _tab_o['Consumo (00–05)'] = _tab_o['_fkey'].map(_map_kwh)
+                    # Línea base: mediana del consumo nocturno (00–05) de 2025
+                    if _prmte_2025_full:
+                        _bg25, _mh25b, _mhj25b, _mj25b, _mq25b, _mqj25b, _hd25b = _base_noche_2025(_prmte_2025_full, df_ops)
+                        if _bg25 is not None and not _hd25b.empty:
+                            _mediana_lb = float(_hd25b.groupby('Fecha')['Consumo'].sum().median())
+                            _src_lb = "2025"
+                    if _mediana_lb is None:
+                        _mediana_lb = float(_noche_kwh['_ckwh'].median())
+                        _src_lb = "período cargado"
+                    _tab_o['Mediana 2025 (00–05)'] = _mediana_lb
+                    _tab_o['Tracción SFE'] = _tab_o['Consumo (00–05)'] - _mediana_lb
+            _tab_o = _tab_o.drop(columns=['_fkey'])
             _tab_o['Fecha'] = pd.to_datetime(_tab_o['Fecha']).dt.strftime('%d-%m-%Y')
             _tab_fmt = _tab_o.copy()
-            for _c in ['Consumo noche (00–05)', 'Mediana período (00–05)', 'Tracción SFE']:
+            for _c in ['Consumo (00–05)', 'Mediana 2025 (00–05)', 'Tracción SFE']:
                 if _c in _tab_fmt.columns:
                     _tab_fmt[_c] = _tab_fmt[_c].map(lambda _v: _ncl(_v, 1) if pd.notna(_v) else '—')
             _st_df(_tab_fmt, use_container_width=True, hide_index=True)
-            if _mediana_noche is not None and 'Tracción SFE' in _tab_o.columns:
+            if _motivo_falta:
+                st.warning(_motivo_falta)
+            if _mediana_lb is not None and 'Tracción SFE' in _tab_o.columns:
                 _tot_trac = float(pd.to_numeric(_tab_o['Tracción SFE'], errors='coerce').clip(lower=0).sum())
-                _tt1, _tt2 = st.columns(2)
-                _tt1.metric("Mediana nocturna del período (00–05)", f"{_ncl(_mediana_noche, 1)} kWh",
-                            "noches sin SFE", delta_color="off")
-                _tt2.metric("Tracción SFE total estimada", f"{_ncl(_tot_trac, 0)} kWh",
-                            f"{len([v for v in _tab_o['Tracción SFE'] if pd.notna(v) and v > 0])} noches con exceso", delta_color="off")
-                st.caption("**Consumo noche (00–05)**: energía real de esa madrugada. **Mediana período (00–05)**: mediana del consumo nocturno de las noches SIN circulación de SFE (línea base). **Tracción SFE** = consumo de la noche − mediana: la energía extra atribuible a la circulación del SFE esa noche. Un valor cercano a cero indica que el SFE consumió poco o que esa noche no se separa de una noche normal.")
+                _n_con = int((pd.to_numeric(_tab_o['Consumo (00–05)'], errors='coerce').notna()).sum())
+                _tt1, _tt2, _tt3 = st.columns(3)
+                _tt1.metric(f"Mediana nocturna {_src_lb} (00–05)", f"{_ncl(_mediana_lb, 1)} kWh", "línea base", delta_color="off")
+                _tt2.metric("Tracción SFE total", f"{_ncl(_tot_trac, 0)} kWh", f"{_n_con} de {_n_ot} noches con dato", delta_color="off")
+                _tt3.metric("Tracción SFE promedio/noche", f"{_ncl(_tot_trac / max(_n_con, 1), 0)} kWh", delta_color="off")
+                if _src_lb != "2025":
+                    st.warning("No hay PRMTE de **2025** cargado: la línea base usa la mediana del período cargado. Sube el PRMTE de 2025 para anclar la tracción SFE a tu año base.")
+                if _n_con < _n_ot:
+                    st.caption(f"⚠️ {_n_ot - _n_con} noche(s) con SFE no tienen consumo PRMTE en esas fechas (aparecen con «—»). Verifica que el PRMTE cubra esos días.")
+                st.caption("**Consumo (00–05)**: energía real total de esa madrugada. **Mediana 2025 (00–05)**: mediana del consumo nocturno (00–05) de tu año base 2025 — la línea base. **Tracción SFE** = Consumo − Mediana 2025: el consumo estimado de tracción del SFE esa noche.")
             else:
-                st.caption("Criterio: «SFE» en Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha es la de cierre; se registra el área de cada orden. Carga el PRMTE para ver el consumo de tracción de los SFE.")
+                st.caption("Criterio: «SFE» en Sistema o en Trabajos · fecha de cierre entre 00:00 y 07:00. La fecha es la de cierre; se registra el área de cada orden.")
         _buf_o = BytesIO()
         with pd.ExcelWriter(_buf_o, engine='openpyxl') as _w:
             _ex_o = _oit.drop(columns=['_hbin'], errors='ignore').copy()
