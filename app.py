@@ -5048,13 +5048,13 @@ if _seccion == _SECCIONES[11]:
                 _fr.append(f"{_c_d2s} {'servicio pasó' if _c_d2s == 1 else 'servicios pasaron'} de doble a simple en el tramo {_tramo}")
             _ls = int(round(_ls)); _ld = int(round(_ld))
             if _ls > 0:
-                _fr.append(f"se agregó {_ls} servicio{'s' if _ls > 1 else ''} simple{'s' if _ls > 1 else ''} en el tramo {_tramo}")
+                _fr.append(f"se {'agregó' if _ls == 1 else 'agregaron'} {_ls} servicio{'s' if _ls > 1 else ''} simple{'s' if _ls > 1 else ''} en el tramo {_tramo}")
             elif _ls < 0:
-                _fr.append(f"se quitó {-_ls} servicio{'s' if -_ls > 1 else ''} simple{'s' if -_ls > 1 else ''} en el tramo {_tramo}")
+                _fr.append(f"se {'suprimió' if -_ls == 1 else 'suprimieron'} {-_ls} servicio{'s' if -_ls > 1 else ''} simple{'s' if -_ls > 1 else ''} en el tramo {_tramo}")
             if _ld > 0:
-                _fr.append(f"se agregó {_ld} servicio{'s' if _ld > 1 else ''} doble{'s' if _ld > 1 else ''} en el tramo {_tramo}")
+                _fr.append(f"se {'agregó' if _ld == 1 else 'agregaron'} {_ld} servicio{'s' if _ld > 1 else ''} doble{'s' if _ld > 1 else ''} en el tramo {_tramo}")
             elif _ld < 0:
-                _fr.append(f"se quitó {-_ld} servicio{'s' if -_ld > 1 else ''} doble{'s' if -_ld > 1 else ''} en el tramo {_tramo}")
+                _fr.append(f"se {'suprimió' if -_ld == 1 else 'suprimieron'} {-_ld} servicio{'s' if -_ld > 1 else ''} doble{'s' if -_ld > 1 else ''} en el tramo {_tramo}")
             return "; ".join(_fr) if _fr else "sin cambios"
 
         _filas_cmp = []
@@ -5093,7 +5093,7 @@ if _seccion == _SECCIONES[11]:
             _vista = _vista.sort_values(['Fecha', 'Tramo']).copy()
             _vista['Fecha'] = pd.to_datetime(_vista['Fecha']).dt.strftime('%d-%m-%Y')
             _st_df(_vista, use_container_width=True, hide_index=True)
-            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se quitó un servicio del tipo indicado. Un «tramo-día» es la combinación de una fecha y un tramo (PU-LI, LI-PU, etc.).")
+            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se suprimió un servicio del tipo indicado. Un «tramo-día» es la combinación de una fecha y un tramo (PU-LI, LI-PU, etc.).")
 
             _buf_c = BytesIO()
             with pd.ExcelWriter(_buf_c, engine='openpyxl') as _w:
