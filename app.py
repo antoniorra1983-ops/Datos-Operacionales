@@ -1595,7 +1595,8 @@ with st.sidebar:
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
                     (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
                     (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
-                    (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"])]:
+                    (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"]),
+                    (f_oit,DATA_DIRS["oit"])]:
         for uf in (_ul or []):
             dest=os.path.join(_ca,uf.name)
             if not os.path.exists(dest): guardar_archivo(uf,_ca)
