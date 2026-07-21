@@ -1918,13 +1918,29 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         df_ops['Nombre Feriado'] = df_ops['Fecha'].apply(lambda x: obtener_nombre_feriado(x.date() if pd.notna(x) else None))
         df_ops['Fecha (ES)'] = df_ops['Fecha'].apply(obtener_fecha_es)
 
+        # Proporción tracción / baja tensión del período, según la SUMA del SEAT (no un valor fijo).
+        # Se usa como respaldo para los días que no traen SEAT propio; los que sí lo traen usan su % diario.
+        _sT = pd.to_numeric(df_ops.get('E_Seat_T', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+        _sTr = pd.to_numeric(df_ops.get('E_Seat_Tr', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+        _s12 = pd.to_numeric(df_ops.get('E_Seat_12', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+        if _sT > 0:
+            _r_tr_periodo = _sTr / _sT
+            _r_12_periodo = _s12 / _sT
+        else:
+            _r_tr_periodo, _r_12_periodo = 0.85, 0.15
+
         def jerarquia(row):
             if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
             elif row['E_Prmte']>0:  tot,src=row['E_Prmte'],"PRMTE"
             elif row['E_Seat_T']>0: tot,src=row['E_Seat_T'],"SEAT"
             else: return 0,0,0,0,0,"N/A"
-            r_tr=row['E_Seat_Tr']/row['E_Seat_T'] if row['E_Seat_T']>0 else 0.85
-            r_12=row['E_Seat_12']/row['E_Seat_T'] if row['E_Seat_T']>0 else 0.15
+            # % del día si trae SEAT; si no, el % del período (suma del SEAT), no un valor fijo
+            if row['E_Seat_T']>0:
+                r_tr=row['E_Seat_Tr']/row['E_Seat_T']
+                r_12=row['E_Seat_12']/row['E_Seat_T']
+            else:
+                r_tr=_r_tr_periodo
+                r_12=_r_12_periodo
             return tot,tot*r_tr,tot*r_12,r_tr*100,r_12*100,src
             
         df_ops[['E_Total','E_Tr','E_12','% Tracción','% 12 kV','Fuente']]=df_ops.apply(jerarquia,axis=1,result_type='expand')
