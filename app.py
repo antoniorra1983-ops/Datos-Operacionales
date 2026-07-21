@@ -5022,6 +5022,89 @@ if _seccion == _SECCIONES[10]:
 
 
 if _seccion == _SECCIONES[11]:
+    # ===== UMR: Servicios programados vs realizados, por día y tipo =====
+    st.markdown("### 🔀 Programados vs Realizados (UMR)")
+    if not all_kmserv:
+        st.info("Sube el archivo **UMR** (hoja KM-Servicio) para comparar los servicios programados con los realizados.")
+    else:
+        _dks = pd.DataFrame(all_kmserv)
+        _dks['Fecha'] = pd.to_datetime(_dks['Fecha']).dt.normalize()
+        # Solo las filas de tramo (OD válido); se descarta la fila TOTAL (OD vacío)
+        _ods_validos = ['PU-LI', 'LI-PU', 'PU-SA', 'SA-PU', 'PU-EB', 'EB-PU']
+        _dks = _dks[_dks['OD'].isin(_ods_validos)].copy()
+        for _c in ['SimP', 'DobP', 'SimR', 'DobR']:
+            _dks[_c] = pd.to_numeric(_dks[_c], errors='coerce').fillna(0)
+
+        def _describir_cambio(_dsim, _ddob):
+            _fr = []
+            _c_s2d = 0; _c_d2s = 0; _ls = _dsim; _ld = _ddob
+            if _dsim < 0 and _ddob > 0:
+                _c_s2d = int(min(-_dsim, _ddob)); _ls = _dsim + _c_s2d; _ld = _ddob - _c_s2d
+            elif _dsim > 0 and _ddob < 0:
+                _c_d2s = int(min(_dsim, -_ddob)); _ls = _dsim - _c_d2s; _ld = _ddob + _c_d2s
+            if _c_s2d:
+                _fr.append(f"{_c_s2d} {'servicio pasó' if _c_s2d == 1 else 'servicios pasaron'} de simple a doble")
+            if _c_d2s:
+                _fr.append(f"{_c_d2s} {'servicio pasó' if _c_d2s == 1 else 'servicios pasaron'} de doble a simple")
+            _ls = int(round(_ls)); _ld = int(round(_ld))
+            if _ls > 0:
+                _fr.append(f"se agregó {_ls} simple{'s' if _ls > 1 else ''}")
+            elif _ls < 0:
+                _fr.append(f"se quitó {-_ls} simple{'s' if -_ls > 1 else ''}")
+            if _ld > 0:
+                _fr.append(f"se agregó {_ld} doble{'s' if _ld > 1 else ''}")
+            elif _ld < 0:
+                _fr.append(f"se quitó {-_ld} doble{'s' if -_ld > 1 else ''}")
+            return "; ".join(_fr) if _fr else "sin cambios"
+
+        _filas_cmp = []
+        for _, _r in _dks.iterrows():
+            _dsim = _r['SimR'] - _r['SimP']
+            _ddob = _r['DobR'] - _r['DobP']
+            _prog = _r['SimP'] + _r['DobP']
+            _real = _r['SimR'] + _r['DobR']
+            if _prog == 0 and _real == 0:
+                continue  # tramo sin operación ese día
+            _filas_cmp.append({
+                'Fecha': _r['Fecha'],
+                'Tramo': _r['OD'],
+                'Simples Prog.': int(_r['SimP']), 'Dobles Prog.': int(_r['DobP']),
+                'Simples Real.': int(_r['SimR']), 'Dobles Real.': int(_r['DobR']),
+                'Δ Simples': int(_dsim), 'Δ Dobles': int(_ddob),
+                'Servicios Prog.': int(_prog), 'Servicios Real.': int(_real),
+                'Δ Servicios': int(_real - _prog),
+                'Qué cambió': _describir_cambio(_dsim, _ddob)})
+        _cmp = pd.DataFrame(_filas_cmp)
+        if _cmp.empty:
+            st.info("No hay servicios con operación en el rango seleccionado.")
+        else:
+            _n_cambios = int((_cmp['Qué cambió'] != 'sin cambios').sum())
+            _n_s2d = _cmp['Qué cambió'].str.contains('de simple a doble').sum()
+            _n_d2s = _cmp['Qué cambió'].str.contains('de doble a simple').sum()
+            _k1, _k2, _k3, _k4 = st.columns(4)
+            _k1.metric("Tramos-día con cambios", f"{_ncl(_n_cambios, 0)}", f"de {len(_cmp)} evaluados", delta_color="off")
+            _k2.metric("Δ Servicios (Real − Prog)", f"{_ncl(int(_cmp['Δ Servicios'].sum()), 0)}",
+                       "más realizados" if _cmp['Δ Servicios'].sum() >= 0 else "menos realizados", delta_color="off")
+            _k3.metric("Simple → Doble", f"{_ncl(int(_n_s2d), 0)}", "tramos-día", delta_color="off")
+            _k4.metric("Doble → Simple", f"{_ncl(int(_n_d2s), 0)}", "tramos-día", delta_color="off")
+
+            _solo_cambios = st.checkbox("Mostrar solo los tramos-día con cambios", value=True)
+            _vista = _cmp[_cmp['Qué cambió'] != 'sin cambios'] if _solo_cambios else _cmp
+            _vista = _vista.sort_values(['Fecha', 'Tramo']).copy()
+            _vista['Fecha'] = pd.to_datetime(_vista['Fecha']).dt.strftime('%d-%m-%Y')
+            _st_df(_vista, use_container_width=True, hide_index=True)
+            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se quitó un servicio del tipo indicado. Un «tramo-día» es la combinación de una fecha y un tramo (PU-LI, LI-PU, etc.).")
+
+            _buf_c = BytesIO()
+            with pd.ExcelWriter(_buf_c, engine='openpyxl') as _w:
+                _exp = _cmp.copy(); _exp['Fecha'] = pd.to_datetime(_exp['Fecha']).dt.strftime('%d-%m-%Y')
+                _exp.to_excel(_w, sheet_name='Prog vs Real', index=False)
+            st.download_button("⬇️ Descargar comparación programado vs realizado", data=_buf_c.getvalue(),
+                               file_name="umr_programado_vs_realizado.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="_dl_cmp_pr")
+        st.divider()
+
     _det_sv = detalle_servicios(df_thdr_v1, df_thdr_v2, None)
     if _det_sv is None or _det_sv.empty:
         st.info("No hay datos de servicios (THDR) en el rango seleccionado. Sube archivos THDR desde el panel lateral.")
