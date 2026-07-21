@@ -3441,7 +3441,43 @@ if _seccion == _SECCIONES[2]:
         with st.expander("📑 Datos consolidados de operaciones y energía — mostrar / ocultar", expanded=False):
             dv = df_ops.copy()
             dv['Fecha'] = dv['Fecha'].dt.strftime('%Y-%m-%d')
-            _st_df(make_columns_unique(dv), use_container_width=True)
+            dv = make_columns_unique(dv)
+            # Fila TOTAL: suma de las columnas de cantidad; en las de % / IDE, se recalcula
+            # el valor del período (no se suman porcentajes).
+            _no_sumar = {'UMR (%)', '% Tracción', '% 12 kV', 'IDE (kWh/km)'}
+            _fila_tot = {}
+            for _c in dv.columns:
+                if _c in ('Fecha', 'Fecha (ES)', 'Tipo Día', 'Nombre Feriado', 'Fuente'):
+                    _fila_tot[_c] = ''
+                elif pd.api.types.is_numeric_dtype(dv[_c]) and _c not in _no_sumar:
+                    _fila_tot[_c] = pd.to_numeric(dv[_c], errors='coerce').sum()
+                else:
+                    _fila_tot[_c] = np.nan
+            _fila_tot['Fecha'] = 'TOTAL'
+            # Métricas del período que no se suman
+            _odo_t = pd.to_numeric(df_ops.get('Odómetro [km]', pd.Series(dtype=float)), errors='coerce').sum()
+            _tk_t = pd.to_numeric(df_ops.get('Tren-Km [km]', pd.Series(dtype=float)), errors='coerce').sum()
+            _etr_t = pd.to_numeric(df_ops.get('E_Tr', pd.Series(dtype=float)), errors='coerce').sum()
+            _etot_t = pd.to_numeric(df_ops.get('E_Total', pd.Series(dtype=float)), errors='coerce').sum()
+            _e12_t = pd.to_numeric(df_ops.get('E_12', pd.Series(dtype=float)), errors='coerce').sum()
+            if 'UMR (%)' in dv.columns:
+                _fila_tot['UMR (%)'] = (_tk_t / _odo_t * 100) if _odo_t > 0 else np.nan
+            if 'IDE (kWh/km)' in dv.columns:
+                _fila_tot['IDE (kWh/km)'] = (_etr_t / _odo_t) if _odo_t > 0 else np.nan
+            if '% Tracción' in dv.columns:
+                _fila_tot['% Tracción'] = (_etr_t / _etot_t * 100) if _etot_t > 0 else np.nan
+            if '% 12 kV' in dv.columns:
+                _fila_tot['% 12 kV'] = (_e12_t / _etot_t * 100) if _etot_t > 0 else np.nan
+            dv_tot = pd.concat([dv, pd.DataFrame([_fila_tot])[dv.columns]], ignore_index=True)
+            _st_df(dv_tot, use_container_width=True, hide_index=True)
+            st.caption("La fila TOTAL suma las columnas de cantidad (energía, km, pasajeros…). Los porcentajes (UMR, % Tracción, % 12 kV) y el IDE se recalculan para todo el período, no se suman.")
+            _buf_dc = BytesIO()
+            with pd.ExcelWriter(_buf_dc, engine='openpyxl') as _w:
+                dv_tot.to_excel(_w, sheet_name='Datos consolidados', index=False)
+            st.download_button("⬇️ Descargar datos consolidados", data=_buf_dc.getvalue(),
+                               file_name="datos_consolidados.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="_dl_consolidado")
     st.divider()
     st.subheader("⚖️ Comparación de fuentes: Factura · PRMTE · SEAT")
     _fcols = [c for c in ['E_Fact', 'E_Prmte', 'E_Seat_T'] if c in df_ops.columns] if (df_ops is not None and not df_ops.empty) else []
