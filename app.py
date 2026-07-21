@@ -2251,7 +2251,7 @@ st.markdown("""<style>
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE"]
 
 with st.container(key="_topbar"):
     _cl, _cn = st.columns([1, 9], vertical_alignment="center")
@@ -5962,3 +5962,225 @@ if _seccion == _SECCIONES[14]:
             st.download_button("⬇️ Descargar", data=_xls(_resumen, _pv),
                                file_name=f"proyeccion_{'seat' if _es_seat else 'limache'}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_projtd")
+
+
+if _seccion == _SECCIONES[15]:
+    st.header("🔎 Análisis de sobreconsumo IDE")
+    st.caption("Cuando el ahorro del IDE es negativo (el IDE real supera la línea base), aquí se analizan todos los datos disponibles de esos días para entender la causa.")
+    if df_ops.empty or 'IDE (kWh/km)' not in df_ops.columns or df_ops['IDE (kWh/km)'].sum() <= 0:
+        st.info("No hay datos de IDE en el período. Sube UMR y energía (SEAT/PRMTE) desde el panel lateral.")
+    elif df_ide_lb is None or df_ide_lb.empty or 'Intercepcion' not in df_ide_lb.columns:
+        st.info("Falta el archivo **IDE Línea Base** (con Intercepción y coeficientes) para calcular el ahorro del IDE. Súbelo desde el panel lateral.")
+    else:
+        _b = df_ops.copy()
+        _b['Fecha'] = pd.to_datetime(_b['Fecha']).dt.normalize()
+        # Odómetro SFE por día (para separar la línea base 100/M de la de SFE)
+        _osfe = pd.DataFrame(columns=['Fecha', 'Odom_SFE'])
+        if all_tr:
+            _dtr = pd.DataFrame(all_tr)
+            if {'Tren', 'Fecha', 'Valor'}.issubset(_dtr.columns):
+                _dtr['Fecha'] = pd.to_datetime(_dtr['Fecha'], errors='coerce').dt.normalize()
+                _dtr['Valor'] = pd.to_numeric(_dtr['Valor'], errors='coerce')
+                if 'Clase' in _dtr.columns and _dtr['Clase'].notna().any():
+                    _dtr = _dtr[_dtr['Clase'] == 'km']
+                else:
+                    _dtr = _dtr[_dtr['Valor'] < 50000]
+                _dtr = _dtr[(_dtr['Valor'] >= 0) & _dtr['Tren'].astype(str).str.upper().str.startswith('SFE')]
+                if not _dtr.empty:
+                    _osfe = _dtr.groupby('Fecha', as_index=False)['Valor'].sum().rename(columns={'Valor': 'Odom_SFE'})
+        _lbm = df_ide_lb.copy()
+        _lbm['Fecha'] = pd.to_datetime(_lbm['Fecha']).dt.normalize()
+        _ci = _b[['Fecha', 'Odómetro [km]', 'E_Tr', 'IDE (kWh/km)']].copy()
+        _ci = _ci.merge(_lbm[['Fecha', 'Intercepcion', 'IDE_LB_100M', 'IDE_LB_SFE']], on='Fecha', how='inner')
+        _ci = _ci.merge(_osfe, on='Fecha', how='left')
+        _ci['Odom_SFE'] = _ci['Odom_SFE'].fillna(0.0)
+        _ci = _ci[_ci['Odómetro [km]'] > 0]
+        if _ci.empty:
+            st.info("No hay días con odómetro y línea base coincidentes en el período seleccionado.")
+        else:
+            _ci['Odom_100M'] = _ci['Odómetro [km]'] - _ci['Odom_SFE']
+            _ci['E_LB'] = _ci['Intercepcion'] + _ci['IDE_LB_100M'] * _ci['Odom_100M'] + _ci['IDE_LB_SFE'] * _ci['Odom_SFE']
+            _ci['IDE_LB'] = _ci['E_LB'] / _ci['Odómetro [km]'].replace(0, np.nan)
+            _ci['E_real'] = _ci['E_Tr'].where(_ci['E_Tr'] > 0, _ci['IDE (kWh/km)'] * _ci['Odómetro [km]'])
+            _ci['Desvío'] = _ci['IDE (kWh/km)'] - _ci['IDE_LB']
+            _ci['Exceso kWh'] = _ci['E_real'] - _ci['E_LB']
+            # Ahorro % del IDE: positivo si el IDE real está por debajo de la línea base
+            _ci['Ahorro IDE %'] = np.where(_ci['IDE_LB'] > 0, -_ci['Desvío'] / _ci['IDE_LB'] * 100, 0.0)
+            _neg = _ci[_ci['Ahorro IDE %'] < 0].copy().sort_values('Ahorro IDE %')
+
+            _n_neg = len(_neg)
+            _n_tot = len(_ci)
+            _c1, _c2, _c3 = st.columns(3)
+            _c1.metric("Días con sobreconsumo IDE", f"{_ncl(_n_neg, 0)}", f"de {_n_tot} días con línea base", delta_color="off")
+            _c2.metric("Sobreconsumo total", f"{_ncl(float(_neg['Exceso kWh'].sum()), 0)} kWh" if _n_neg else "0 kWh",
+                       "energía sobre la línea base", delta_color="off")
+            _peor_pct = float(_neg['Ahorro IDE %'].min()) if _n_neg else 0.0
+            _c3.metric("Peor día", f"{_ncl(_peor_pct, 1)} %" if _n_neg else "—",
+                       (pd.to_datetime(_neg.iloc[0]['Fecha']).strftime('%d-%m-%Y') if _n_neg else ""), delta_color="off")
+
+            if _n_neg == 0:
+                st.success("✅ No hay días con sobreconsumo de IDE en el período: el IDE real estuvo en o bajo la línea base todos los días.")
+            else:
+                # Selector del día a analizar (el peor primero)
+                _opts_dia = {pd.to_datetime(_r['Fecha']).strftime('%d-%m-%Y') + f"  ({_ncl(_r['Ahorro IDE %'], 1)} %)": _r['Fecha'] for _, _r in _neg.iterrows()}
+                _sel_lbl = st.selectbox("Día con sobreconsumo a analizar", list(_opts_dia.keys()))
+                _fsel = pd.to_datetime(_opts_dia[_sel_lbl]).normalize()
+                _row = _ci[_ci['Fecha'] == _fsel].iloc[0]
+
+                # Día de referencia: mediana de los días SIN sobreconsumo del mismo tipo de día
+                _tipo_sel = df_ops.loc[pd.to_datetime(df_ops['Fecha']).dt.normalize() == _fsel, 'Tipo Día']
+                _tipo_sel = _tipo_sel.iloc[0] if len(_tipo_sel) else None
+                _ci_tipo = _ci.merge(df_ops[['Fecha', 'Tipo Día']].assign(Fecha=lambda d: pd.to_datetime(d['Fecha']).dt.normalize()), on='Fecha', how='left')
+                _ref = _ci_tipo[(_ci_tipo['Ahorro IDE %'] >= 0)]
+                if _tipo_sel is not None:
+                    _ref_t = _ref[_ref['Tipo Día'] == _tipo_sel]
+                    if not _ref_t.empty:
+                        _ref = _ref_t
+
+                st.markdown(f"### Análisis del {_fsel.strftime('%d-%m-%Y')}")
+                _r1, _r2, _r3, _r4 = st.columns(4)
+                _r1.metric("IDE real", f"{_ncl(_row['IDE (kWh/km)'], 3)} kWh/km")
+                _r2.metric("IDE línea base", f"{_ncl(_row['IDE_LB'], 3)} kWh/km")
+                _r3.metric("Ahorro IDE", f"{_ncl(_row['Ahorro IDE %'], 1)} %", "sobreconsumo", delta_color="inverse")
+                _r4.metric("Exceso de energía", f"{_ncl(_row['Exceso kWh'], 0)} kWh", "sobre la línea base", delta_color="off")
+
+                # --- Comparación de TODOS los datos del día vs la referencia ---
+                def _val_dia(_df, _col, _fecha, _agg='sum'):
+                    if _df is None or getattr(_df, 'empty', True) or _col not in _df.columns:
+                        return np.nan
+                    _dd = _df.copy()
+                    _dd['Fecha'] = pd.to_datetime(_dd['Fecha'], errors='coerce').dt.normalize()
+                    _v = pd.to_numeric(_dd.loc[_dd['Fecha'] == _fecha, _col], errors='coerce')
+                    if _v.empty:
+                        return np.nan
+                    return float(_v.sum()) if _agg == 'sum' else float(_v.mean())
+
+                def _val_ref(_df, _col, _fechas_ref, _agg='sum'):
+                    if _df is None or getattr(_df, 'empty', True) or _col not in _df.columns:
+                        return np.nan
+                    _dd = _df.copy()
+                    _dd['Fecha'] = pd.to_datetime(_dd['Fecha'], errors='coerce').dt.normalize()
+                    _dd = _dd[_dd['Fecha'].isin(_fechas_ref)]
+                    if _dd.empty:
+                        return np.nan
+                    _por_dia = _dd.groupby('Fecha')[_col].sum() if _agg == 'sum' else _dd.groupby('Fecha')[_col].mean()
+                    return float(pd.to_numeric(_por_dia, errors='coerce').median())
+
+                _fref = set(_ref['Fecha'])
+                _ops_sel = df_ops[pd.to_datetime(df_ops['Fecha']).dt.normalize() == _fsel]
+                _ops_ref = df_ops[pd.to_datetime(df_ops['Fecha']).dt.normalize().isin(_fref)]
+
+                def _op_val(_col, _how='sum'):
+                    _v = pd.to_numeric(_ops_sel[_col], errors='coerce') if _col in _ops_sel.columns else pd.Series(dtype=float)
+                    _d = float(_v.sum()) if _how == 'sum' else (float(_v.mean()) if len(_v) else np.nan)
+                    if _col in _ops_ref.columns:
+                        _pr = _ops_ref.groupby(pd.to_datetime(_ops_ref['Fecha']).dt.normalize())[_col]
+                        _rr = float(pd.to_numeric(_pr.sum() if _how == 'sum' else _pr.mean(), errors='coerce').median())
+                    else:
+                        _rr = np.nan
+                    return _d, _rr
+
+                _filas = []
+                def _add(_nombre, _dia, _ref_v, _unidad='', _mejor='menor'):
+                    if pd.isna(_dia) and pd.isna(_ref_v):
+                        return
+                    _delta = (_dia - _ref_v) if (pd.notna(_dia) and pd.notna(_ref_v)) else np.nan
+                    _pct = (_delta / _ref_v * 100) if (pd.notna(_delta) and _ref_v not in (0, np.nan)) else np.nan
+                    _filas.append({'Dato': _nombre,
+                                   'Este día': (_ncl(_dia, 2) + (f" {_unidad}" if _unidad else "")) if pd.notna(_dia) else '—',
+                                   f'Mediana {_tipo_sel or "ref"}': (_ncl(_ref_v, 2) + (f" {_unidad}" if _unidad else "")) if pd.notna(_ref_v) else '—',
+                                   'Diferencia': (f"{_ncl(_delta, 2)} ({_ncl(_pct, 1)} %)" if pd.notna(_pct) else (_ncl(_delta, 2) if pd.notna(_delta) else '—')),
+                                   '_delta': _delta, '_mejor': _mejor})
+
+                _de, _rf = _op_val('E_Tr'); _add("Energía tracción (kWh)", _de, _rf, 'kWh')
+                _de, _rf = _op_val('E_12'); _add("Energía 12 kV (kWh)", _de, _rf, 'kWh')
+                _de, _rf = _op_val('Odómetro [km]'); _add("Odómetro (km)", _de, _rf, 'km')
+                _de, _rf = _op_val('Tren-Km [km]'); _add("Tren-Km (km)", _de, _rf, 'km')
+                _de, _rf = _op_val('UMR (%)', 'mean'); _add("UMR (%)", _de, _rf, '%')
+                _de, _rf = _op_val('PAX'); _add("Pasajeros", _de, _rf, 'pax')
+                # Incidentes (cortes / acoples)
+                if df_incid is not None and not df_incid.empty and {'Fecha', 'Tipo'}.issubset(df_incid.columns):
+                    _di = df_incid.copy(); _di['Fecha'] = pd.to_datetime(_di['Fecha']).dt.normalize()
+                    _cor_d = int(((_di['Fecha'] == _fsel) & (_di['Tipo'] == 'Desacople')).sum())
+                    _aco_d = int(((_di['Fecha'] == _fsel) & (_di['Tipo'] == 'Acople')).sum())
+                    _cor_r = _di[(_di['Fecha'].isin(_fref)) & (_di['Tipo'] == 'Desacople')].groupby('Fecha').size()
+                    _aco_r = _di[(_di['Fecha'].isin(_fref)) & (_di['Tipo'] == 'Acople')].groupby('Fecha').size()
+                    _add("Cortes (incidentes)", _cor_d, float(_cor_r.median()) if len(_cor_r) else 0.0)
+                    _add("Acoples (incidentes)", _aco_d, float(_aco_r.median()) if len(_aco_r) else 0.0)
+                # Servicios programados vs realizados del día (UMR)
+                if all_kmserv:
+                    _dk = pd.DataFrame(all_kmserv); _dk['Fecha'] = pd.to_datetime(_dk['Fecha']).dt.normalize()
+                    _dk = _dk[_dk['OD'].isin(['PU-LI', 'LI-PU', 'PU-SA', 'SA-PU', 'PU-EB', 'EB-PU'])]
+                    for _c in ['SimP', 'DobP', 'SimR', 'DobR']:
+                        _dk[_c] = pd.to_numeric(_dk[_c], errors='coerce').fillna(0)
+                    _dk['ProgTot'] = _dk['SimP'] + _dk['DobP']; _dk['RealTot'] = _dk['SimR'] + _dk['DobR']
+                    _dd_sel = _dk[_dk['Fecha'] == _fsel]
+                    _prog_d = float(_dd_sel['ProgTot'].sum()); _real_d = float(_dd_sel['RealTot'].sum())
+                    _dobr_d = float(_dd_sel['DobR'].sum())
+                    _ref_k = _dk[_dk['Fecha'].isin(_fref)]
+                    _prog_r = float(_ref_k.groupby('Fecha')['ProgTot'].sum().median()) if not _ref_k.empty else np.nan
+                    _real_r = float(_ref_k.groupby('Fecha')['RealTot'].sum().median()) if not _ref_k.empty else np.nan
+                    _dobr_r = float(_ref_k.groupby('Fecha')['DobR'].sum().median()) if not _ref_k.empty else np.nan
+                    _add("Servicios programados", _prog_d, _prog_r)
+                    _add("Servicios realizados", _real_d, _real_r)
+                    _add("Servicios dobles realizados", _dobr_d, _dobr_r)
+                # SFE nocturno esa noche (si hay OIT)
+                if df_oit is not None and not df_oit.empty and 'Fecha' in df_oit.columns:
+                    _do = df_oit.copy(); _do['Fecha'] = pd.to_datetime(_do['Fecha']).dt.normalize()
+                    _sfe_d = int((_do['Fecha'] == _fsel).sum())
+                    if _sfe_d > 0:
+                        _add("Órdenes SFE nocturnas", _sfe_d, 0.0)
+
+                _tab = pd.DataFrame(_filas)
+                if not _tab.empty:
+                    _tab_show = _tab.drop(columns=['_delta', '_mejor'])
+                    _st_df(_tab_show, use_container_width=True, hide_index=True)
+                    st.caption(f"Comparación de todos los datos del día con la mediana de los días **sin sobreconsumo**" + (f" del mismo tipo ({_tipo_sel})" if _tipo_sel else "") + ". La diferencia en % ayuda a ver qué se salió de lo normal ese día.")
+
+                    # --- Señales automáticas: qué explica el sobreconsumo ---
+                    _señales = []
+                    _mp = {r['Dato']: r['_delta'] for _, r in _tab.iterrows()}
+                    def _g(_n): return _mp.get(_n, np.nan)
+                    if pd.notna(_g("Tren-Km (km)")) and _g("Tren-Km (km)") < 0:
+                        _señales.append("Se recorrieron **menos Tren-Km** que un día normal: con menos kilometraje útil, la energía fija (auxiliares, climatización) se reparte peor y el IDE sube.")
+                    if pd.notna(_g("UMR (%)")) and _g("UMR (%)") < 0:
+                        _señales.append("La **UMR bajó**: menor aprovechamiento de la capacidad, que empeora el kWh/km.")
+                    if pd.notna(_g("Cortes (incidentes)")) and _g("Cortes (incidentes)") > 0:
+                        _señales.append(f"Hubo **más cortes** que lo habitual (+{_ncl(_g('Cortes (incidentes)'), 0)}): los desacoples implican maniobras y recorridos extra que gastan energía sin sumar km útil.")
+                    if pd.notna(_g("Servicios dobles realizados")) and _g("Servicios dobles realizados") > 0:
+                        _señales.append(f"Se hicieron **más servicios dobles** (+{_ncl(_g('Servicios dobles realizados'), 0)}): dos motrices consumen casi el doble, subiendo el kWh/km si no se llenan.")
+                    if pd.notna(_g("Órdenes SFE nocturnas")) and _g("Órdenes SFE nocturnas") > 0:
+                        _señales.append(f"Hubo **circulación nocturna de SFE** esa madrugada: energía de tracción que no aparece en la operación comercial y castiga el IDE del día.")
+                    if pd.notna(_g("Energía 12 kV (kWh)")) and _g("Energía 12 kV (kWh)") > 0 and (pd.isna(_g("Tren-Km (km)")) or _g("Tren-Km (km)") <= 0):
+                        _señales.append("Subió la **energía de 12 kV** (auxiliares/servicios) sin más kilometraje: consumo de apoyo más alto de lo normal.")
+                    if pd.notna(_g("Servicios realizados")) and pd.notna(_g("Servicios programados")) and _g("Servicios realizados") < 0 and _g("Servicios programados") >= 0:
+                        _señales.append("Se **realizaron menos servicios** que los programados: km comercial perdido, con energía de base que igual se gastó.")
+
+                    if _señales:
+                        st.markdown("#### 🧭 Qué explica el sobreconsumo")
+                        st.markdown("\n".join(f"- {_s}" for _s in _señales))
+                    else:
+                        st.info("Los datos de este día no muestran una desviación clara en las variables operativas. El sobreconsumo puede deberse a factores no capturados (temperatura, tiempos muertos, conducción).")
+
+                # Gráfico: ahorro IDE % por día (rojo los negativos)
+                st.divider()
+                st.markdown("#### Ahorro IDE por día en el período")
+                _gc = _ci[['Fecha', 'Ahorro IDE %']].copy()
+                _gc['Efecto'] = np.where(_gc['Ahorro IDE %'] >= 0, 'Ahorro', 'Sobreconsumo')
+                _fgc = px.bar(_gc, x='Fecha', y='Ahorro IDE %', color='Efecto',
+                              color_discrete_map={'Ahorro': '#0a7d3e', 'Sobreconsumo': '#c62828'})
+                _fgc.update_traces(hovertemplate='%{x|%d-%m-%Y}: %{y:.1f} %<extra></extra>')
+                _fgc.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Ahorro IDE (%)', xaxis_title='', legend_title='')
+                _pc(_no_huecos(_fgc), use_container_width=True, config={'locale': 'es'})
+
+                _buf_n = BytesIO()
+                with pd.ExcelWriter(_buf_n, engine='openpyxl') as _w:
+                    _exp = _ci[['Fecha', 'IDE (kWh/km)', 'IDE_LB', 'Ahorro IDE %', 'Exceso kWh', 'Odómetro [km]', 'E_real', 'E_LB']].copy()
+                    _exp['Fecha'] = pd.to_datetime(_exp['Fecha']).dt.strftime('%d-%m-%Y')
+                    _exp.to_excel(_w, sheet_name='Ahorro IDE por día', index=False)
+                    if not _tab.empty:
+                        _tab.drop(columns=['_delta', '_mejor']).to_excel(_w, sheet_name=f'Análisis {_fsel.strftime("%d-%m")}', index=False)
+                st.download_button("⬇️ Descargar análisis de sobreconsumo", data=_buf_n.getvalue(),
+                                   file_name="analisis_sobreconsumo_ide.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="_dl_sobreconsumo")
