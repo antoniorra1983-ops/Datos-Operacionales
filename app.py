@@ -5035,7 +5035,7 @@ if _seccion == _SECCIONES[11]:
         for _c in ['SimP', 'DobP', 'SimR', 'DobR']:
             _dks[_c] = pd.to_numeric(_dks[_c], errors='coerce').fillna(0)
 
-        def _describir_cambio(_dsim, _ddob):
+        def _describir_cambio(_dsim, _ddob, _tramo):
             _fr = []
             _c_s2d = 0; _c_d2s = 0; _ls = _dsim; _ld = _ddob
             if _dsim < 0 and _ddob > 0:
@@ -5043,18 +5043,18 @@ if _seccion == _SECCIONES[11]:
             elif _dsim > 0 and _ddob < 0:
                 _c_d2s = int(min(_dsim, -_ddob)); _ls = _dsim - _c_d2s; _ld = _ddob + _c_d2s
             if _c_s2d:
-                _fr.append(f"{_c_s2d} {'servicio pasó' if _c_s2d == 1 else 'servicios pasaron'} de simple a doble")
+                _fr.append(f"{_c_s2d} {'servicio pasó' if _c_s2d == 1 else 'servicios pasaron'} de simple a doble en el tramo {_tramo}")
             if _c_d2s:
-                _fr.append(f"{_c_d2s} {'servicio pasó' if _c_d2s == 1 else 'servicios pasaron'} de doble a simple")
+                _fr.append(f"{_c_d2s} {'servicio pasó' if _c_d2s == 1 else 'servicios pasaron'} de doble a simple en el tramo {_tramo}")
             _ls = int(round(_ls)); _ld = int(round(_ld))
             if _ls > 0:
-                _fr.append(f"se agregó {_ls} simple{'s' if _ls > 1 else ''}")
+                _fr.append(f"se agregó {_ls} servicio{'s' if _ls > 1 else ''} simple{'s' if _ls > 1 else ''} en el tramo {_tramo}")
             elif _ls < 0:
-                _fr.append(f"se quitó {-_ls} simple{'s' if -_ls > 1 else ''}")
+                _fr.append(f"se quitó {-_ls} servicio{'s' if -_ls > 1 else ''} simple{'s' if -_ls > 1 else ''} en el tramo {_tramo}")
             if _ld > 0:
-                _fr.append(f"se agregó {_ld} doble{'s' if _ld > 1 else ''}")
+                _fr.append(f"se agregó {_ld} servicio{'s' if _ld > 1 else ''} doble{'s' if _ld > 1 else ''} en el tramo {_tramo}")
             elif _ld < 0:
-                _fr.append(f"se quitó {-_ld} doble{'s' if -_ld > 1 else ''}")
+                _fr.append(f"se quitó {-_ld} servicio{'s' if -_ld > 1 else ''} doble{'s' if -_ld > 1 else ''} en el tramo {_tramo}")
             return "; ".join(_fr) if _fr else "sin cambios"
 
         _filas_cmp = []
@@ -5073,7 +5073,7 @@ if _seccion == _SECCIONES[11]:
                 'Δ Simples': int(_dsim), 'Δ Dobles': int(_ddob),
                 'Servicios Prog.': int(_prog), 'Servicios Real.': int(_real),
                 'Δ Servicios': int(_real - _prog),
-                'Qué cambió': _describir_cambio(_dsim, _ddob)})
+                'Qué cambió': _describir_cambio(_dsim, _ddob, _r['OD'])})
         _cmp = pd.DataFrame(_filas_cmp)
         if _cmp.empty:
             st.info("No hay servicios con operación en el rango seleccionado.")
