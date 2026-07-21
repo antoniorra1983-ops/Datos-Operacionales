@@ -6005,9 +6005,10 @@ if _seccion == _SECCIONES[15]:
             _ci['E_real'] = _ci['E_Tr'].where(_ci['E_Tr'] > 0, _ci['IDE (kWh/km)'] * _ci['Odómetro [km]'])
             _ci['Desvío'] = _ci['IDE (kWh/km)'] - _ci['IDE_LB']
             _ci['Exceso kWh'] = _ci['E_real'] - _ci['E_LB']
-            # Ahorro % del IDE: positivo si el IDE real está por debajo de la línea base
-            _ci['Ahorro IDE %'] = np.where(_ci['IDE_LB'] > 0, -_ci['Desvío'] / _ci['IDE_LB'] * 100, 0.0)
-            _neg = _ci[_ci['Ahorro IDE %'] < 0].copy().sort_values('Ahorro IDE %')
+            # Sobreconsumo: cuando el IDE real es MAYOR que el IDE de la línea base.
+            # Sobreconsumo % = cuánto por encima de la línea base está el IDE real (positivo = peor).
+            _ci['Sobreconsumo %'] = np.where(_ci['IDE_LB'] > 0, _ci['Desvío'] / _ci['IDE_LB'] * 100, 0.0)
+            _neg = _ci[_ci['IDE (kWh/km)'] > _ci['IDE_LB']].copy().sort_values('Sobreconsumo %', ascending=False)
 
             _n_neg = len(_neg)
             _n_tot = len(_ci)
@@ -6015,15 +6016,15 @@ if _seccion == _SECCIONES[15]:
             _c1.metric("Días con sobreconsumo IDE", f"{_ncl(_n_neg, 0)}", f"de {_n_tot} días con línea base", delta_color="off")
             _c2.metric("Sobreconsumo total", f"{_ncl(float(_neg['Exceso kWh'].sum()), 0)} kWh" if _n_neg else "0 kWh",
                        "energía sobre la línea base", delta_color="off")
-            _peor_pct = float(_neg['Ahorro IDE %'].min()) if _n_neg else 0.0
-            _c3.metric("Peor día", f"{_ncl(_peor_pct, 1)} %" if _n_neg else "—",
+            _peor_pct = float(_neg['Sobreconsumo %'].max()) if _n_neg else 0.0
+            _c3.metric("Peor día", f"+{_ncl(_peor_pct, 1)} %" if _n_neg else "—",
                        (pd.to_datetime(_neg.iloc[0]['Fecha']).strftime('%d-%m-%Y') if _n_neg else ""), delta_color="off")
 
             if _n_neg == 0:
                 st.success("✅ No hay días con sobreconsumo de IDE en el período: el IDE real estuvo en o bajo la línea base todos los días.")
             else:
                 # Selector del día a analizar (el peor primero)
-                _opts_dia = {pd.to_datetime(_r['Fecha']).strftime('%d-%m-%Y') + f"  ({_ncl(_r['Ahorro IDE %'], 1)} %)": _r['Fecha'] for _, _r in _neg.iterrows()}
+                _opts_dia = {pd.to_datetime(_r['Fecha']).strftime('%d-%m-%Y') + f"  (+{_ncl(_r['Sobreconsumo %'], 1)} %)": _r['Fecha'] for _, _r in _neg.iterrows()}
                 _sel_lbl = st.selectbox("Día con sobreconsumo a analizar", list(_opts_dia.keys()))
                 _fsel = pd.to_datetime(_opts_dia[_sel_lbl]).normalize()
                 _row = _ci[_ci['Fecha'] == _fsel].iloc[0]
@@ -6032,7 +6033,7 @@ if _seccion == _SECCIONES[15]:
                 _tipo_sel = df_ops.loc[pd.to_datetime(df_ops['Fecha']).dt.normalize() == _fsel, 'Tipo Día']
                 _tipo_sel = _tipo_sel.iloc[0] if len(_tipo_sel) else None
                 _ci_tipo = _ci.merge(df_ops[['Fecha', 'Tipo Día']].assign(Fecha=lambda d: pd.to_datetime(d['Fecha']).dt.normalize()), on='Fecha', how='left')
-                _ref = _ci_tipo[(_ci_tipo['Ahorro IDE %'] >= 0)]
+                _ref = _ci_tipo[_ci_tipo['IDE (kWh/km)'] <= _ci_tipo['IDE_LB']]
                 if _tipo_sel is not None:
                     _ref_t = _ref[_ref['Tipo Día'] == _tipo_sel]
                     if not _ref_t.empty:
@@ -6040,9 +6041,9 @@ if _seccion == _SECCIONES[15]:
 
                 st.markdown(f"### Análisis del {_fsel.strftime('%d-%m-%Y')}")
                 _r1, _r2, _r3, _r4 = st.columns(4)
-                _r1.metric("IDE real", f"{_ncl(_row['IDE (kWh/km)'], 3)} kWh/km")
+                _r1.metric("IDE real", f"{_ncl(_row['IDE (kWh/km)'], 3)} kWh/km", "mayor → sobreconsumo", delta_color="off")
                 _r2.metric("IDE línea base", f"{_ncl(_row['IDE_LB'], 3)} kWh/km")
-                _r3.metric("Ahorro IDE", f"{_ncl(_row['Ahorro IDE %'], 1)} %", "sobreconsumo", delta_color="inverse")
+                _r3.metric("Sobreconsumo IDE", f"+{_ncl(_row['Sobreconsumo %'], 1)} %", "el real supera la base", delta_color="off")
                 _r4.metric("Exceso de energía", f"{_ncl(_row['Exceso kWh'], 0)} kWh", "sobre la línea base", delta_color="off")
 
                 # --- Comparación de TODOS los datos del día vs la referencia ---
@@ -6163,22 +6164,24 @@ if _seccion == _SECCIONES[15]:
                     else:
                         st.info("Los datos de este día no muestran una desviación clara en las variables operativas. El sobreconsumo puede deberse a factores no capturados (temperatura, tiempos muertos, conducción).")
 
-                # Gráfico: ahorro IDE % por día (rojo los negativos)
+                # Gráfico: sobreconsumo IDE % por día (rojo cuando el real supera la base)
                 st.divider()
-                st.markdown("#### Ahorro IDE por día en el período")
-                _gc = _ci[['Fecha', 'Ahorro IDE %']].copy()
-                _gc['Efecto'] = np.where(_gc['Ahorro IDE %'] >= 0, 'Ahorro', 'Sobreconsumo')
-                _fgc = px.bar(_gc, x='Fecha', y='Ahorro IDE %', color='Efecto',
-                              color_discrete_map={'Ahorro': '#0a7d3e', 'Sobreconsumo': '#c62828'})
-                _fgc.update_traces(hovertemplate='%{x|%d-%m-%Y}: %{y:.1f} %<extra></extra>')
-                _fgc.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Ahorro IDE (%)', xaxis_title='', legend_title='')
+                st.markdown("#### IDE real vs línea base por día")
+                _gc = _ci[['Fecha', 'Sobreconsumo %']].copy()
+                _gc['Efecto'] = np.where(_gc['Sobreconsumo %'] > 0, 'Sobreconsumo', 'Dentro/bajo la base')
+                _fgc = px.bar(_gc, x='Fecha', y='Sobreconsumo %', color='Efecto',
+                              color_discrete_map={'Sobreconsumo': '#c62828', 'Dentro/bajo la base': '#0a7d3e'})
+                _fgc.update_traces(hovertemplate='%{x|%d-%m-%Y}: %{y:+.1f} %<extra></extra>')
+                _fgc.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Sobreconsumo IDE (%)', xaxis_title='', legend_title='')
                 _pc(_no_huecos(_fgc), use_container_width=True, config={'locale': 'es'})
+                st.caption("Barras rojas (positivas): el IDE real superó la línea base ese día (sobreconsumo). Barras verdes: el IDE real estuvo en o bajo la base.")
 
                 _buf_n = BytesIO()
                 with pd.ExcelWriter(_buf_n, engine='openpyxl') as _w:
-                    _exp = _ci[['Fecha', 'IDE (kWh/km)', 'IDE_LB', 'Ahorro IDE %', 'Exceso kWh', 'Odómetro [km]', 'E_real', 'E_LB']].copy()
+                    _exp = _ci[['Fecha', 'IDE (kWh/km)', 'IDE_LB', 'Sobreconsumo %', 'Exceso kWh', 'Odómetro [km]', 'E_real', 'E_LB']].copy()
+                    _exp = _exp.rename(columns={'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE línea base'})
                     _exp['Fecha'] = pd.to_datetime(_exp['Fecha']).dt.strftime('%d-%m-%Y')
-                    _exp.to_excel(_w, sheet_name='Ahorro IDE por día', index=False)
+                    _exp.to_excel(_w, sheet_name='Sobreconsumo IDE por día', index=False)
                     if not _tab.empty:
                         _tab.drop(columns=['_delta', '_mejor']).to_excel(_w, sheet_name=f'Análisis {_fsel.strftime("%d-%m")}', index=False)
                 st.download_button("⬇️ Descargar análisis de sobreconsumo", data=_buf_n.getvalue(),
