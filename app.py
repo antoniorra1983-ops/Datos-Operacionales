@@ -5224,37 +5224,6 @@ if _seccion == _SECCIONES[11]:
                 _fr.append(f"se {'suprimió' if -_ld == 1 else 'suprimieron'} {-_ld} servicio{'s' if -_ld > 1 else ''} doble{'s' if -_ld > 1 else ''} en el tramo {_tramo}")
             return "; ".join(_fr) if _fr else "sin cambios"
 
-        # Índice de incidentes que afectan la operación, por (fecha, tramo), para asociarlos
-        # al cambio de servicios. El tramo del incidente sale de "Tramo ini-Tramo fin"; si no
-        # trae tramo, se usa el número de servicio para inferir el sentido si aparece en la descripción.
-        _inc_idx = {}
-        if df_incid_full is not None and not df_incid_full.empty:
-            _dif = df_incid_full.copy()
-            _dif['Fecha'] = pd.to_datetime(_dif['Fecha']).dt.normalize()
-            _dif = _dif[_dif['Afecta operación'] == True]
-            for _, _ri in _dif.iterrows():
-                _ti = str(_ri.get('Tramo ini', '')).strip().upper()
-                _tf = str(_ri.get('Tramo fin', '')).strip().upper()
-                _tramo_i = f"{_ti}-{_tf}" if (_ti and _tf and _ti != 'NAN' and _tf != 'NAN') else None
-                _desc_i = str(_ri.get('Descripción', ''))
-                _tipo_i = str(_ri.get('Tipo incidente', '')).strip()
-                _nsv = str(_ri.get('N° servicio', '')).strip()
-                _resumen_i = (f"Serv. {_nsv.split('.')[0]}: " if _nsv and _nsv.lower() != 'nan' else "") + (f"{_tipo_i} — " if _tipo_i and _tipo_i.lower() != 'nan' else "") + _desc_i[:90]
-                _key = (_ri['Fecha'], _tramo_i)
-                _inc_idx.setdefault(_key, []).append(_resumen_i.strip())
-
-        def _incidentes_de(_fecha, _tramo):
-            _lst = _inc_idx.get((_fecha, _tramo), [])
-            # también los que no traen tramo (clave con None) ese mismo día
-            _lst = _lst + _inc_idx.get((_fecha, None), [])
-            if not _lst:
-                return ''
-            _uni = []
-            for _x in _lst:
-                if _x and _x not in _uni:
-                    _uni.append(_x)
-            return " || ".join(_uni[:3]) + (f" (+{len(_uni) - 3} más)" if len(_uni) > 3 else "")
-
         _filas_cmp = []
         for _, _r in _dks.iterrows():
             _dsim = _r['SimR'] - _r['SimP']
@@ -5263,8 +5232,7 @@ if _seccion == _SECCIONES[11]:
             _real = _r['SimR'] + _r['DobR']
             if _prog == 0 and _real == 0:
                 continue  # tramo sin operación ese día
-            _cambio_txt = _describir_cambio(_dsim, _ddob, _r['OD'])
-            _fila = {
+            _filas_cmp.append({
                 'Fecha': _r['Fecha'],
                 'Tramo': _r['OD'],
                 'Simples Prog.': int(_r['SimP']), 'Dobles Prog.': int(_r['DobP']),
@@ -5272,13 +5240,7 @@ if _seccion == _SECCIONES[11]:
                 'Δ Simples': int(_dsim), 'Δ Dobles': int(_ddob),
                 'Servicios Prog.': int(_prog), 'Servicios Real.': int(_real),
                 'Δ Servicios': int(_real - _prog),
-                'Qué cambió': _cambio_txt}
-            # Solo se busca incidente asociado cuando hubo un cambio
-            if _cambio_txt != 'sin cambios':
-                _fila['Incidente asociado'] = _incidentes_de(_r['Fecha'], _r['OD'])
-            else:
-                _fila['Incidente asociado'] = ''
-            _filas_cmp.append(_fila)
+                'Qué cambió': _describir_cambio(_dsim, _ddob, _r['OD'])})
         _cmp = pd.DataFrame(_filas_cmp)
         if _cmp.empty:
             st.info("No hay servicios con operación en el rango seleccionado.")
@@ -5298,11 +5260,7 @@ if _seccion == _SECCIONES[11]:
             _vista = _vista.sort_values(['Fecha', 'Tramo']).copy()
             _vista['Fecha'] = pd.to_datetime(_vista['Fecha']).dt.strftime('%d-%m-%Y')
             _st_df(_vista, use_container_width=True, hide_index=True)
-            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se suprimió un servicio del tipo indicado. **Incidente asociado**: el o los incidentes que afectaron la operación ese día en ese tramo (del parte de incidentes), que suelen explicar el cambio.")
-            if df_incid_full is None or df_incid_full.empty:
-                st.caption("ℹ️ Para llenar la columna «Incidente asociado», sube también el archivo de **Incidentes** del mismo período que el UMR.")
-            elif '_inc_idx' in dir() and _inc_idx and _vista['Incidente asociado'].astype(str).str.strip().eq('').all():
-                st.caption("ℹ️ Hay incidentes cargados pero de fechas distintas a las del UMR: no cruzan. Sube ambos archivos del mismo mes para asociar cada cambio con su incidente.")
+            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se suprimió un servicio del tipo indicado. Un «tramo-día» es la combinación de una fecha y un tramo (PU-LI, LI-PU, etc.).")
 
             _buf_c = BytesIO()
             with pd.ExcelWriter(_buf_c, engine='openpyxl') as _w:
@@ -5312,6 +5270,79 @@ if _seccion == _SECCIONES[11]:
                                file_name="umr_programado_vs_realizado.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="_dl_cmp_pr")
+
+        # ===== Tabla independiente: todo lo que puede afectar la operación, por día =====
+        st.markdown("#### ⚠️ Factores que pueden afectar la operación, por día")
+        _factores = []
+        # 1) Incidentes que afectan la operación (del parte de incidentes)
+        if df_incid_full is not None and not df_incid_full.empty:
+            _dif = df_incid_full.copy()
+            _dif['Fecha'] = pd.to_datetime(_dif['Fecha']).dt.normalize()
+            _dif = _dif[_dif['Afecta operación'] == True]
+            for _, _ri in _dif.iterrows():
+                _ti = str(_ri.get('Tramo ini', '')).strip().upper()
+                _tf = str(_ri.get('Tramo fin', '')).strip().upper()
+                _tramo_i = f"{_ti}-{_tf}" if (_ti and _tf and _ti not in ('', 'NAN') and _tf not in ('', 'NAN')) else '—'
+                _nsv = str(_ri.get('N° servicio', '')).strip()
+                _nsv = _nsv.split('.')[0] if _nsv and _nsv.lower() != 'nan' else ''
+                _timp = pd.to_numeric(_ri.get('Tiempo impacto (min)'), errors='coerce')
+                _factores.append({
+                    'Fecha': _ri['Fecha'], 'Factor': 'Incidente', 'Tipo': str(_ri.get('Tipo incidente', '')).strip(),
+                    'Tramo': _tramo_i, 'N° servicio': _nsv,
+                    'Impacto (min)': float(_timp) if pd.notna(_timp) else np.nan,
+                    'Detalle': str(_ri.get('Descripción', ''))[:180]})
+        # 2) Cortes y acoples (del df_incid de kilometraje)
+        if df_incid is not None and not df_incid.empty and {'Fecha', 'Tipo'}.issubset(df_incid.columns):
+            _dc = df_incid.copy(); _dc['Fecha'] = pd.to_datetime(_dc['Fecha']).dt.normalize()
+            for _, _rc in _dc.iterrows():
+                _factores.append({
+                    'Fecha': _rc['Fecha'], 'Factor': _rc['Tipo'], 'Tipo': _rc['Tipo'],
+                    'Tramo': str(_rc.get('Lugar', '') or '—'),
+                    'N° servicio': str(int(_rc['Servicio'])) if pd.notna(_rc.get('Servicio')) else '',
+                    'Impacto (min)': np.nan,
+                    'Detalle': f"Servicio {int(_rc['Servicio']) if pd.notna(_rc.get('Servicio')) else '?'}, viaje {int(_rc['Viaje']) if pd.notna(_rc.get('Viaje')) else '?'}" +
+                               (f", motrices {int(_rc['M1']) if pd.notna(_rc.get('M1')) else '?'}/{int(_rc['M2']) if pd.notna(_rc.get('M2')) else '?'}" if _rc['Tipo'] == 'Desacople' else "")})
+        # 3) Circulación nocturna de SFE (del OIT)
+        if df_oit is not None and not df_oit.empty and 'Fecha' in df_oit.columns:
+            _do = df_oit.copy(); _do['Fecha'] = pd.to_datetime(_do['Fecha']).dt.normalize()
+            for _, _ro in _do.iterrows():
+                _factores.append({
+                    'Fecha': _ro['Fecha'], 'Factor': 'SFE nocturno', 'Tipo': str(_ro.get('SFE', 'SFE')),
+                    'Tramo': '—', 'N° servicio': '', 'Impacto (min)': np.nan,
+                    'Detalle': f"Cierre {_ro.get('Hora cierre', '')} · {str(_ro.get('Área', ''))} · {str(_ro.get('Trabajos', ''))[:120]}"})
+
+        if not _factores:
+            st.info("No hay factores de afectación cargados en el período. Sube **Incidentes** (y opcionalmente **OIT**) del mismo mes que el UMR para ver, día a día, todo lo que pudo afectar la operación.")
+        else:
+            _fac = pd.DataFrame(_factores).sort_values(['Fecha', 'Factor']).reset_index(drop=True)
+            _n_dias_fac = int(_fac['Fecha'].nunique())
+            _f1, _f2, _f3 = st.columns(3)
+            _f1.metric("Factores de afectación", _ncl(len(_fac), 0))
+            _f2.metric("Días afectados", _ncl(_n_dias_fac, 0))
+            _imp_tot = pd.to_numeric(_fac['Impacto (min)'], errors='coerce').fillna(0).sum()
+            _f3.metric("Tiempo de impacto total", f"{_ncl(float(_imp_tot), 0)} min", "incidentes con dato", delta_color="off")
+            # Resumen por día
+            _resumen_dia = _fac.groupby(['Fecha', 'Factor']).size().unstack(fill_value=0)
+            _resumen_dia['Total'] = _resumen_dia.sum(axis=1)
+            _resumen_dia = _resumen_dia.reset_index()
+            _resumen_dia['Fecha'] = pd.to_datetime(_resumen_dia['Fecha']).dt.strftime('%d-%m-%Y')
+            st.markdown("**Resumen por día (cuántos factores de cada tipo)**")
+            _st_df(_resumen_dia, use_container_width=True, hide_index=True)
+            # Detalle
+            with st.expander(f"Ver el detalle de los {len(_fac)} factores", expanded=False):
+                _fac_show = _fac.copy(); _fac_show['Fecha'] = pd.to_datetime(_fac_show['Fecha']).dt.strftime('%d-%m-%Y')
+                _fac_show['Impacto (min)'] = _fac_show['Impacto (min)'].map(lambda _v: _ncl(_v, 0) if pd.notna(_v) else '—')
+                _st_df(_fac_show, use_container_width=True, hide_index=True)
+            st.caption("Reúne todo lo que pudo afectar la circulación cada día: **incidentes** que afectan la operación (retrasos, retiros, fallas), **cortes y acoples**, y **circulación nocturna de SFE**. Sirve para explicar por qué los servicios realizados difieren de los programados.")
+            _buf_f = BytesIO()
+            with pd.ExcelWriter(_buf_f, engine='openpyxl') as _w:
+                _resumen_dia.to_excel(_w, sheet_name='Resumen por día', index=False)
+                _fac_x = _fac.copy(); _fac_x['Fecha'] = pd.to_datetime(_fac_x['Fecha']).dt.strftime('%d-%m-%Y')
+                _fac_x.to_excel(_w, sheet_name='Detalle factores', index=False)
+            st.download_button("⬇️ Descargar factores de afectación", data=_buf_f.getvalue(),
+                               file_name="factores_afectacion_por_dia.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="_dl_factores")
         st.divider()
 
     _det_sv = detalle_servicios(df_thdr_v1, df_thdr_v2, None)
