@@ -1644,7 +1644,7 @@ _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame(); df_viajes=pd.DataFrame()
-df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); df_oit=pd.DataFrame(); _mot_inval=0; _seat_dups=0; _oit_diag={}
+df_ide_lb=pd.DataFrame(); df_incid=pd.DataFrame(); df_incid_full=pd.DataFrame(); df_oit=pd.DataFrame(); _mot_inval=0; _seat_dups=0; _oit_diag={}
 df_serv_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','Servicios','TrenKm']); df_pax_tipo=pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX'])
 all_ops,all_tr,all_seat,all_fact_full,all_prmte_full=[],[],[],[],[]
 all_prmte_2025=[]
@@ -1668,6 +1668,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_viajes=st.session_state.get('df_viajes', pd.DataFrame())
     df_ide_lb=st.session_state.get('df_ide_lb', pd.DataFrame())
     df_incid=st.session_state.get('df_incid', pd.DataFrame())
+    df_incid_full=st.session_state.get('df_incid_full', pd.DataFrame())
     _mot_inval=st.session_state.get('_mot_inval', 0)
     _seat_dups=st.session_state.get('_seat_dups', 0)
     df_oit=st.session_state.get('df_oit', pd.DataFrame())
@@ -2025,6 +2026,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         # Frase clave transversal: "es/son acoplado(s)" o "es/son desacoplado(s)"
         _RX_INC_EVT = re.compile(r'\b(?:es|son)\s+(?P<des>des)?acoplad[oa]s?\b', re.I)
         _inc_rows = []
+        _inc_full_rows = []
         _mot_inval = 0  # se reinicia en cada carga
         for f in f_incid_all:
             try:
@@ -2046,6 +2048,38 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _col_lug = next((c for c in _di.columns if str(c).strip().lower() == 'lugar'), None)
                 if _col_desc is None or _col_fec is None:
                     continue
+                # --- Todos los incidentes, con los campos que indican afectación ---
+                def _col_inc(*_cl):
+                    for _c in _di.columns:
+                        _cn = str(_c).strip().lower()
+                        if any(_k in _cn for _k in _cl):
+                            return _c
+                    return None
+                _c_afecta = _col_inc('afecta operaci', 'afecta la operaci')
+                _c_tipo = _col_inc('tipo incidente')
+                _c_cat = _col_inc('categoria incidente', 'categoría incidente')
+                _c_timp = _col_inc('tiempo de impacto')
+                _c_serv = _col_inc('numero de servicio', 'número de servicio')
+                _c_crit = _col_inc('critico', 'crítico')
+                _c_tri = _col_inc('tramo inicial')
+                _c_trf = _col_inc('tramo final')
+                for _, _rf in _di.iterrows():
+                    _fof = pd.to_datetime(_rf.get(_col_fec), dayfirst=True, errors='coerce')
+                    if pd.isna(_fof) or not (start_date <= _fof.date() <= end_date):
+                        continue
+                    _afv = str(_rf.get(_c_afecta, '')).strip().upper() if _c_afecta else ''
+                    _afecta = _afv in ('SI', 'SÍ', 'YES', 'TRUE', '1', 'VERDADERO')
+                    _timp = pd.to_numeric(_rf.get(_c_timp), errors='coerce') if _c_timp else np.nan
+                    _inc_full_rows.append({
+                        'Fecha': _fof.normalize(),
+                        'Afecta operación': _afecta,
+                        'Tipo incidente': (str(_rf.get(_c_tipo, '')).strip() if _c_tipo else ''),
+                        'Categoría': (str(_rf.get(_c_cat, '')).strip() if _c_cat else ''),
+                        'Tiempo impacto (min)': float(_timp) if pd.notna(_timp) else np.nan,
+                        'N° servicio': (str(_rf.get(_c_serv, '')).strip() if _c_serv else ''),
+                        'Tramo ini': (str(_rf.get(_c_tri, '')).strip().upper() if _c_tri else ''),
+                        'Tramo fin': (str(_rf.get(_c_trf, '')).strip().upper() if _c_trf else ''),
+                        'Descripción': str(_rf.get(_col_desc, ''))[:200]})
                 for _, _r in _di.iterrows():
                     _fo = pd.to_datetime(_r.get(_col_fec), dayfirst=True, errors='coerce')
                     if pd.isna(_fo) or not (start_date <= _fo.date() <= end_date):
@@ -2078,6 +2112,8 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _errores_proc[f.name] = f"Incidentes: {_e}"
         if _inc_rows:
             df_incid = pd.DataFrame(_inc_rows).drop_duplicates(subset=['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Viaje']).sort_values(['Fecha', 'Servicio', 'Viaje']).reset_index(drop=True)
+        if _inc_full_rows:
+            df_incid_full = pd.DataFrame(_inc_full_rows).sort_values('Fecha').reset_index(drop=True)
 
     # --- Consulta OIT: circulación nocturna de SFE ---
     # Criterio: Área = Material Rodante, y que sea SFE (por la columna Sistema o por Trabajos),
@@ -2250,7 +2286,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
-                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, 'df_oit':df_oit, '_oit_diag':_oit_diag, '_mot_inval':_mot_inval, '_seat_dups':_seat_dups})
+                              'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, 'df_incid_full':df_incid_full, 'df_oit':df_oit, '_oit_diag':_oit_diag, '_mot_inval':_mot_inval, '_seat_dups':_seat_dups})
     st.session_state['_do_load'] = False
 
 # --- 8. TABS DE VISUALIZACIÓN ---
@@ -2402,6 +2438,7 @@ if not df_ops.empty and _seccion != _SECCIONES[6]:
     df_viajes = _filt_df(df_viajes, 'Fecha')
     df_ide_lb = _filt_df(df_ide_lb, 'Fecha')
     df_incid = _filt_df(df_incid, 'Fecha')
+    df_incid_full = _filt_df(df_incid_full, 'Fecha')
     df_oit = _filt_df(df_oit, 'Fecha')
     df_serv_tipo = _filt_df(df_serv_tipo, 'Fecha')
     df_pax_tipo = _filt_df(df_pax_tipo, 'Fecha')
@@ -4955,6 +4992,83 @@ if _seccion == _SECCIONES[9]:
 
 if _seccion == _SECCIONES[10]:
     st.markdown("### 🩺 Diagnóstico Automático de Anomalías de Consumo")
+
+    # ===== Incidentes con afectación a servicios y energía =====
+    if df_incid_full is not None and not df_incid_full.empty:
+        with st.expander("🚦 Incidentes con afectación a servicios y consumo", expanded=True):
+            _dif = df_incid_full.copy()
+            _dif['Fecha'] = pd.to_datetime(_dif['Fecha']).dt.normalize()
+            _n_tot_i = len(_dif)
+            _con_af = _dif[_dif['Afecta operación'] == True].copy()
+            _n_af = len(_con_af)
+            _i1, _i2, _i3, _i4 = st.columns(4)
+            _i1.metric("Incidentes totales", _ncl(_n_tot_i, 0))
+            _i2.metric("Afectan la operación", _ncl(_n_af, 0), f"{_ncl(_n_af / max(_n_tot_i, 1) * 100, 1)} % del total", delta_color="off")
+            _t_imp = pd.to_numeric(_con_af['Tiempo impacto (min)'], errors='coerce').fillna(0)
+            _i3.metric("Tiempo de impacto total", f"{_ncl(float(_t_imp.sum()), 0)} min", "en los que afectan", delta_color="off")
+            _i4.metric("Días con afectación", _ncl(int(_con_af['Fecha'].nunique()), 0), delta_color="off")
+
+            st.caption("«Afecta operación» viene marcado en el propio parte de incidentes. Estos son los que discriminan afectación a la **cantidad de servicios** (retrasos, supresiones, retiros) y, por lo tanto, al **consumo de energía** del día — a diferencia de los incidentes administrativos o de fiscalización que no alteran la circulación.")
+
+            if _n_af > 0:
+                _ca, _cb = st.columns(2)
+                with _ca:
+                    st.markdown("**Por tipo de incidente (los que afectan)**")
+                    _por_tipo = _con_af.groupby('Tipo incidente', as_index=False).agg(**{
+                        'Incidentes': ('Tipo incidente', 'size'),
+                        'Impacto (min)': ('Tiempo impacto (min)', lambda _s: pd.to_numeric(_s, errors='coerce').sum())}).sort_values('Incidentes', ascending=False)
+                    _fti = px.bar(_por_tipo, x='Tipo incidente', y='Incidentes', color_discrete_sequence=['#c62828'])
+                    _fti.update_traces(hovertemplate='%{x}: %{y}<extra></extra>')
+                    _fti.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0), xaxis_title='', yaxis_title='Incidentes')
+                    _pc(_fti, use_container_width=True, config={'locale': 'es'})
+                with _cb:
+                    st.markdown("**Afectan vs no afectan**")
+                    _split = pd.DataFrame({'Afectación': ['Afecta operación', 'No afecta'], 'Incidentes': [_n_af, _n_tot_i - _n_af]})
+                    _fsp = px.pie(_split, names='Afectación', values='Incidentes', hole=0.45,
+                                  color='Afectación', color_discrete_map={'Afecta operación': '#c62828', 'No afecta': '#9aa0a6'})
+                    _fsp.update_traces(textinfo='label+value', hovertemplate='%{label}: %{value}<extra></extra>')
+                    _fsp.update_layout(height=280, margin=dict(t=10, b=0, l=0, r=0), showlegend=False)
+                    _pc(_fsp, use_container_width=True, config={'locale': 'es'})
+
+                # Cruce por día: afectación vs energía e IDE
+                if not df_ops.empty:
+                    _af_dia = _con_af.groupby('Fecha', as_index=False).agg(**{
+                        'Incidentes que afectan': ('Afecta operación', 'size'),
+                        'Impacto (min)': ('Tiempo impacto (min)', lambda _s: pd.to_numeric(_s, errors='coerce').sum())})
+                    _ops_e = df_ops.copy(); _ops_e['Fecha'] = pd.to_datetime(_ops_e['Fecha']).dt.normalize()
+                    _mrg = _ops_e[['Fecha', 'E_Tr', 'IDE (kWh/km)', 'Tren-Km [km]']].merge(_af_dia, on='Fecha', how='left')
+                    _mrg['Incidentes que afectan'] = _mrg['Incidentes que afectan'].fillna(0)
+                    _mrg['Impacto (min)'] = _mrg['Impacto (min)'].fillna(0)
+                    _con = _mrg[_mrg['Incidentes que afectan'] > 0]
+                    _sin = _mrg[_mrg['Incidentes que afectan'] == 0]
+                    if len(_con) and len(_sin) and 'IDE (kWh/km)' in _mrg.columns:
+                        _ide_con = float(pd.to_numeric(_con['IDE (kWh/km)'], errors='coerce').median())
+                        _ide_sin = float(pd.to_numeric(_sin['IDE (kWh/km)'], errors='coerce').median())
+                        st.markdown("**¿Los días con incidentes que afectan consumen distinto?**")
+                        _m1, _m2, _m3 = st.columns(3)
+                        _m1.metric("IDE mediano · días CON afectación", f"{_ncl(_ide_con, 3)} kWh/km", f"{len(_con)} días", delta_color="off")
+                        _m2.metric("IDE mediano · días SIN afectación", f"{_ncl(_ide_sin, 3)} kWh/km", f"{len(_sin)} días", delta_color="off")
+                        _dif_ide = _ide_con - _ide_sin
+                        _m3.metric("Diferencia", f"{_ncl(_dif_ide, 3)} kWh/km",
+                                   "peor con incidentes" if _dif_ide > 0 else "sin empeoramiento", delta_color="off")
+
+                with st.expander(f"Ver los {_n_af} incidentes que afectan la operación", expanded=False):
+                    _tab_af = _con_af[['Fecha', 'Tipo incidente', 'Categoría', 'Tiempo impacto (min)', 'N° servicio', 'Descripción']].copy()
+                    _tab_af['Fecha'] = pd.to_datetime(_tab_af['Fecha']).dt.strftime('%d-%m-%Y')
+                    _tab_af = _tab_af.sort_values('Fecha')
+                    _st_df(_tab_af, use_container_width=True, hide_index=True)
+                _buf_af = BytesIO()
+                with pd.ExcelWriter(_buf_af, engine='openpyxl') as _w:
+                    _ex_af = _con_af.copy(); _ex_af['Fecha'] = pd.to_datetime(_ex_af['Fecha']).dt.strftime('%d-%m-%Y')
+                    _ex_af.to_excel(_w, sheet_name='Afectan operación', index=False)
+                    _ex_all = _dif.copy(); _ex_all['Fecha'] = pd.to_datetime(_ex_all['Fecha']).dt.strftime('%d-%m-%Y')
+                    _ex_all.to_excel(_w, sheet_name='Todos los incidentes', index=False)
+                st.download_button("⬇️ Descargar incidentes con afectación", data=_buf_af.getvalue(),
+                                   file_name="incidentes_afectacion.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="_dl_inc_af")
+        st.divider()
+
     st.markdown("Compara **cada día con los de su mismo tipo** (Laboral / Sábado / Domingo-Festivo) "
                 "con estadística robusta, detecta los que se salen de lo normal y **cruza la THDR y la "
                 "carga de pasajeros** para explicar la causa raíz en lenguaje operativo y de negocio.")
@@ -5110,6 +5224,37 @@ if _seccion == _SECCIONES[11]:
                 _fr.append(f"se {'suprimió' if -_ld == 1 else 'suprimieron'} {-_ld} servicio{'s' if -_ld > 1 else ''} doble{'s' if -_ld > 1 else ''} en el tramo {_tramo}")
             return "; ".join(_fr) if _fr else "sin cambios"
 
+        # Índice de incidentes que afectan la operación, por (fecha, tramo), para asociarlos
+        # al cambio de servicios. El tramo del incidente sale de "Tramo ini-Tramo fin"; si no
+        # trae tramo, se usa el número de servicio para inferir el sentido si aparece en la descripción.
+        _inc_idx = {}
+        if df_incid_full is not None and not df_incid_full.empty:
+            _dif = df_incid_full.copy()
+            _dif['Fecha'] = pd.to_datetime(_dif['Fecha']).dt.normalize()
+            _dif = _dif[_dif['Afecta operación'] == True]
+            for _, _ri in _dif.iterrows():
+                _ti = str(_ri.get('Tramo ini', '')).strip().upper()
+                _tf = str(_ri.get('Tramo fin', '')).strip().upper()
+                _tramo_i = f"{_ti}-{_tf}" if (_ti and _tf and _ti != 'NAN' and _tf != 'NAN') else None
+                _desc_i = str(_ri.get('Descripción', ''))
+                _tipo_i = str(_ri.get('Tipo incidente', '')).strip()
+                _nsv = str(_ri.get('N° servicio', '')).strip()
+                _resumen_i = (f"Serv. {_nsv.split('.')[0]}: " if _nsv and _nsv.lower() != 'nan' else "") + (f"{_tipo_i} — " if _tipo_i and _tipo_i.lower() != 'nan' else "") + _desc_i[:90]
+                _key = (_ri['Fecha'], _tramo_i)
+                _inc_idx.setdefault(_key, []).append(_resumen_i.strip())
+
+        def _incidentes_de(_fecha, _tramo):
+            _lst = _inc_idx.get((_fecha, _tramo), [])
+            # también los que no traen tramo (clave con None) ese mismo día
+            _lst = _lst + _inc_idx.get((_fecha, None), [])
+            if not _lst:
+                return ''
+            _uni = []
+            for _x in _lst:
+                if _x and _x not in _uni:
+                    _uni.append(_x)
+            return " || ".join(_uni[:3]) + (f" (+{len(_uni) - 3} más)" if len(_uni) > 3 else "")
+
         _filas_cmp = []
         for _, _r in _dks.iterrows():
             _dsim = _r['SimR'] - _r['SimP']
@@ -5118,7 +5263,8 @@ if _seccion == _SECCIONES[11]:
             _real = _r['SimR'] + _r['DobR']
             if _prog == 0 and _real == 0:
                 continue  # tramo sin operación ese día
-            _filas_cmp.append({
+            _cambio_txt = _describir_cambio(_dsim, _ddob, _r['OD'])
+            _fila = {
                 'Fecha': _r['Fecha'],
                 'Tramo': _r['OD'],
                 'Simples Prog.': int(_r['SimP']), 'Dobles Prog.': int(_r['DobP']),
@@ -5126,7 +5272,13 @@ if _seccion == _SECCIONES[11]:
                 'Δ Simples': int(_dsim), 'Δ Dobles': int(_ddob),
                 'Servicios Prog.': int(_prog), 'Servicios Real.': int(_real),
                 'Δ Servicios': int(_real - _prog),
-                'Qué cambió': _describir_cambio(_dsim, _ddob, _r['OD'])})
+                'Qué cambió': _cambio_txt}
+            # Solo se busca incidente asociado cuando hubo un cambio
+            if _cambio_txt != 'sin cambios':
+                _fila['Incidente asociado'] = _incidentes_de(_r['Fecha'], _r['OD'])
+            else:
+                _fila['Incidente asociado'] = ''
+            _filas_cmp.append(_fila)
         _cmp = pd.DataFrame(_filas_cmp)
         if _cmp.empty:
             st.info("No hay servicios con operación en el rango seleccionado.")
@@ -5146,7 +5298,11 @@ if _seccion == _SECCIONES[11]:
             _vista = _vista.sort_values(['Fecha', 'Tramo']).copy()
             _vista['Fecha'] = pd.to_datetime(_vista['Fecha']).dt.strftime('%d-%m-%Y')
             _st_df(_vista, use_container_width=True, hide_index=True)
-            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se suprimió un servicio del tipo indicado. Un «tramo-día» es la combinación de una fecha y un tramo (PU-LI, LI-PU, etc.).")
+            st.caption("Compara, por día y tramo, los servicios programados (UMR) con los realizados. **Qué cambió**: si bajaron simples y subieron dobles (o al revés), un servicio cambió de tipo; si cambia el total, se agregó o se suprimió un servicio del tipo indicado. **Incidente asociado**: el o los incidentes que afectaron la operación ese día en ese tramo (del parte de incidentes), que suelen explicar el cambio.")
+            if df_incid_full is None or df_incid_full.empty:
+                st.caption("ℹ️ Para llenar la columna «Incidente asociado», sube también el archivo de **Incidentes** del mismo período que el UMR.")
+            elif '_inc_idx' in dir() and _inc_idx and _vista['Incidente asociado'].astype(str).str.strip().eq('').all():
+                st.caption("ℹ️ Hay incidentes cargados pero de fechas distintas a las del UMR: no cruzan. Sube ambos archivos del mismo mes para asociar cada cambio con su incidente.")
 
             _buf_c = BytesIO()
             with pd.ExcelWriter(_buf_c, engine='openpyxl') as _w:
