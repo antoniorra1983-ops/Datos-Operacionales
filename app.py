@@ -6117,7 +6117,10 @@ if _seccion == _SECCIONES[14]:
 
         _mn = _m.copy(); _mn['fn'] = pd.to_datetime(_mn['Fecha']).dt.normalize()
         _real_cols = [c[1] for c in _comps] + (['Odom'] if _extra_odom else [])
-        _rmap = _mn.set_index('fn')[_real_cols].to_dict('index')
+        # Si una misma fecha aparece más de una vez (mismo día en varios archivos), se
+        # consolida sumando las columnas antes de indexar (to_dict('index') exige índice único).
+        _mn = _mn.groupby('fn', as_index=True)[_real_cols].sum()
+        _rmap = _mn.to_dict('index')
 
         _dias = pd.date_range(_fi, _ff)
         _acc_r = {c[0]: 0.0 for c in _comps}; _acc_p = {c[0]: 0.0 for c in _comps}
