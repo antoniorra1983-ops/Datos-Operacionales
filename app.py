@@ -489,6 +489,43 @@ def combinar_fuentes(ul, carpeta):
     return list(ul or []) + [_ArchivoEnDisco(p) for p in listar_archivos(carpeta)
                              if os.path.basename(p) not in nombres]
 
+# ===== Caché persistente en disco (Parquet) — sobrevive a reinicios del servidor =====
+import hashlib
+_CACHE_DIR = "data/_cache"
+os.makedirs(_CACHE_DIR, exist_ok=True)
+# Versión de la lógica de parseo: si cambia, se invalidan los Parquet viejos.
+_PARSE_VERSION = "p3"
+
+
+def _hash_bytes(_b, *_extra):
+    _h = hashlib.md5()
+    _h.update(_b)
+    for _e in _extra:
+        _h.update(str(_e).encode())
+    return _h.hexdigest()[:16]
+
+
+def _cache_parquet(_tag, _bytes, _procesar, _sd, _ed):
+    """Devuelve el DataFrame procesado de un archivo, usando un Parquet en disco como caché.
+    _procesar() recibe BytesIO y devuelve un DataFrame. El Parquet se identifica por el
+    contenido del archivo + rango de fechas + versión de parseo, así que solo se procesa
+    la primera vez que se ve ese archivo; después se lee el Parquet (mucho más rápido) y
+    persiste aunque el servidor se reinicie."""
+    _key = _hash_bytes(_bytes, _tag, _sd, _ed, _PARSE_VERSION)
+    _path = os.path.join(_CACHE_DIR, f"{_tag}_{_key}.parquet")
+    if os.path.exists(_path):
+        try:
+            return pd.read_parquet(_path)
+        except Exception:
+            pass  # Parquet corrupto: se reprocesa
+    _df = _procesar(BytesIO(_bytes))
+    try:
+        if _df is not None and not _df.empty:
+            _df.to_parquet(_path, index=False)
+    except Exception:
+        pass  # si no se puede escribir (p.ej. FS de solo lectura), igual devuelve el DF
+    return _df if _df is not None else pd.DataFrame()
+
 # --- 5. FUNCIONES DE PROCESAMIENTO CORE ---
 # --- Servicios por tipo de tren (material rodante) + export Excel ---
 def _no_huecos(_fig, _fmt='%d-%m-%y'):
@@ -1410,8 +1447,29 @@ def parsear_fecha_nombre(nombre):
             except ValueError: pass
     return None, f"sin fecha en: '{nombre}'"
 
-def procesar_thdr_eficiente(file, start_date, end_date):
-    nombre = getattr(file, 'name', str(file))
+@st.cache_data(show_spinner=False, max_entries=200)
+def _thdr_cache(_nombre, _bytes, _sd, _ed):
+    """Cachea el THDR procesado (sesión + Parquet en disco). El parseo fila por fila es lo
+    más lento de la carga, así que se procesa una sola vez por archivo y persiste en disco."""
+    def _proc(_bio):
+        _d, _ = procesar_thdr_eficiente(_bio, _sd, _ed, _nombre_override=_nombre)
+        return _d
+    _df = _cache_parquet('thdr', _bytes, _proc, _sd, _ed)
+    _diag = {"archivo": _nombre, "error": None if (_df is not None and not _df.empty) else "sin filas en rango", "filas": len(_df) if _df is not None else 0}
+    return (_df if _df is not None else pd.DataFrame()), _diag
+
+
+def procesar_thdr_cacheado(file, start_date, end_date):
+    try:
+        _nom = getattr(file, 'name', str(file))
+        file.seek(0); _b = file.read(); file.seek(0)
+        return _thdr_cache(_nom, _b, start_date, end_date)
+    except Exception:
+        return procesar_thdr_eficiente(file, start_date, end_date)
+
+
+def procesar_thdr_eficiente(file, start_date, end_date, _nombre_override=None):
+    nombre = _nombre_override or getattr(file, 'name', str(file))
     diag = {"archivo": nombre, "fecha_parseada": None, "en_rango": None, "filas": 0, "error": None}
     try:
         fch_date, desc = parsear_fecha_nombre(nombre)
@@ -1480,6 +1538,278 @@ def procesar_thdr_eficiente(file, start_date, end_date):
         return df, diag
     except Exception as e:
         diag["error"] = str(e); return pd.DataFrame(), diag
+
+@st.cache_data(show_spinner=False, max_entries=100)
+def _carga_cache(_nombre, _bytes, _sd, _ed):
+    return _cache_parquet('carga', _bytes, lambda _bio: procesar_carga_pasajeros(_ArchivoBytes(_nombre, _bio.read()), _sd, _ed), _sd, _ed)
+
+
+@st.cache_data(show_spinner=False, max_entries=100)
+def _viajes_cache(_nombre, _bytes, _sd, _ed):
+    return _cache_parquet('viajes', _bytes, lambda _bio: procesar_viajes_contrato(_ArchivoBytes(_nombre, _bio.read()), _sd, _ed), _sd, _ed)
+
+
+class _ArchivoBytes:
+    """Envoltorio mínimo para pasar bytes a los procesadores como si fuera un archivo subido."""
+    def __init__(self, nombre, data):
+        self.name = nombre; self._bio = BytesIO(data)
+    def read(self, *a, **k): return self._bio.read(*a, **k)
+    def seek(self, *a, **k): return self._bio.seek(*a, **k)
+    def tell(self, *a, **k): return self._bio.tell(*a, **k)
+
+
+def _carga_cacheado(f, start_date, end_date):
+    try:
+        f.seek(0); _b = f.read(); f.seek(0)
+        return _carga_cache(getattr(f, 'name', ''), _b, start_date, end_date)
+    except Exception:
+        return procesar_carga_pasajeros(f, start_date, end_date)
+
+
+def _viajes_cacheado(f, start_date, end_date):
+    try:
+        f.seek(0); _b = f.read(); f.seek(0)
+        return _viajes_cache(getattr(f, 'name', ''), _b, start_date, end_date)
+    except Exception:
+        return procesar_viajes_contrato(f, start_date, end_date)
+
+
+@st.cache_data(show_spinner=False, max_entries=60)
+def _seat_cache(_nombre, _bytes, _sd, _ed):
+    """Procesa SEAT (energía diaria) y SAF LI con Parquet en disco. Devuelve (all_seat, all_saf_li, error)."""
+    _key = _hash_bytes(_bytes, _nombre, _sd, _ed, _PARSE_VERSION)
+    _ps = os.path.join(_CACHE_DIR, f"seat_{_key}_seat.parquet")
+    _pl = os.path.join(_CACHE_DIR, f"seat_{_key}_saf.parquet")
+    if os.path.exists(_ps) and os.path.exists(_pl):
+        try:
+            return (pd.read_parquet(_ps).to_dict('records'), pd.read_parquet(_pl).to_dict('records'), None)
+        except Exception:
+            pass
+    _seat = []; _saf = []
+    try:
+        _es = "xlrd" if _nombre.lower().endswith(".xls") else "openpyxl"
+        _sa_y, _sa_m = _mes_archivo(_nombre)
+        _ds = pd.read_excel(BytesIO(_bytes), header=None, engine=_es)
+        _fs = pd.to_datetime(_ds.iloc[:, 1], errors='coerce')
+        _dts = _fs.dt.date
+        _msk = _fs.notna() & (_dts >= _sd) & (_dts <= _ed)
+        if _msk.any():
+            _sdf = pd.DataFrame({
+                'Fecha': _fs[_msk].dt.normalize().values,
+                'E_Total': _ds.loc[_msk, 3].map(parse_latam_number).values,
+                'E_Tr': _ds.loc[_msk, 5].map(parse_latam_number).values,
+                'E_12': _ds.loc[_msk, 7].map(parse_latam_number).values})
+            _sdf['_arch'] = _nombre; _sdf['_arch_anio'] = _sa_y; _sdf['_arch_mes'] = _sa_m
+            _seat = _sdf.to_dict('records')
+        # Hoja SAFs: Limache (Taller=col6, TGSN=col7) — vectorizado
+        try:
+            _xs = pd.ExcelFile(BytesIO(_bytes), engine=_es)
+            _hsaf = next((s for s in _xs.sheet_names if 'saf' in s.lower()), None)
+            if _hsaf:
+                _dsaf = pd.read_excel(BytesIO(_bytes), sheet_name=_hsaf, header=None, engine=_es)
+                _fl = pd.to_datetime(_dsaf.iloc[:, 1], errors='coerce')
+                _dl = _fl.dt.date
+                _mk = _fl.notna() & (_dl >= _sd) & (_dl <= _ed)
+                if _mk.any():
+                    _tal = _dsaf.loc[_mk, 6].map(parse_latam_number)
+                    _tg = _dsaf.loc[_mk, 7].map(parse_latam_number)
+                    _ldf = pd.DataFrame({'Fecha': _fl[_mk].dt.normalize().values, 'SAF_Taller': _tal.values, 'SAF_TGSN': _tg.values})
+                    _ldf = _ldf[(_ldf['SAF_Taller'] > 0) | (_ldf['SAF_TGSN'] > 0)]
+                    _saf = _ldf.to_dict('records')
+        except Exception:
+            pass
+    except Exception as _e:
+        return _seat, _saf, f"SEAT: {_e}"
+    try:
+        pd.DataFrame(_seat).to_parquet(_ps, index=False)
+        pd.DataFrame(_saf).to_parquet(_pl, index=False)
+    except Exception:
+        pass
+    return _seat, _saf, None
+
+
+@st.cache_data(show_spinner=False, max_entries=40)
+def _umr_cache(_nombre, _bytes, _sd, _ed):
+    """Procesa el UMR (odómetro, km por tren, KM-Servicio) con Parquet en disco.
+    Devuelve (all_ops, all_tr, all_kmserv, error)."""
+    _key = _hash_bytes(_bytes, _nombre, _sd, _ed, _PARSE_VERSION)
+    _po = os.path.join(_CACHE_DIR, f"umr_{_key}_ops.parquet")
+    _pt = os.path.join(_CACHE_DIR, f"umr_{_key}_tr.parquet")
+    _pk = os.path.join(_CACHE_DIR, f"umr_{_key}_kms.parquet")
+    if os.path.exists(_po) and os.path.exists(_pt) and os.path.exists(_pk):
+        try:
+            return (pd.read_parquet(_po).to_dict('records'),
+                    pd.read_parquet(_pt).to_dict('records'),
+                    pd.read_parquet(_pk).to_dict('records'), None)
+        except Exception:
+            pass
+    _ops = []; _tr = []; _kms = []
+    try:
+        _eu = "xlrd" if _nombre.lower().endswith(".xls") else "openpyxl"
+        _xl = pd.ExcelFile(BytesIO(_bytes), engine=_eu)
+        for _sn in _xl.sheet_names:
+            _raw = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, header=None, engine=_eu)
+            _hr = next((i for i in range(min(100, len(_raw))) if any(k in str(_raw.iloc[i].tolist()).upper() for k in ['FECHA', 'ODO', 'KILOM'])), None)
+            if _hr is not None:
+                _dp = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, header=_hr, engine=_eu)
+                _dp.columns = [str(c).upper().replace('Ó', 'O').strip() for c in _dp.columns]
+                _cf = next((c for c in _dp.columns if 'FECHA' in c), None)
+                _co = next((c for c in _dp.columns if 'ODO' in c), None)
+                _ct = next((c for c in _dp.columns if 'KM' in c), None)
+                if _cf and _co:
+                    _dt = pd.to_datetime(_dp[_cf], errors='coerce').dt.normalize()
+                    _msk = (_dt.dt.date >= _sd) & (_dt.dt.date <= _ed) & _dt.notna()
+                    _dv = _dp[_msk]
+                    if not _dv.empty:
+                        _od_v = _dv[_co].map(parse_latam_number)
+                        _tk_v = _dv[_ct].map(parse_latam_number) if _ct else pd.Series(0.0, index=_dv.index)
+                        _tmp = pd.DataFrame({
+                            'Fecha': _dt[_msk].values,
+                            'Tipo Día': _dt[_msk].dt.date.map(get_tipo_dia).values,
+                            'Odómetro [km]': _od_v.values,
+                            'Tren-Km [km]': _tk_v.values})
+                        _ops.extend(_tmp.to_dict('records'))
+            if any(k in _sn.upper() for k in ['KIL', 'ODO']):
+                _clase = None; _fcols = {}
+                for i in range(len(_raw)):
+                    _txt = ' '.join(str(x).upper() for x in _raw.iloc[i].tolist()[:4] if pd.notna(x))
+                    if 'DIARIO' in _txt:
+                        _clase = 'km'
+                    elif ('OD' in _txt and 'METR' in _txt) or 'ODOMETR' in _txt:
+                        _clase = 'odo'
+                    _ff = {}
+                    for j in range(1, len(_raw.columns)):
+                        _vf = pd.to_datetime(_raw.iloc[i, j], errors='coerce')
+                        if pd.notna(_vf) and 2020 <= _vf.year <= 2035:
+                            _ff[j] = _vf
+                    if len(_ff) >= 3:
+                        _fcols = _ff
+                    _t = str(_raw.iloc[i, 0]).strip().upper()
+                    if re.match(r'^4\d{2}(\.0+)?$', _t):
+                        _t = f"SFE {int(float(_t))}"
+                    _msfe = re.match(r'^SFE[\s\-_.]*0*(\d+)$', _t)
+                    if _msfe:
+                        _t = f"SFE {int(_msfe.group(1))}"
+                    if _clase and _fcols and re.match(r'^(M|XM|SFE)', _t):
+                        for j, _fe in _fcols.items():
+                            if _sd <= _fe.date() <= _ed:
+                                _tr.append({"Tren": _t, "Fecha": _fe.normalize(),
+                                            "Valor": parse_latam_number(_raw.iloc[i, j]), "Clase": _clase})
+            if 'SERV' in _sn.upper() and 'KM' in _sn.upper():
+                _fe_kms = pd.to_datetime(_raw.iloc[4:, 0], errors='coerce').ffill()
+                for _ri in range(4, len(_raw)):
+                    _od = _raw.iloc[_ri, 5]
+                    _fe = _fe_kms.get(_ri)
+                    if pd.notna(_od) and pd.notna(_fe) and re.match(r'^[A-Z]{2,3}-[A-Z]{2,3}$', str(_od).strip().upper()) and _sd <= _fe.date() <= _ed:
+                        _kms.append({"Fecha": _fe.normalize(), "OD": str(_od).strip().upper(),
+                                     "KmsxTrenes": parse_latam_number(_raw.iloc[_ri, 9]),
+                                     "KmTrenR": parse_latam_number(_raw.iloc[_ri, 22]),
+                                     "KmTrenP": parse_latam_number(_raw.iloc[_ri, 23]),
+                                     "SimP": parse_latam_number(_raw.iloc[_ri, 1]),
+                                     "DobP": parse_latam_number(_raw.iloc[_ri, 2]),
+                                     "SimR": parse_latam_number(_raw.iloc[_ri, 3]),
+                                     "DobR": parse_latam_number(_raw.iloc[_ri, 4]),
+                                     "Cortes_EB": parse_latam_number(_raw.iloc[_ri, 16]),
+                                     "Cortes_SA": parse_latam_number(_raw.iloc[_ri, 17]),
+                                     "Cortes_PE": parse_latam_number(_raw.iloc[_ri, 18]),
+                                     "Acoples_EB": parse_latam_number(_raw.iloc[_ri, 19]),
+                                     "Acoples_SA": parse_latam_number(_raw.iloc[_ri, 20]),
+                                     "Acoples_PE": parse_latam_number(_raw.iloc[_ri, 21])})
+    except Exception as _e:
+        return _ops, _tr, _kms, f"UMR: {_e}"
+    try:
+        pd.DataFrame(_ops).to_parquet(_po, index=False)
+        pd.DataFrame(_tr).to_parquet(_pt, index=False)
+        pd.DataFrame(_kms).to_parquet(_pk, index=False)
+    except Exception:
+        pass
+    return _ops, _tr, _kms, None
+
+
+@st.cache_data(show_spinner=False, max_entries=60)
+def _bill_cache(_nombre, _bytes, _sd, _ed):
+    """Procesa Factura y PRMTE (vectorizado + Parquet en disco). Devuelve
+    (factura, prmte_rango, prmte_2025, error). El PRMTE cada 15 min es de los más pesados."""
+    _key = _hash_bytes(_bytes, _nombre, _sd, _ed, _PARSE_VERSION)
+    _pf = os.path.join(_CACHE_DIR, f"bill_{_key}_fact.parquet")
+    _pp = os.path.join(_CACHE_DIR, f"bill_{_key}_prmte.parquet")
+    _p25 = os.path.join(_CACHE_DIR, f"bill_{_key}_prmte25.parquet")
+    if os.path.exists(_pf) and os.path.exists(_pp) and os.path.exists(_p25):
+        try:
+            return (pd.read_parquet(_pf).to_dict('records'),
+                    pd.read_parquet(_pp).to_dict('records'),
+                    pd.read_parquet(_p25).to_dict('records'), None)
+        except Exception:
+            pass  # Parquet corrupto: reprocesa
+    _fact = []; _prmte = []; _prmte25 = []
+    try:
+        _eb = "xlrd" if _nombre.lower().endswith(".xls") else "openpyxl"
+        _xl = pd.ExcelFile(BytesIO(_bytes), engine=_eb)
+        for _sn in _xl.sheet_names:
+            if _sn == "Consumo Factura":
+                _dff = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, engine=_eb)
+                _cf = next((c for c in _dff.columns if 'FECHA' in str(c).upper()), _dff.columns[0])
+                _cv = next((c for c in _dff.columns if 'CONSUMO' in str(c).upper() or 'VALOR' in str(c).upper()), _dff.columns[1])
+                _dt = pd.to_datetime(_dff[_cf], errors='coerce')
+                _msk = _dt.notna() & ~_dff[_cf].astype(str).str.upper().str.contains('TOTAL', na=False)
+                _dt = _dt[_msk]
+                _cons = _dff.loc[_msk, _cv].map(parse_latam_number).abs()
+                if len(_dt):
+                    _ff = pd.DataFrame({
+                        'Fecha': _dt.dt.normalize().values,
+                        'Hora': _dt.dt.strftime('%H:00').values,
+                        '15min': (_dt.dt.strftime('%H:') + (_dt.dt.minute // 15 * 15).map(lambda _m: f"{_m:02d}")).values,
+                        'Consumo': _cons.values})
+                    _fact = _ff.to_dict('records')
+
+            if 'PRMTE' in _sn.upper():
+                _raw = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, header=None, engine=_eb)
+                _h = next((i for i in range(min(20, len(_raw))) if any(k in str(_raw.iloc[i]).upper() for k in ['AÑO', 'ANO', 'YEAR'])), 0)
+                _dp = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, header=_h, engine=_eb).dropna(how='all')
+                _ca = next((c for c in _dp.columns if str(c).upper().replace('Ñ', 'N').startswith('AN')), None)
+                _cm = next((c for c in _dp.columns if str(c).upper().startswith('MES')), None)
+                _cd = next((c for c in _dp.columns if str(c).upper().startswith('DIA')), None)
+                _ch = next((c for c in _dp.columns if str(c).upper() == 'HORA'), None)
+                _ci = next((c for c in _dp.columns if 'INICIO' in str(c).upper()), None)
+                if not (_ca and _cm and _cd and _ch):
+                    return _fact, _prmte, _prmte25, f"PRMTE: columnas de fecha no encontradas"
+                # Timestamp vectorizado desde año/mes/día/hora/minuto
+                _mn = pd.to_numeric(_dp[_ci], errors='coerce').fillna(0).astype(int) if _ci else 0
+                _ts = pd.to_datetime(dict(
+                    year=pd.to_numeric(_dp[_ca], errors='coerce'),
+                    month=pd.to_numeric(_dp[_cm], errors='coerce'),
+                    day=pd.to_numeric(_dp[_cd], errors='coerce'),
+                    hour=pd.to_numeric(_dp[_ch], errors='coerce'),
+                    minute=_mn), errors='coerce')
+                _cols_ret = [c for c in _dp.columns if 'Retiro_Energia_Activa' in str(c)]
+                if not _cols_ret:
+                    _cols_ret = [c for c in _dp.columns if 'RETIRO' in str(c).upper() or ('ENERGIA' in str(c).upper() and 'ACTIVA' in str(c).upper())]
+                # Consumo vectorizado: suma de las columnas de retiro
+                _cons = sum(_dp[c].map(parse_latam_number) for c in _cols_ret) if _cols_ret else pd.Series(0.0, index=_dp.index)
+                _ok = _ts.notna()
+                _df_p = pd.DataFrame({
+                    'ts': _ts[_ok],
+                    'Fecha': _ts[_ok].dt.normalize(),
+                    'Hora': _ts[_ok].dt.strftime('%H:00'),
+                    '15min': _ts[_ok].dt.strftime('%H:%M'),
+                    'Consumo': pd.Series(_cons, index=_dp.index)[_ok].values})
+                _d_date = _df_p['ts'].dt.date
+                _in_rng = (_d_date >= _sd) & (_d_date <= _ed)
+                _is25 = _df_p['ts'].dt.year == 2025
+                _cols_out = ['Fecha', 'Hora', '15min', 'Consumo']
+                _prmte = _df_p.loc[_in_rng, _cols_out].to_dict('records')
+                _prmte25 = _df_p.loc[_is25, _cols_out].to_dict('records')
+    except Exception as _e:
+        return _fact, _prmte, _prmte25, f"Factura/PRMTE: {_e}"
+    # Guardar en Parquet para las próximas cargas (y tras reinicios del servidor)
+    try:
+        pd.DataFrame(_fact).to_parquet(_pf, index=False)
+        pd.DataFrame(_prmte).to_parquet(_pp, index=False)
+        pd.DataFrame(_prmte25).to_parquet(_p25, index=False)
+    except Exception:
+        pass
+    return _fact, _prmte, _prmte25, None
+
 
 def procesar_viajes_contrato(f, start_date, end_date):
     """Lee archivos 'Viajes por Contrato' (resumen mensual por tipo de tarifa).
@@ -1680,156 +2010,37 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     if f_umr_all:
         for f in f_umr_all:
             try:
-                eu="xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
-                xl=pd.ExcelFile(f,engine=eu)
-                for sn in xl.sheet_names:
-                    f.seek(0); df_raw=pd.read_excel(f,sheet_name=sn,header=None,engine=eu)
-                    h_r=next((i for i in range(min(100,len(df_raw))) if any(k in str(df_raw.iloc[i].tolist()).upper() for k in ['FECHA','ODO','KILOM'])),None)
-                    if h_r is not None:
-                        f.seek(0); df_p=pd.read_excel(f,sheet_name=sn,header=h_r,engine=eu)
-                        df_p.columns=[str(c).upper().replace('Ó','O').strip() for c in df_p.columns]
-                        c_f=next((c for c in df_p.columns if 'FECHA' in c),None)
-                        c_o=next((c for c in df_p.columns if 'ODO' in c),None)
-                        c_t=next((c for c in df_p.columns if 'KM' in c),None)
-                        if c_f and c_o:
-                            df_p['_dt']=pd.to_datetime(df_p[c_f],errors='coerce').dt.normalize()
-                            mask=(df_p['_dt'].dt.date>=start_date)&(df_p['_dt'].dt.date<=end_date)
-                            df_valid = df_p[mask].dropna(subset=['_dt']).copy()
-                            for _, r in df_valid.iterrows():
-                                all_ops.append({"Fecha":r['_dt'],"Tipo Día":get_tipo_dia(r['_dt'].date()),
-                                                "Odómetro [km]":parse_latam_number(r[c_o]),
-                                                "Tren-Km [km]":parse_latam_number(r[c_t]) if c_t else 0.0})
-                    if any(k in sn.upper() for k in ['KIL','ODO']):
-                        # Distinguir el bloque "Odómetro" (acumulado) del "Kilometraje Diario"
-                        # por el encabezado, NO por la magnitud: los SFE/trenes nuevos pueden
-                        # tener odómetro acumulado bajo y se confundirían con km diario.
-                        _clase = None; _fcols = {}
-                        for i in range(len(df_raw)):
-                            _txt = ' '.join(str(x).upper() for x in df_raw.iloc[i].tolist()[:4] if pd.notna(x))
-                            if 'DIARIO' in _txt:
-                                _clase = 'km'
-                            elif ('OD' in _txt and 'METR' in _txt) or 'ODOMETR' in _txt:
-                                _clase = 'odo'
-                            _ff = {}
-                            for j in range(1, len(df_raw.columns)):
-                                _vf = pd.to_datetime(df_raw.iloc[i, j], errors='coerce')
-                                if pd.notna(_vf) and 2020 <= _vf.year <= 2035:
-                                    _ff[j] = _vf
-                            if len(_ff) >= 3:
-                                _fcols = _ff
-                            _t = str(df_raw.iloc[i, 0]).strip().upper()
-                            if re.match(r'^4\d{2}(\.0+)?$', _t):
-                                _t = f"SFE {int(float(_t))}"
-                            _msfe = re.match(r'^SFE[\s\-_.]*0*(\d+)$', _t)
-                            if _msfe:
-                                _t = f"SFE {int(_msfe.group(1))}"
-                            if _clase and _fcols and re.match(r'^(M|XM|SFE)', _t):
-                                for j, _fe in _fcols.items():
-                                    if start_date <= _fe.date() <= end_date:
-                                        all_tr.append({"Tren": _t, "Fecha": _fe.normalize(),
-                                                       "Valor": parse_latam_number(df_raw.iloc[i, j]), "Clase": _clase})
-                    if 'SERV' in sn.upper() and 'KM' in sn.upper():
-                        _fe_kms = pd.to_datetime(df_raw.iloc[4:, 0], errors='coerce').ffill()
-                        for _ri in range(4, len(df_raw)):
-                            _od = df_raw.iloc[_ri, 5]
-                            _fe = _fe_kms.get(_ri)
-                            if pd.notna(_od) and pd.notna(_fe) and re.match(r'^[A-Z]{2,3}-[A-Z]{2,3}$', str(_od).strip().upper()) and start_date <= _fe.date() <= end_date:
-                                all_kmserv.append({"Fecha": _fe.normalize(),
-                                                   "OD": str(_od).strip().upper(),
-                                                   "KmsxTrenes": parse_latam_number(df_raw.iloc[_ri, 9]),
-                                                   "KmTrenR": parse_latam_number(df_raw.iloc[_ri, 22]),
-                                                   "KmTrenP": parse_latam_number(df_raw.iloc[_ri, 23]),
-                                                   "SimP": parse_latam_number(df_raw.iloc[_ri, 1]),
-                                                   "DobP": parse_latam_number(df_raw.iloc[_ri, 2]),
-                                                   "SimR": parse_latam_number(df_raw.iloc[_ri, 3]),
-                                                   "DobR": parse_latam_number(df_raw.iloc[_ri, 4]),
-                                                   "Cortes_EB": parse_latam_number(df_raw.iloc[_ri, 16]),
-                                                   "Cortes_SA": parse_latam_number(df_raw.iloc[_ri, 17]),
-                                                   "Cortes_PE": parse_latam_number(df_raw.iloc[_ri, 18]),
-                                                   "Acoples_EB": parse_latam_number(df_raw.iloc[_ri, 19]),
-                                                   "Acoples_SA": parse_latam_number(df_raw.iloc[_ri, 20]),
-                                                   "Acoples_PE": parse_latam_number(df_raw.iloc[_ri, 21])})
-            except Exception as e: _errores_proc[f.name]=f"UMR: {e}"
+                f.seek(0); _bu = f.read(); f.seek(0)
+                _ops_r, _tr_r, _kms_r, _err_u = _umr_cache(f.name, _bu, start_date, end_date)
+                if _err_u:
+                    _errores_proc[f.name] = _err_u
+                all_ops.extend(_ops_r); all_tr.extend(_tr_r); all_kmserv.extend(_kms_r)
+            except Exception as e:
+                _errores_proc[f.name] = f"UMR: {e}"
             
     if f_seat_all:
         for f in f_seat_all:
             try:
-                es="xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
-                _sa_y, _sa_m = _mes_archivo(f.name)
-                df_s=pd.read_excel(f,header=None,engine=es)
-                for i in range(len(df_s)):
-                    fs=pd.to_datetime(df_s.iloc[i,1],errors='coerce')
-                    if pd.notna(fs) and start_date<=fs.normalize().date()<=end_date:
-                        all_seat.append({"Fecha":fs.normalize(),"E_Total":parse_latam_number(df_s.iloc[i,3]),
-                                         "E_Tr":parse_latam_number(df_s.iloc[i,5]),"E_12":parse_latam_number(df_s.iloc[i,7]),
-                                         "_arch":f.name,"_arch_anio":_sa_y,"_arch_mes":_sa_m})
-                # Hoja SAFs: Limache (SAF LI: Taller=col6, TGSN=col7; Principal=Taller+TGSN)
-                try:
-                    f.seek(0); _xls_saf=pd.ExcelFile(f,engine=es)
-                    _hsaf=next((s for s in _xls_saf.sheet_names if 'saf' in s.lower()),None)
-                    if _hsaf:
-                        df_saf=pd.read_excel(_xls_saf,sheet_name=_hsaf,header=None)
-                        for i in range(len(df_saf)):
-                            fl=pd.to_datetime(df_saf.iloc[i,1],errors='coerce')
-                            if pd.notna(fl) and start_date<=fl.normalize().date()<=end_date:
-                                _tal=parse_latam_number(df_saf.iloc[i,6]); _tg=parse_latam_number(df_saf.iloc[i,7])
-                                if (_tal or 0)>0 or (_tg or 0)>0:
-                                    all_saf_li.append({"Fecha":fl.normalize(),"SAF_Taller":_tal,"SAF_TGSN":_tg})
-                except Exception: pass
-            except Exception as e: _errores_proc[f.name]=f"SEAT: {e}"
+                f.seek(0); _bs = f.read(); f.seek(0)
+                _seat_r, _saf_r, _err_s = _seat_cache(f.name, _bs, start_date, end_date)
+                if _err_s:
+                    _errores_proc[f.name] = _err_s
+                all_seat.extend(_seat_r); all_saf_li.extend(_saf_r)
+            except Exception as e:
+                _errores_proc[f.name] = f"SEAT: {e}"
             
     if f_bill_all:
         for f in f_bill_all:
             try:
-                eb="xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
-                f.seek(0); xl=pd.ExcelFile(f,engine=eb)
-                for sn in xl.sheet_names:
-                    if sn=="Consumo Factura":
-                        f.seek(0); df_ff=pd.read_excel(f,sheet_name=sn,engine=eb)
-                        c_f=next((c for c in df_ff.columns if 'FECHA' in str(c).upper()),df_ff.columns[0])
-                        c_v=next((c for c in df_ff.columns if 'CONSUMO' in str(c).upper() or 'VALOR' in str(c).upper()),df_ff.columns[1])
-                        df_ff['dt']=pd.to_datetime(df_ff[c_f],errors='coerce')
-                        df_valid = df_ff.dropna(subset=['dt'])
-                        for _,r in df_valid.iterrows():
-                            if "TOTAL" in str(r[c_f]).upper(): continue
-                            v=abs(parse_latam_number(r[c_v]))
-                            all_fact_full.append({"Fecha":r['dt'].normalize(),"Hora":f"{r['dt'].hour:02d}:00",
-                                                  "15min":f"{r['dt'].hour:02d}:{(r['dt'].minute//15)*15:02d}","Consumo":v})
-                                                  
-                    if 'PRMTE' in sn.upper():
-                        f.seek(0); df_pd_raw=pd.read_excel(f,sheet_name=sn,header=None,engine=eb)
-                        h=next((i for i in range(min(20,len(df_pd_raw))) if any(k in str(df_pd_raw.iloc[i]).upper() for k in ['AÑO','ANO','YEAR'])),0)
-                        f.seek(0); df_pd=pd.read_excel(f,sheet_name=sn,header=h,engine=eb).dropna(how='all')
-                        c_anio=next((c for c in df_pd.columns if str(c).upper().replace('Ñ','N').startswith('AN')),None)
-                        c_mes=next((c for c in df_pd.columns if str(c).upper().startswith('MES')),None)
-                        c_dia=next((c for c in df_pd.columns if str(c).upper().startswith('DIA')),None)
-                        c_hora=next((c for c in df_pd.columns if str(c).upper()=='HORA'),None)
-                        c_ini=next((c for c in df_pd.columns if 'INICIO' in str(c).upper()),None)
-                        
-                        if not (c_anio and c_mes and c_dia and c_hora):
-                            raise ValueError(f"Columnas de fecha no encontradas: {list(df_pd.columns)}")
-                            
-                        def _build_ts(r):
-                            try:
-                                min_=int(r[c_ini]) if c_ini and not pd.isna(r[c_ini]) else 0
-                                return pd.Timestamp(year=int(r[c_anio]),month=int(r[c_mes]),day=int(r[c_dia]),hour=int(r[c_hora]),minute=min_)
-                            except Exception: return pd.NaT
-                            
-                        df_pd['ts']=df_pd.apply(_build_ts,axis=1)
-                        cols_retiro=[c for c in df_pd.columns if 'Retiro_Energia_Activa' in str(c)]
-                        if not cols_retiro:
-                            cols_retiro=[c for c in df_pd.columns if 'RETIRO' in str(c).upper() or ('ENERGIA' in str(c).upper() and 'ACTIVA' in str(c).upper())]
-                            
-                        for _,r in df_pd.dropna(subset=['ts']).iterrows():
-                            ts=r['ts']
-                            if pd.isna(ts): continue
-                            _en_rango=(start_date<=ts.date()<=end_date); _es_2025=(ts.year==2025)
-                            if not (_en_rango or _es_2025): continue
-                            consumo=sum(parse_latam_number(r.get(c,0)) for c in cols_retiro)
-                            _reg_p={"Fecha":ts.normalize(),"Hora":f"{ts.hour:02d}:00","15min":f"{ts.hour:02d}:{ts.minute:02d}","Consumo":consumo}
-                            if _en_rango: all_prmte_full.append(_reg_p)
-                            if _es_2025: all_prmte_2025.append(_reg_p)
-            except Exception as e: _errores_proc[f.name]=f"Factura/PRMTE: {e}"
+                f.seek(0); _bb = f.read(); f.seek(0)
+                _fact_r, _prmte_r, _prmte25_r, _err_b = _bill_cache(f.name, _bb, start_date, end_date)
+                if _err_b:
+                    _errores_proc[f.name] = _err_b
+                all_fact_full.extend(_fact_r)
+                all_prmte_full.extend(_prmte_r)
+                all_prmte_2025.extend(_prmte25_r)
+            except Exception as e:
+                _errores_proc[f.name] = f"Factura/PRMTE: {e}"
             
     if _errores_proc: st.session_state['_errores_proc']=_errores_proc
 
@@ -1950,29 +2161,29 @@ elif _hay_archivos and st.session_state.get('_do_load'):
 
     diag_thdr=[]
     if f_v1_all:
-        r1=[procesar_thdr_eficiente(f,start_date,end_date) for f in f_v1_all]
+        r1=[procesar_thdr_cacheado(f,start_date,end_date) for f in f_v1_all]
         diag_thdr+=[r[1] for r in r1]
         p1=[r[0] for r in r1 if not r[0].empty]
         df_thdr_v1=pd.concat(p1,ignore_index=True) if p1 else pd.DataFrame()
     if f_v2_all:
-        r2=[procesar_thdr_eficiente(f,start_date,end_date) for f in f_v2_all]
+        r2=[procesar_thdr_cacheado(f,start_date,end_date) for f in f_v2_all]
         diag_thdr+=[r[1] for r in r2]
         p2=[r[0] for r in r2 if not r[0].empty]
         df_thdr_v2=pd.concat(p2,ignore_index=True) if p2 else pd.DataFrame()
     if diag_thdr: st.session_state['diag_thdr']=diag_thdr
     
     if f_carga_v1_all:
-        p_cv1 = [procesar_carga_pasajeros(f, start_date, end_date) for f in f_carga_v1_all]
+        p_cv1 = [_carga_cacheado(f, start_date, end_date) for f in f_carga_v1_all]
         p_cv1 = [d for d in p_cv1 if not d.empty]
         df_carga_v1 = pd.concat(p_cv1, ignore_index=True) if p_cv1 else pd.DataFrame()
 
     if f_carga_v2_all:
-        p_cv2 = [procesar_carga_pasajeros(f, start_date, end_date) for f in f_carga_v2_all]
+        p_cv2 = [_carga_cacheado(f, start_date, end_date) for f in f_carga_v2_all]
         p_cv2 = [d for d in p_cv2 if not d.empty]
         df_carga_v2 = pd.concat(p_cv2, ignore_index=True) if p_cv2 else pd.DataFrame()
 
     if f_viajes_all:
-        p_vj = [procesar_viajes_contrato(f, start_date, end_date) for f in f_viajes_all]
+        p_vj = [_viajes_cacheado(f, start_date, end_date) for f in f_viajes_all]
         p_vj = [d for d in p_vj if not d.empty]
         df_viajes = pd.concat(p_vj, ignore_index=True) if p_vj else pd.DataFrame()
 
