@@ -489,7 +489,59 @@ def combinar_fuentes(ul, carpeta):
     return list(ul or []) + [_ArchivoEnDisco(p) for p in listar_archivos(carpeta)
                              if os.path.basename(p) not in nombres]
 
-# ===== Caché persistente en disco (Parquet) — sobrevive a reinicios del servidor =====
+# ===== Carga selectiva por fecha =====
+# El historial completo son >1.200 archivos de varios años. Leerlos todos en cada
+# carga agota la memoria de Streamlit Cloud. Como los procesadores ya descartan las
+# filas fuera del rango del filtro, basta con no leer del disco los archivos cuya
+# fecha queda fuera del rango: el resultado es idéntico y la carga mucho más liviana.
+_MESES_TXT = {'ene':1,'feb':2,'mar':3,'abr':4,'may':5,'jun':6,
+              'jul':7,'ago':8,'sep':9,'oct':10,'nov':11,'dic':12}
+
+def _anio_de_nombre(_n):
+    _m4 = re.search(r'20(\d{2})', _n)
+    if _m4: return 2000 + int(_m4.group(1))
+    for _t in re.findall(r'\d{2}', _n):
+        if 24 <= int(_t) <= 30: return 2000 + int(_t)
+    return None
+
+def _mes_de_nombre(_n):
+    _m = re.search(r'(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)', _n.lower())
+    return _MESES_TXT[_m.group(1)] if _m else None
+
+def _fecha_dia_archivo(_n):
+    """THDR_viaX DDMMYY.xls -> date (o None si no se puede leer)."""
+    _m = re.search(r'(\d{2})(\d{2})(\d{2})(?!\d)', _n)
+    if not _m: return None
+    try: return date(2000 + int(_m.group(3)), int(_m.group(2)), int(_m.group(1)))
+    except ValueError: return None
+
+def _archivo_en_rango(_n, _sd, _ed, _modo):
+    """Decide si un archivo entra según su nombre y el rango [_sd,_ed].
+    _modo='dia' (THDR diario) o 'mes' (mensuales). Si no se puede leer la fecha
+    del nombre, se incluye igual (criterio conservador: nunca se pierde data)."""
+    if _modo == 'dia':
+        _f = _fecha_dia_archivo(_n)
+        return True if _f is None else (_sd <= _f <= _ed)
+    _a = _anio_de_nombre(_n); _me = _mes_de_nombre(_n)
+    if _a is None or _me is None: return True
+    return (_sd.year, _sd.month) <= (_a, _me) <= (_ed.year, _ed.month)
+
+def combinar_fuentes_rango(ul, carpeta, _sd, _ed, _modo, _extra=None):
+    """Como combinar_fuentes, pero del disco solo lee los archivos dentro del rango.
+    Los archivos subidos a mano (ul) siempre entran. _extra(nombre)->bool permite
+    incluir archivos adicionales (p.ej. la base 2025 de facturación)."""
+    nombres = {uf.name for uf in (ul or [])}
+    _paths = []
+    for p in listar_archivos(carpeta):
+        _bn = os.path.basename(p)
+        if _bn in nombres: continue
+        if _archivo_en_rango(_bn, _sd, _ed, _modo) or (_extra and _extra(_bn)):
+            _paths.append(p)
+    return list(ul or []) + [_ArchivoEnDisco(p) for p in _paths]
+
+# ===== Caché persistente en disco (Parquet) — acelera el reprocesamiento mientras
+# el servidor está vivo. OJO: en Streamlit Cloud el disco se borra al reiniciar la
+# app (deploy o inactividad), así que la caché se reconstruye tras cada reinicio. =====
 import hashlib
 _CACHE_DIR = "data/_cache"
 os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -509,8 +561,8 @@ def _cache_parquet(_tag, _bytes, _procesar, _sd, _ed):
     """Devuelve el DataFrame procesado de un archivo, usando un Parquet en disco como caché.
     _procesar() recibe BytesIO y devuelve un DataFrame. El Parquet se identifica por el
     contenido del archivo + rango de fechas + versión de parseo, así que solo se procesa
-    la primera vez que se ve ese archivo; después se lee el Parquet (mucho más rápido) y
-    persiste aunque el servidor se reinicie."""
+    la primera vez que se ve ese archivo; después se lee el Parquet (mucho más rápido).
+    (En Streamlit Cloud el disco se reinicia con la app, así que la caché se rearma tras cada reinicio.)"""
     _key = _hash_bytes(_bytes, _tag, _sd, _ed, _PARSE_VERSION)
     _path = os.path.join(_CACHE_DIR, f"{_tag}_{_key}.parquet")
     if os.path.exists(_path):
@@ -1945,17 +1997,22 @@ with st.sidebar:
             else: st.caption(f"{_nom_k}: sin archivos")
 
 # Combinar uploads
-f_v1_all   = combinar_fuentes(f_v1,         DATA_DIRS["v1"])
-f_v2_all   = combinar_fuentes(f_v2,         DATA_DIRS["v2"])
-f_umr_all  = combinar_fuentes(f_umr,        DATA_DIRS["umr"])
-f_seat_all = combinar_fuentes(f_seat_files, DATA_DIRS["seat"])
-f_bill_all = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
+# Carga selectiva: del disco solo se leen los archivos dentro del rango del filtro.
+# THDR es diario; UMR/SEAT/OIT/Incidentes/Viajes son mensuales. Facturación se deja
+# con el rango MÁS toda la base 2025, porque la línea base nocturna la necesita.
+# Pasajeros (export anual) e IDE son un único archivo, así que entran completos.
+f_v1_all   = combinar_fuentes_rango(f_v1,         DATA_DIRS["v1"],   start_date, end_date, 'dia')
+f_v2_all   = combinar_fuentes_rango(f_v2,         DATA_DIRS["v2"],   start_date, end_date, 'dia')
+f_umr_all  = combinar_fuentes_rango(f_umr,        DATA_DIRS["umr"],  start_date, end_date, 'mes')
+f_seat_all = combinar_fuentes_rango(f_seat_files, DATA_DIRS["seat"], start_date, end_date, 'mes')
+f_bill_all = combinar_fuentes_rango(f_bill_files, DATA_DIRS["bill"], start_date, end_date, 'mes',
+                                    _extra=lambda _n: _anio_de_nombre(_n) == 2025)
 f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
-f_viajes_all = combinar_fuentes(f_viajes, DATA_DIRS["viajes"])
+f_viajes_all = combinar_fuentes_rango(f_viajes, DATA_DIRS["viajes"], start_date, end_date, 'mes')
 f_ide_all = combinar_fuentes(f_ide, DATA_DIRS["ide_lb"])
-f_incid_all = combinar_fuentes(f_incid, DATA_DIRS["incid"])
-f_oit_all = combinar_fuentes(f_oit, DATA_DIRS["oit"])
+f_incid_all = combinar_fuentes_rango(f_incid, DATA_DIRS["incid"], start_date, end_date, 'mes')
+f_oit_all = combinar_fuentes_rango(f_oit, DATA_DIRS["oit"], start_date, end_date, 'mes')
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
 _CACHE_VERSION = "v21_oit_sfe"
