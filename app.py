@@ -1954,7 +1954,14 @@ def fig_perfil_velocidades():
 with st.sidebar:
     st.header("📅 Filtro Global")
     dr = st.date_input("Rango", value=(date(2026,1,1), date(2026,1,31)))
-    start_date, end_date = (dr[0],dr[1]) if isinstance(dr,tuple) and len(dr)==2 else (dr,dr)
+    # Robustez: date_input puede devolver 2 fechas, 1 sola (mientras eliges el rango) o un
+    # objeto suelto. Siempre dejamos start_date/end_date como fechas válidas para que la carga
+    # selectiva de archivos (más abajo) nunca reciba una tupla y se caiga.
+    if isinstance(dr, (tuple, list)):
+        start_date = dr[0] if len(dr) >= 1 else date(2026, 1, 1)
+        end_date   = dr[1] if len(dr) >= 2 else start_date
+    else:
+        start_date = end_date = dr
     if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
         st.session_state["_do_load"] = True
     st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
