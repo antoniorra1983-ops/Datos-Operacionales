@@ -578,6 +578,54 @@ def _cache_parquet(_tag, _bytes, _procesar, _sd, _ed):
         pass  # si no se puede escribir (p.ej. FS de solo lectura), igual devuelve el DF
     return _df if _df is not None else pd.DataFrame()
 
+# ===== Carga desde datos pre-procesados (data/_prep) =====
+# Si existen los Parquet pre-procesados, la app los lee en vez de parsear los Excel:
+# carga instantánea y poca memoria. Se filtran al rango del filtro global igual que
+# haría el parseo; la base 2025 de PRMTE (all_prmte_2025) se mantiene completa.
+_PREP_DIR = "data/_prep"
+
+def _prep_disponible():
+    try:
+        return os.path.isfile(os.path.join(_PREP_DIR, 'df_thdr_v1.parquet'))
+    except Exception:
+        return False
+
+def _cargar_prep(_sd, _ed):
+    """Lee los Parquet crudos pre-procesados y los filtra al rango [_sd,_ed]
+    (menos all_prmte_2025, que va completa). Devuelve un dict con las estructuras
+    que de otro modo saldrían del parseo de Excel."""
+    _lo = pd.Timestamp(_sd); _hi = pd.Timestamp(_ed)
+    def _rd(_n):
+        try: return pd.read_parquet(os.path.join(_PREP_DIR, f"{_n}.parquet"))
+        except Exception: return pd.DataFrame()
+    def _filtra(_df, _col):
+        if _df is None or getattr(_df, 'empty', True) or _col not in _df.columns: return _df
+        _f = pd.to_datetime(_df[_col], errors='coerce')
+        return _df[(_f >= _lo) & (_f <= _hi)].reset_index(drop=True)
+    _out = {}
+    _out['df_thdr_v1'] = _filtra(_rd('df_thdr_v1'), 'Fecha_Op')
+    _out['df_thdr_v2'] = _filtra(_rd('df_thdr_v2'), 'Fecha_Op')
+    for _n in ['df_carga_v1','df_carga_v2','df_viajes','df_ide_lb','df_incid','df_incid_full','df_oit']:
+        _out[_n] = _filtra(_rd(_n), 'Fecha')
+    for _n in ['all_ops','all_tr','all_seat','all_fact_full','all_prmte_full','all_kmserv','all_saf_li']:
+        _d = _filtra(_rd(_n), 'Fecha')
+        _out[_n] = _d.to_dict('records') if isinstance(_d, pd.DataFrame) and not _d.empty else []
+    _d25 = _rd('all_prmte_2025')
+    _out['all_prmte_2025'] = _d25.to_dict('records') if isinstance(_d25, pd.DataFrame) and not _d25.empty else []
+    # metadatos menores
+    try:
+        import json as _json
+        _m = _json.load(open(os.path.join(_PREP_DIR, 'meta.json')))
+        _out['_mot_inval'] = int(_m.get('_mot_inval', 0)); _out['_seat_dups'] = int(_m.get('_seat_dups', 0))
+    except Exception:
+        _out['_mot_inval'] = 0; _out['_seat_dups'] = 0
+    try:
+        import json as _json
+        _out['_oit_diag'] = _json.load(open(os.path.join(_PREP_DIR, 'oit_diag.json')))
+    except Exception:
+        _out['_oit_diag'] = {}
+    return _out
+
 # --- 5. FUNCIONES DE PROCESAMIENTO CORE ---
 # --- Servicios por tipo de tren (material rodante) + export Excel ---
 def _no_huecos(_fig, _fmt='%d-%m-%y'):
@@ -2071,6 +2119,23 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
 elif _hay_archivos and st.session_state.get('_do_load'):
+    # Carga rápida desde datos pre-procesados (data/_prep), si existen: se cargan las
+    # estructuras crudas ya listas y se vacían las listas de archivos para que los bucles
+    # de parseo de Excel de abajo se salten. El armado downstream (df_ops, df_serv_tipo,
+    # jerarquía por rango, etc.) corre igual, así que el resultado es idéntico.
+    _use_prep = _prep_disponible()
+    if _use_prep:
+        _pp = _cargar_prep(start_date, end_date)
+        all_ops = _pp['all_ops']; all_tr = _pp['all_tr']; all_kmserv = _pp['all_kmserv']
+        all_seat = _pp['all_seat']; all_saf_li = _pp['all_saf_li']
+        all_fact_full = _pp['all_fact_full']; all_prmte_full = _pp['all_prmte_full']
+        all_prmte_2025 = _pp['all_prmte_2025']
+        df_thdr_v1 = _pp['df_thdr_v1']; df_thdr_v2 = _pp['df_thdr_v2']
+        df_carga_v1 = _pp['df_carga_v1']; df_carga_v2 = _pp['df_carga_v2']; df_viajes = _pp['df_viajes']
+        df_ide_lb = _pp['df_ide_lb']; df_incid = _pp['df_incid']; df_incid_full = _pp['df_incid_full']
+        df_oit = _pp['df_oit']; _mot_inval = _pp['_mot_inval']; _seat_dups = _pp['_seat_dups']; _oit_diag = _pp['_oit_diag']
+        f_umr_all = f_seat_all = f_bill_all = f_v1_all = f_v2_all = []
+        f_carga_v1_all = f_carga_v2_all = f_viajes_all = f_ide_all = f_incid_all = f_oit_all = []
     if f_umr_all:
         for f in f_umr_all:
             try:
