@@ -1499,7 +1499,7 @@ def parsear_fecha_nombre(nombre):
             except ValueError: pass
     return None, f"sin fecha en: '{nombre}'"
 
-@st.cache_data(show_spinner=False, max_entries=200)
+# Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _thdr_cache(_nombre, _bytes, _sd, _ed):
     """Cachea el THDR procesado (sesión + Parquet en disco). El parseo fila por fila es lo
     más lento de la carga, así que se procesa una sola vez por archivo y persiste en disco."""
@@ -1591,12 +1591,12 @@ def procesar_thdr_eficiente(file, start_date, end_date, _nombre_override=None):
     except Exception as e:
         diag["error"] = str(e); return pd.DataFrame(), diag
 
-@st.cache_data(show_spinner=False, max_entries=100)
+# Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _carga_cache(_nombre, _bytes, _sd, _ed):
     return _cache_parquet('carga', _bytes, lambda _bio: procesar_carga_pasajeros(_ArchivoBytes(_nombre, _bio.read()), _sd, _ed), _sd, _ed)
 
 
-@st.cache_data(show_spinner=False, max_entries=100)
+# Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _viajes_cache(_nombre, _bytes, _sd, _ed):
     return _cache_parquet('viajes', _bytes, lambda _bio: procesar_viajes_contrato(_ArchivoBytes(_nombre, _bio.read()), _sd, _ed), _sd, _ed)
 
@@ -1626,7 +1626,7 @@ def _viajes_cacheado(f, start_date, end_date):
         return procesar_viajes_contrato(f, start_date, end_date)
 
 
-@st.cache_data(show_spinner=False, max_entries=60)
+# Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _seat_cache(_nombre, _bytes, _sd, _ed):
     """Procesa SEAT (energía diaria) y SAF LI con Parquet en disco. Devuelve (all_seat, all_saf_li, error)."""
     _key = _hash_bytes(_bytes, _nombre, _sd, _ed, _PARSE_VERSION)
@@ -1680,7 +1680,7 @@ def _seat_cache(_nombre, _bytes, _sd, _ed):
     return _seat, _saf, None
 
 
-@st.cache_data(show_spinner=False, max_entries=40)
+# Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _umr_cache(_nombre, _bytes, _sd, _ed):
     """Procesa el UMR (odómetro, km por tren, KM-Servicio) con Parquet en disco.
     Devuelve (all_ops, all_tr, all_kmserv, error)."""
@@ -1778,7 +1778,7 @@ def _umr_cache(_nombre, _bytes, _sd, _ed):
     return _ops, _tr, _kms, None
 
 
-@st.cache_data(show_spinner=False, max_entries=60)
+# Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _bill_cache(_nombre, _bytes, _sd, _ed):
     """Procesa Factura y PRMTE (vectorizado + Parquet en disco). Devuelve
     (factura, prmte_rango, prmte_2025, error). El PRMTE cada 15 min es de los más pesados."""
