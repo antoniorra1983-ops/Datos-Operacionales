@@ -6765,6 +6765,8 @@ if _seccion == _SECCIONES[15]:
                                    key="_dl_sobreconsumo")
 
 # ===== BI: carga de trenes (Carga de pasajeros) vs consumo PRMTE cada 15 min =====
+# Metas del seguimiento (punto de partida = valores de ene–jul 2026). Cámbialas aquí para dejarlas fijas; en la pestaña se ajustan durante la sesión.
+_METAS_BI = {'pkm_kwh': 23.0, 'kwh_unidad': 32.0, 'sobre_esperado': 2.0, 'tolerancia': 3.0}
 if _seccion == _SECCIONES[16]:
     st.markdown("### 🔗 BI · Carga de trenes vs consumo PRMTE (cada 15 min)")
     _c_bi = [d for d in [df_carga_v1, df_carga_v2] if d is not None and not d.empty and 'Fecha' in d.columns]
@@ -6903,7 +6905,128 @@ if _seccion == _SECCIONES[16]:
                        f"Se cruza con la energía PRMTE del mismo bloque: {_ncl(len(_bi), 0)} bloques de {_bi['Fecha'].nunique()} días. Los movimientos sin pasajeros (vacíos, maniobras, SFE) no están en Carga, así que su consumo aparece como diferencia sobre lo esperado. "
                        f"Chequeo de horario: el mejor ajuste se da con {_lag} min de desfase.")
 
+            # ================= SEGUIMIENTO CON METAS (semana / mes) =================
             st.divider()
+            st.markdown("### 📌 Seguimiento con metas")
+            _cg = st.columns([1.3, 1, 1, 1, 1])
+            _per = _cg[0].radio("Agrupar por", ["Semana", "Mes"], horizontal=True, key="_bi_per")
+            _meta_pk = _cg[1].number_input("Meta pax-km por kWh (mínimo)", min_value=0.0, value=float(_METAS_BI['pkm_kwh']), step=0.5, format="%.1f", key="_bi_meta_pk")
+            _meta_ku = _cg[2].number_input("Meta kWh por unidad (máximo)", min_value=0.0, value=float(_METAS_BI['kwh_unidad']), step=0.5, format="%.1f", key="_bi_meta_ku")
+            _meta_dv = _cg[3].number_input("Meta sobre lo esperado (máx. %)", value=float(_METAS_BI['sobre_esperado']), step=0.5, format="%.1f", key="_bi_meta_dv")
+            _tol = _cg[4].number_input("Tolerancia amarillo", min_value=0.0, value=float(_METAS_BI['tolerancia']), step=1.0, format="%.1f", key="_bi_tol",
+                                       help="Amarillo = no cumple la meta por menos de este margen: % de la meta en pax-km/kWh y kWh por unidad; puntos porcentuales en 'sobre lo esperado'.")
+
+            def _sem(_v, _meta, _mayor_mejor, _pp=False):
+                """Semáforo: 🟢 cumple · 🟡 no cumple por menos de la tolerancia · 🔴 no cumple."""
+                if _v is None or pd.isna(_v):
+                    return "⚪"
+                if (_v >= _meta) if _mayor_mejor else (_v <= _meta):
+                    return "🟢"
+                _gap = (_meta - _v) if _mayor_mejor else (_v - _meta)
+                return "🟡" if _gap <= (_tol if _pp else abs(_meta) * _tol / 100) else "🔴"
+
+            def _var_txt(_v, _suf):
+                return "" if _v is None or pd.isna(_v) else ("+" if _v > 0 else "") + _ncl(_v, 1) + _suf
+
+            # Indicadores por período. kWh por unidad = energía sobre la base de servicio ÷ unidades en circulación
+            # (en todo el período filtrado coincide con "Por unidad circulando"). Sobre lo esperado = (real − esperado) ÷ esperado.
+            _iso_b = _bi['Fecha'].dt.isocalendar()
+            _per_k = (_iso_b['year'].astype(int) * 100 + _iso_b['week'].astype(int)) if _per == "Semana" else (_bi['Fecha'].dt.year * 100 + _bi['Fecha'].dt.month)
+            _srv_b = _bi['Unidades'] > 0.05
+            _ev = (_bi.assign(_k=_per_k, _es=np.where(_srv_b, _bi['kWh'] - _base - _bs, 0.0), _us=np.where(_srv_b, _bi['Unidades'], 0.0))
+                      .groupby('_k').agg(Desde=('Fecha', 'min'), Hasta=('Fecha', 'max'), Dias=('Fecha', 'nunique'), E=('kWh', 'sum'),
+                                         Esp=('kWh esperado', 'sum'), PK=('Pax-km', 'sum'), Es=('_es', 'sum'), Us=('_us', 'sum'))
+                      .reset_index().sort_values('_k').reset_index(drop=True))
+            _ev['PKkWh'] = _ev['PK'] / _ev['E'].replace(0, np.nan)
+            _ev['KU'] = _ev['Es'] / _ev['Us'].replace(0, np.nan)
+            _ev['DV'] = (_ev['E'] - _ev['Esp']) / _ev['Esp'].replace(0, np.nan) * 100
+            _ev['vPK'] = (_ev['PKkWh'] / _ev['PKkWh'].shift(1) - 1) * 100
+            _ev['vKU'] = (_ev['KU'] / _ev['KU'].shift(1) - 1) * 100
+            _ev['vDV'] = _ev['DV'] - _ev['DV'].shift(1)
+            _ev['vE'] = (_ev['E'] / _ev['E'].shift(1) - 1) * 100
+            _MES_C = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+            _ev['Período'] = [f"Sem {int(_k) % 100:02d} ({_d:%d/%m}–{_h:%d/%m})" if _per == "Semana" else f"{_MES_C[int(_k) % 100 - 1]} {int(_k) // 100}"
+                              for _k, _d, _h in zip(_ev['_k'], _ev['Desde'], _ev['Hasta'])]
+
+            # Calidad de datos: días con viajes o pasajeros muy por debajo de lo normal para su tipo de día
+            _dq = _bi.groupby('Fecha').agg(U=('Unidades', 'sum'), P=('Pax a bordo', 'sum'), tipo=('Tipo de día', 'first'))
+            _dq['pxu'] = _dq['P'] / _dq['U'].replace(0, np.nan)
+            _dud = _dq[(_dq['U'] < 0.5 * _dq.groupby('tipo')['U'].transform('median')) | (_dq['pxu'] < 0.25 * _dq.groupby('tipo')['pxu'].transform('median'))]
+            if not _dud.empty:
+                st.warning("⚠️ Días con viajes o pasajeros muy por debajo de lo normal para su tipo de día (servicio reducido o falla del conteo de pasajeros): "
+                           + ", ".join(pd.Timestamp(_f).strftime('%d-%m-%Y') for _f in _dud.index[:12]) + (f" y {len(_dud) - 12} más" if len(_dud) > 12 else "")
+                           + ". Tenlos en cuenta al leer el período que los contiene.")
+            _ul = _ev.iloc[-1]
+            _n_ul = int(_ul['Dias'])
+            st.markdown(f"**Último período: {_ul['Período']}** · {_n_ul} {'día' if _n_ul == 1 else 'días'} con datos"
+                        + (f" · variación contra {_ev.iloc[-2]['Período']}" if len(_ev) > 1 else ""))
+            _mt = st.columns(4)
+            _mt[0].metric(f"{_sem(_ul['PKkWh'], _meta_pk, True)} Pax-km por kWh", _ncl(_ul['PKkWh'], 2), delta=_var_txt(_ul['vPK'], " %") or None,
+                          help=f"Meta: {_ncl(_meta_pk, 1)} o más. Más alto = cada kWh mueve más pasajeros-km.")
+            _mt[1].metric(f"{_sem(_ul['KU'], _meta_ku, False)} kWh por unidad", f"{_ncl(_ul['KU'], 1)} kWh", delta=_var_txt(_ul['vKU'], " %") or None, delta_color="inverse",
+                          help=f"kWh cada 15 min por unidad en circulación. Meta: {_ncl(_meta_ku, 1)} o menos.")
+            _mt[2].metric(f"{_sem(_ul['DV'], _meta_dv, False, True)} Sobre lo esperado", f"{_ncl(_ul['DV'], 1)} %", delta=_var_txt(_ul['vDV'], " pp") or None, delta_color="inverse",
+                          help=f"Energía real sobre la que espera el modelo con las unidades en circulación. Meta: {_ncl(_meta_dv, 1)} % o menos.")
+            _mt[3].metric("Energía (kWh)", _ncl(_ul['E'], 0), delta=_var_txt(_ul['vE'], " %") or None, delta_color="off")
+            st.caption("🟢 cumple la meta · 🟡 no cumple por menos de la tolerancia · 🔴 no cumple. Las flechas comparan con el período anterior; en kWh por unidad y sobre lo esperado, bajar es bueno (verde). "
+                       "Si el primer o último período tiene pocos días, compáralo con cuidado.")
+
+            _fev = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.09,
+                                 subplot_titles=("Pax-km por kWh (más alto = mejor)", "kWh por unidad cada 15 min (más bajo = mejor)", "Consumo sobre lo esperado, % (más bajo = mejor)"))
+            for _i_ev, (_c_ev, _col_ev, _m_ev, _fmt_ev) in enumerate([('PKkWh', '#0a7c6e', _meta_pk, ',.2f'), ('KU', '#005195', _meta_ku, ',.1f'), ('DV', '#E85500', _meta_dv, ',.1f')], start=1):
+                _fev.add_trace(go.Scatter(x=_ev['Período'], y=_ev[_c_ev], mode='lines+markers', showlegend=False, line=dict(color=_col_ev, width=2), marker=dict(size=8),
+                                          hovertemplate='%{x}: %{y:' + _fmt_ev + '}<extra></extra>'), row=_i_ev, col=1)
+                _fev.add_hline(y=_m_ev, line=dict(color='#64748b', width=1.5, dash='dash'), annotation_text=f"Meta {_ncl(_m_ev, 1)}",
+                               annotation_position='top left', annotation_font=dict(size=11, color='#64748b'), row=_i_ev, col=1)
+            _fev.update_xaxes(type='category')
+            _fev.update_layout(height=640, margin=dict(t=40, b=0, l=0, r=0))
+            _pc(_fev, use_container_width=True, config={'locale': 'es'})
+
+            _tab_ev = pd.DataFrame({'Período': _ev['Período'], 'Días': _ev['Dias'], 'Energía kWh': _ev['E'].round(0), 'Pax-km': _ev['PK'].round(0),
+                                    'Pax-km/kWh': [f"{_sem(_v, _meta_pk, True)} {_ncl(_v, 2)}" for _v in _ev['PKkWh']],
+                                    'Δ pax-km/kWh': [_var_txt(_v, " %") for _v in _ev['vPK']],
+                                    'kWh/unidad': [f"{_sem(_v, _meta_ku, False)} {_ncl(_v, 1)}" for _v in _ev['KU']],
+                                    'Δ kWh/unidad': [_var_txt(_v, " %") for _v in _ev['vKU']],
+                                    'Sobre esperado': [f"{_sem(_v, _meta_dv, False, True)} {_ncl(_v, 1)} %" for _v in _ev['DV']],
+                                    'Δ sobre esperado': [_var_txt(_v, " pp") for _v in _ev['vDV']]})
+            _st_df(_tab_ev, hide_index=True, use_container_width=True, height=min(35 * (len(_tab_ev) + 1) + 3, 600))
+            st.caption("kWh por unidad: energía sobre la base de servicio dividida por las unidades en circulación, cada 15 min. Sobre lo esperado: cuánto más (o menos) se consumió que lo que el modelo espera "
+                       "con las unidades de cada bloque; el modelo se ajusta con todo el período filtrado. Las metas parten de los valores de ene–jul 2026; cámbialas arriba o en _METAS_BI del código para dejarlas fijas.")
+
+            # ================= RANKING DE SOBRECONSUMO =================
+            st.divider()
+            st.markdown("### 🏆 Ranking de sobreconsumo")
+            _cr1, _ = st.columns([1, 3])
+            _top = int(_cr1.number_input("Cuántos mostrar", min_value=5, max_value=50, value=10, step=5, key="_bi_top"))
+            _rk_h = (_bi.groupby(['Fecha', 'Hora'], as_index=False)
+                        .agg(real=('kWh', 'sum'), esp=('kWh esperado', 'sum'), dif=('Diferencia', 'sum'), U=('Unidades', 'mean'), P=('Pax a bordo', 'mean'), tipo=('Tipo de día', 'first'))
+                        .sort_values('dif', ascending=False))
+            _rk_d = _bi.groupby('Fecha', as_index=False).agg(real=('kWh', 'sum'), esp=('kWh esperado', 'sum'), dif=('Diferencia', 'sum'), tipo=('Tipo de día', 'first'))
+            _rk_d = (_rk_d.merge(_rk_h.drop_duplicates('Fecha')[['Fecha', 'Hora', 'dif']].rename(columns={'Hora': 'h_max', 'dif': 'dif_h'}), on='Fecha', how='left')
+                          .sort_values('dif', ascending=False))
+            _tab_rd = pd.DataFrame({'Fecha': _rk_d['Fecha'].dt.strftime('%d-%m-%Y'), 'Tipo de día': _rk_d['tipo'], 'kWh real': _rk_d['real'].round(0),
+                                    'kWh esperado': _rk_d['esp'].round(0), 'Sobreconsumo kWh': _rk_d['dif'].round(0),
+                                    'Sobreconsumo %': (_rk_d['dif'] / _rk_d['esp'].replace(0, np.nan) * 100).round(1),
+                                    'Hora con más exceso': _rk_d['h_max'].map(lambda _h: f"{int(_h):02d}:00" if pd.notna(_h) else ""),
+                                    'Exceso en esa hora (kWh)': _rk_d['dif_h'].round(0)})
+            _tab_rh = pd.DataFrame({'Fecha': _rk_h['Fecha'].dt.strftime('%d-%m-%Y'), 'Hora': _rk_h['Hora'].map(lambda _h: f"{int(_h):02d}:00"), 'Tipo de día': _rk_h['tipo'],
+                                    'kWh real': _rk_h['real'].round(0), 'kWh esperado': _rk_h['esp'].round(0), 'Sobreconsumo kWh': _rk_h['dif'].round(0),
+                                    'Unidades en circulación': _rk_h['U'].round(1), 'Pasajeros a bordo': _rk_h['P'].round(0)})
+            st.markdown(f"**Los {_top} días con más sobreconsumo** (energía real del día menos la esperada)")
+            _st_df(_tab_rd.head(_top), hide_index=True, use_container_width=True)
+            st.markdown(f"**Las {_top} horas con más sobreconsumo**")
+            _tab_rh_ui = _tab_rh.head(_top).copy()
+            _tab_rh_ui['Unidades en circulación'] = _tab_rh_ui['Unidades en circulación'].map(lambda _v: _ncl(_v, 1))
+            _st_df(_tab_rh_ui, hide_index=True, use_container_width=True)
+            _n_rep = min(50, len(_rk_h))
+            _rep = _rk_h.head(_n_rep)['Hora'].value_counts().head(3)
+            st.caption(f"Entre las {_n_rep} horas con más sobreconsumo, las que más se repiten son "
+                       + ", ".join(f"{int(_h):02d}:00 ({int(_n)} {'vez' if int(_n) == 1 else 'veces'})" for _h, _n in _rep.items())
+                       + ". Si una hora se repite mucho, es un consumo de rutina (por ejemplo salidas de cochera o SFE), no un hecho aislado.")
+
+            st.divider()
+            st.markdown("### 🔬 Detalle cada 15 min")
+
             def _por_hora(_pf):
                 """Tabla por hora desde valores por franja de 15 min (promedio de días o un día)."""
                 _ph = _pf.assign(Hora=_pf['Franja'].str.slice(0, 2).astype(int)).groupby('Hora', as_index=False).agg(
@@ -6999,13 +7122,16 @@ if _seccion == _SECCIONES[16]:
             _st_df(_tab_ui, hide_index=True, use_container_width=True, height=35 * (len(_tab_ui) + 1) + 3)
             st.caption("kWh y pax-km: total de la hora. Unidades y pasajeros a bordo: promedio de la hora." + (" En los promedios por tipo de día, cada valor es el promedio de esos días." if _ver.startswith("Promedio ") else ""))
             @st.cache_data(show_spinner=False, max_entries=4)
-            def _excel_bi(datos, perfil, modelo):
+            def _excel_bi(datos, perfil, modelo, evolucion, rk_dias, rk_horas):
                 # Parámetros sin "_" a propósito: Streamlit sí los usa como clave del caché.
                 _buf = BytesIO()
                 with pd.ExcelWriter(_buf, engine='xlsxwriter') as _w:
                     datos.to_excel(_w, sheet_name='Datos 15 min', index=False)
                     perfil.to_excel(_w, sheet_name='Perfil por hora', index=False)
                     modelo.to_excel(_w, sheet_name='Modelo', index=False)
+                    evolucion.to_excel(_w, sheet_name='Evolución', index=False)
+                    rk_dias.to_excel(_w, sheet_name='Ranking días', index=False)
+                    rk_horas.to_excel(_w, sheet_name='Ranking horas', index=False)
                 return _buf.getvalue()
             _x15 = _bi[['Fecha', 'Franja', 'Tipo de día', 'kWh', 'kWh esperado', 'Diferencia', 'Trenes', 'Unidades', 'Pax a bordo', 'Pax-km']].round(2)
             _x15['Fecha'] = _x15['Fecha'].dt.strftime('%d-%m-%Y')
@@ -7014,9 +7140,18 @@ if _seccion == _SECCIONES[16]:
             _x_ph = _x_ph[['Tipo de día'] + [c for c in _x_ph.columns if c != 'Tipo de día']]
             _x_mod = pd.DataFrame({'Indicador': ['Base sin trenes (kWh/15 min)', 'Extra en horario de servicio (kWh/15 min)', 'Por unidad en circulación (kWh/15 min)',
                                                  'Efecto de 100 pasajeros más (kWh/15 min)', 'R² del modelo', 'r energía–pasajeros', 'r energía–unidades',
-                                                 'Pasajeros por unidad (en servicio)', 'Pax-km por kWh', 'Bloques de 15 min', 'Días', 'Desfase de mejor ajuste (min)'],
+                                                 'Pasajeros por unidad (en servicio)', 'Pax-km por kWh', 'Bloques de 15 min', 'Días', 'Desfase de mejor ajuste (min)',
+                                                 'Meta pax-km por kWh (mínimo)', 'Meta kWh por unidad (máximo)', 'Meta sobre lo esperado (máx. %)', 'Tolerancia amarillo'],
                                    'Valor': [round(_base, 2), round(_bs, 2), round(_bu, 3), round(_c100, 3) if pd.notna(_c100) else None, round(_r2, 4),
                                              round(_r_p, 4), round(_r_u, 4), round(_pxu, 1) if pd.notna(_pxu) else None,
-                                             round(_pk_tot / _e_tot, 3) if _e_tot > 0 else None, len(_bi), int(_bi['Fecha'].nunique()), _lag]})
-            st.download_button("⬇️ Descargar análisis BI en Excel (15 min + perfil por hora + modelo)", data=_excel_bi(_x15, _x_ph, _x_mod),
+                                             round(_pk_tot / _e_tot, 3) if _e_tot > 0 else None, len(_bi), int(_bi['Fecha'].nunique()), _lag,
+                                             _meta_pk, _meta_ku, _meta_dv, _tol]})
+            _sem_txt = {'🟢': 'Cumple', '🟡': 'Cerca', '🔴': 'No cumple', '⚪': ''}
+            _x_ev = pd.DataFrame({'Período': _ev['Período'], 'Días': _ev['Dias'], 'Energía kWh': _ev['E'].round(0), 'Pax-km': _ev['PK'].round(0),
+                                  'Pax-km por kWh': _ev['PKkWh'].round(3), 'Semáforo pax-km/kWh': [_sem_txt[_sem(_v, _meta_pk, True)] for _v in _ev['PKkWh']],
+                                  'Var. pax-km/kWh %': _ev['vPK'].round(2), 'kWh por unidad': _ev['KU'].round(2),
+                                  'Semáforo kWh/unidad': [_sem_txt[_sem(_v, _meta_ku, False)] for _v in _ev['KU']], 'Var. kWh/unidad %': _ev['vKU'].round(2),
+                                  'Sobre lo esperado %': _ev['DV'].round(2), 'Semáforo sobre lo esperado': [_sem_txt[_sem(_v, _meta_dv, False, True)] for _v in _ev['DV']],
+                                  'Var. sobre lo esperado (pp)': _ev['vDV'].round(2)})
+            st.download_button("⬇️ Descargar análisis BI en Excel (seguimiento, rankings, 15 min, perfil y modelo)", data=_excel_bi(_x15, _x_ph, _x_mod, _x_ev, _tab_rd, _tab_rh.head(500)),
                                file_name="bi_carga_vs_energia_15min.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_bi_carga")
