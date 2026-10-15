@@ -3021,11 +3021,11 @@ if _seccion == _SECCIONES[0]:
 
             st.divider()
 
-            # --- 8. Pasajeros por kWh (Pax/kWh) con la fuente de energía elegida arriba ---
-            st.markdown(f"**Pasajeros por kWh (Pax/kWh) — {_fuente_e}**")
+            # --- 8. Pasajeros por kWh (Pax/kWh). Energía con la jerarquía de siempre: Factura > PRMTE > SEAT ---
+            st.markdown("**Pasajeros por kWh (Pax/kWh)**")
             _fuentes_pax = []
             if not df_viajes.empty and 'Total Viajes' in df_viajes.columns and df_viajes['Total Viajes'].sum() > 0: _fuentes_pax.append('Viajes por contrato')
-            if 'PAX' in df_ener_src.columns and df_ener_src['PAX'].sum() > 0: _fuentes_pax.append('Carga a bordo')
+            if 'PAX' in df_resumen.columns and df_resumen['PAX'].sum() > 0: _fuentes_pax.append('Carga a bordo')
             if not _fuentes_pax:
                 st.info("Sin datos de pasajeros. Carga **Viajes por Contrato** o **Carga de pasajeros** en la barra lateral.")
             else:
@@ -3034,14 +3034,18 @@ if _seccion == _SECCIONES[0]:
                 if _fuente_p == 'Viajes por contrato':
                     _pax_d = df_viajes[['Fecha', 'Total Viajes']].rename(columns={'Total Viajes': 'Pasajeros'})
                 else:
-                    _pax_d = df_ener_src[['Fecha', 'PAX']].rename(columns={'PAX': 'Pasajeros'})
+                    _pax_d = df_resumen[['Fecha', 'PAX']].rename(columns={'PAX': 'Pasajeros'})
                 _pax_d = _pax_d.assign(Fecha=pd.to_datetime(_pax_d['Fecha']).dt.normalize(), Pasajeros=pd.to_numeric(_pax_d['Pasajeros'], errors='coerce')).groupby('Fecha', as_index=False)['Pasajeros'].sum()
-                _de_px = df_ener_src.assign(Fecha=pd.to_datetime(df_ener_src['Fecha']).dt.normalize()).groupby('Fecha', as_index=False)[['Total E', 'Tracción']].sum()
+                # E_Total y E_Tr ya vienen con la jerarquía por día (Factura si hay; si no PRMTE; si no SEAT) y 'Fuente' dice cuál se usó.
+                _de_px = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(),
+                                            E_Total=pd.to_numeric(df_resumen['E_Total'], errors='coerce'), E_Tr=pd.to_numeric(df_resumen['E_Tr'], errors='coerce'))
+                          .groupby('Fecha', as_index=False).agg({'E_Total': 'sum', 'E_Tr': 'sum', 'Fuente': 'first'})
+                          .rename(columns={'E_Total': 'Total E', 'E_Tr': 'Tracción'}))
                 _de_px = _de_px.merge(_pax_d, on='Fecha', how='inner')
                 # Solo días con pasajeros Y energía: si falta uno de los dos, el cociente queda distorsionado.
                 _de_px = _de_px[(_de_px['Pasajeros'] > 0) & (_de_px['Total E'] > 0)].sort_values('Fecha')
                 if _de_px.empty:
-                    st.info(f"No hay días con pasajeros ({_fuente_p}) y energía ({_fuente_e}) a la vez para el filtro actual.")
+                    st.info(f"No hay días con pasajeros ({_fuente_p}) y energía a la vez para el filtro actual.")
                 else:
                     _pax_t = float(_de_px['Pasajeros'].sum()); _e_px_t = float(_de_px['Total E'].sum()); _tr_px_t = float(_de_px['Tracción'].sum())
                     _mc = st.columns(4)
@@ -3052,14 +3056,18 @@ if _seccion == _SECCIONES[0]:
                     _de_px['Pax/kWh'] = _de_px['Pasajeros'] / _de_px['Total E']
                     _de_px_g = _agr_mes(_de_px, ['Pasajeros', 'Total E'], _ratios={'Pax/kWh': ('Pasajeros', 'Total E', 1)})
                     fig_pax_kwh = px.bar(_de_px_g, x='Fecha', y='Pax/kWh', custom_data=['Pasajeros', 'Total E'],
-                                         color_discrete_sequence=['#0a7c6e'], title=f"Pasajeros por kWh — {_fuente_p} / {_fuente_e}")
+                                         color_discrete_sequence=['#0a7c6e'], title=f"Pasajeros por kWh — {_fuente_p}")
                     fig_pax_kwh.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11),
                                               hovertemplate='%{x}<br>%{y:.2f} pax/kWh<br>Pasajeros: %{customdata[0]:,.0f}<br>Energía: %{customdata[1]:,.0f} kWh<extra></extra>')
                     fig_pax_kwh.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
                                               bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
                     _eje_mes(fig_pax_kwh)
                     _pc(_no_huecos(fig_pax_kwh), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax_kwh")
-                    st.caption(f"Pax/kWh = pasajeros ÷ kWh. Solo cuentan los {len(_de_px)} día(s) que tienen pasajeros y energía; el valor global divide los totales del período (no promedia días).")
+                    _n_px = len(_de_px); _cnt_f = _de_px['Fuente'].value_counts()
+                    _det_f = " · ".join(f"{_s} {int(_cnt_f[_s])} {'día' if int(_cnt_f[_s]) == 1 else 'días'}" for _s in ['Factura', 'PRMTE', 'SEAT'] if _cnt_f.get(_s, 0) > 0)
+                    st.caption(f"Energía de cada día con la jerarquía de siempre: Factura; si no hay, PRMTE; si no, SEAT ({_det_f}). "
+                               + ("Solo cuenta 1 día con pasajeros y energía" if _n_px == 1 else f"Solo cuentan los {_n_px} días con pasajeros y energía")
+                               + "; el valor global divide los totales del período (no promedia días).")
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 if _seccion == _SECCIONES[1]:
