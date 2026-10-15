@@ -1608,6 +1608,9 @@ class _ArchivoBytes:
     def read(self, *a, **k): return self._bio.read(*a, **k)
     def seek(self, *a, **k): return self._bio.seek(*a, **k)
     def tell(self, *a, **k): return self._bio.tell(*a, **k)
+    # openpyxl/zipfile exigen seekable() para abrir .xlsx; sin esto Carga y Viajes fallaban en silencio.
+    def seekable(self): return True
+    def readable(self): return True
 
 
 def _carga_cacheado(f, start_date, end_date):
