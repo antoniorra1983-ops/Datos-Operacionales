@@ -2582,7 +2582,7 @@ st.markdown("""<style>
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía"]
 
 with st.container(key="_topbar"):
     _cl, _cn = st.columns([1, 9], vertical_alignment="center")
@@ -6763,3 +6763,260 @@ if _seccion == _SECCIONES[15]:
                                    file_name="analisis_sobreconsumo_ide.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    key="_dl_sobreconsumo")
+
+# ===== BI: carga de trenes (Carga de pasajeros) vs consumo PRMTE cada 15 min =====
+if _seccion == _SECCIONES[16]:
+    st.markdown("### 🔗 BI · Carga de trenes vs consumo PRMTE (cada 15 min)")
+    _c_bi = [d for d in [df_carga_v1, df_carga_v2] if d is not None and not d.empty and 'Fecha' in d.columns]
+    if not all_prmte_full or not _c_bi:
+        _falta_bi = [n for n, ok in [("PRMTE (archivos de facturación)", bool(all_prmte_full)), ("Carga de pasajeros V1/V2", bool(_c_bi))] if not ok]
+        st.info("Para este análisis falta **" + "** y **".join(_falta_bi) + "**. Cárgalo en la barra lateral y aprieta **🔄 Cargar / actualizar datos**.")
+    else:
+        from plotly.subplots import make_subplots
+        # Km de cada estación según el código de columna del export de Carga (PUE, BEL, ..., LIM)
+        _KM_PAX = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
+
+        def _integrar_15(_ini, _fin, _val, _n):
+            """Reparte un valor constante en [ini, fin) (minutos desde el inicio) en bloques de 15 min. Devuelve valor·minuto por bloque."""
+            _out = np.zeros(_n)
+            _ok = np.isfinite(_ini) & np.isfinite(_fin) & (_fin > _ini) & np.isfinite(_val) & (_val != 0)
+            _ini, _fin, _val = _ini[_ok], _fin[_ok], _val[_ok]
+            if not len(_ini):
+                return _out
+            _b0 = np.floor(_ini / 15).astype(int); _b1 = np.floor((_fin - 1e-9) / 15).astype(int)
+            for _j in range(int((_b1 - _b0).max()) + 1):
+                _b = _b0 + _j; _s = _b <= _b1
+                _w = np.clip(np.minimum(_fin[_s], (_b[_s] + 1) * 15.0) - np.maximum(_ini[_s], _b[_s] * 15.0), 0, None) * _val[_s]
+                _bb = _b[_s]; _in = (_bb >= 0) & (_bb < _n)
+                _out += np.bincount(_bb[_in], weights=_w[_in], minlength=_n)[:_n]
+            return _out
+
+        def _viajes_y_tramos(_df, _t_ini):
+            """Por viaje: inicio, fin y unidades (doble = 2). Por tramo entre estaciones: inicio, fin, pasajeros a bordo y km.
+            La hora de paso por cada estación se interpola entre Hora Origen y Hora Fin según el km recorrido."""
+            _cods = [c for c in _df.columns if c in _KM_PAX]
+            _cho = next((c for c in _df.columns if 'HORA' in str(c).upper() and 'ORIG' in str(c).upper()), None)
+            _chf = next((c for c in _df.columns if 'HORA' in str(c).upper() and 'FIN' in str(c).upper()), None)
+            if len(_cods) < 2 or _cho is None or _chf is None:
+                return None
+            _cm2 = next((c for c in _df.columns if 'MOTRIZ' in str(c).upper() and '2' in str(c)), None)
+            _fe = pd.to_datetime(_df['Fecha'], errors='coerce').dt.normalize()
+            _t0 = ((_fe + pd.to_timedelta(_df[_cho].astype(str).str.strip(), errors='coerce')) - _t_ini).dt.total_seconds().to_numpy() / 60
+            _t1 = ((_fe + pd.to_timedelta(_df[_chf].astype(str).str.strip(), errors='coerce')) - _t_ini).dt.total_seconds().to_numpy() / 60
+            _t1 = np.where(_t1 < _t0, _t1 + 1440, _t1)  # viaje que cruza la medianoche
+            _uni = np.where(pd.to_numeric(_df[_cm2], errors='coerce').fillna(0).to_numpy() > 0, 2.0, 1.0) if _cm2 else np.ones(len(_df))
+            _K = np.array([_KM_PAX[c] for c in _cods], dtype=float); _S = len(_cods)
+            _L = _df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
+            # Recorrido según la carga: origen = 1ª estación con pasajeros; destino = la siguiente a la última con pasajeros
+            _pos = _L > 0; _hay = _pos.any(axis=1)
+            _o = np.where(_hay, _pos.argmax(axis=1), 0)
+            _d = np.where(_hay, np.minimum(_S - _pos[:, ::-1].argmax(axis=1), _S - 1), _S - 1)
+            _span = np.abs(_K[_d] - _K[_o]); _span = np.where(_span > 0, _span, np.nan)
+            _T = _t0[:, None] + (_t1 - _t0)[:, None] * (np.abs(_K[None, :] - _K[_o][:, None]) / _span[:, None])
+            _k = np.arange(_S - 1)[None, :]
+            _ok = (_k >= _o[:, None]) & (_k < _d[:, None]) & _hay[:, None]
+            _km = np.broadcast_to(np.abs(np.diff(_K))[None, :], _ok.shape)
+            return (_t0, _t1, _uni), (_T[:, :-1][_ok], _T[:, 1:][_ok], _L[:, :-1][_ok], _km[_ok])
+
+        # --- Variables por bloque de 15 min ---
+        _fe_c = pd.to_datetime(pd.concat([d['Fecha'] for d in _c_bi]), errors='coerce').dt.normalize().dropna()
+        _t_ini = _fe_c.min(); _n_b = int(((_fe_c.max() - _t_ini).days + 2) * 96)
+        _acc = np.zeros((4, _n_b))
+        for _dc in _c_bi:
+            _r_vt = _viajes_y_tramos(_dc, _t_ini)
+            if _r_vt is None:
+                continue
+            (_t0, _t1, _un), (_si, _sf, _sl, _sk) = _r_vt
+            _dur = _sf - _si
+            _acc[0] += _integrar_15(_t0, _t1, np.ones_like(_t0), _n_b)
+            _acc[1] += _integrar_15(_t0, _t1, _un, _n_b)
+            _acc[2] += _integrar_15(_si, _sf, _sl, _n_b)
+            _acc[3] += _integrar_15(_si, _sf, np.divide(_sl * _sk, _dur, out=np.zeros_like(_dur), where=_dur > 0), _n_b)
+        _q = pd.DataFrame({'ts': _t_ini + pd.to_timedelta(np.arange(_n_b) * 15, unit='min'),
+                           'Trenes': _acc[0] / 15, 'Unidades': _acc[1] / 15, 'Pax a bordo': _acc[2] / 15, 'Pax-km': _acc[3]})
+        _pr = pd.DataFrame(all_prmte_full)
+        _pr['ts'] = pd.to_datetime(_pr['Fecha'], errors='coerce').dt.normalize() + pd.to_timedelta(_pr['15min'].astype(str) + ':00', errors='coerce')
+        _e15 = _pr.dropna(subset=['ts']).groupby('ts', as_index=False)['Consumo'].sum().rename(columns={'Consumo': 'kWh'})
+        _bi = _q.merge(_e15, on='ts', how='inner')
+        _bi = _bi[_bi['ts'].dt.date.isin(set(_fe_c.dt.date))].sort_values('ts').reset_index(drop=True)
+
+        if len(_bi) < 96 or not (_bi['Unidades'].std() > 0):
+            st.warning("No hay suficientes bloques de 15 min con Carga de pasajeros y PRMTE a la vez para el filtro actual.")
+        else:
+            _TIPO_TXT = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo/Festivo'}
+            _bi['Fecha'] = _bi['ts'].dt.normalize()
+            _bi['Franja'] = _bi['ts'].dt.strftime('%H:%M')
+            _bi['Hora'] = _bi['ts'].dt.hour
+            _tipo_f = {_f: _TIPO_TXT.get(get_tipo_dia(_f.date()), 'Laboral') for _f in _bi['Fecha'].unique()}
+            _bi['Tipo de día'] = _bi['Fecha'].map(_tipo_f)
+
+            # --- Modelo por bloque: base sin trenes + extra en horario de servicio + kWh por unidad en circulación ---
+            # La base es la mediana de los bloques sin trenes: así las noches con consumo extra (SFE, maniobras) quedan como diferencia.
+            _U = _bi['Unidades'].to_numpy(float); _y = _bi['kWh'].to_numpy(float); _srv = _U > 0.05
+            _base = float(np.median(_y[~_srv])) if (~_srv).any() else 0.0
+            _bs, _bu = np.linalg.lstsq(np.column_stack([np.ones(int(_srv.sum())), _U[_srv]]), _y[_srv] - _base, rcond=None)[0]
+            _bi['kWh esperado'] = _base + np.where(_srv, _bs + _bu * _U, 0.0)
+            _bi['Diferencia'] = _bi['kWh'] - _bi['kWh esperado']
+            _sst = float(((_y - _y.mean()) ** 2).sum())
+            _r2 = 1 - float((_bi['Diferencia'] ** 2).sum()) / _sst if _sst > 0 else np.nan
+            _r_u = _bi['kWh'].corr(_bi['Unidades']); _r_p = _bi['kWh'].corr(_bi['Pax a bordo'])
+            _e_tot = float(_bi['kWh'].sum()); _pk_tot = float(_bi['Pax-km'].sum())
+            _pxu = float(_bi.loc[_srv, 'Pax a bordo'].sum() / _bi.loc[_srv, 'Unidades'].sum()) if _srv.any() else np.nan
+            # Efecto de los pasajeros a igual hora y unidades: en cada grupo (unidades redondeadas, hora) se comparan
+            # los bloques con más pasajeros que la mediana del grupo contra los demás, y se lleva a 100 pasajeros.
+            _d_m = _bi[_U >= 1].assign(_Ur=lambda _d: _d['Unidades'].round())
+            _d_m['_alto'] = _d_m['Pax a bordo'] > _d_m.groupby(['_Ur', 'Hora'])['Pax a bordo'].transform('median')
+            _a_m = _d_m.groupby(['_Ur', 'Hora', '_alto']).agg(n=('kWh', 'size'), e=('kWh', 'mean'), p=('Pax a bordo', 'mean')).unstack('_alto').dropna()
+            _c100 = np.nan
+            if not _a_m.empty and ('n', True) in _a_m.columns and ('n', False) in _a_m.columns:
+                _a_m = _a_m[(_a_m[('n', True)] >= 2) & (_a_m[('n', False)] >= 2) & (_a_m[('n', True)] + _a_m[('n', False)] >= 6)]
+                _w_m = np.minimum(_a_m[('n', True)], _a_m[('n', False)])
+                _dp_m = float((_w_m * (_a_m[('p', True)] - _a_m[('p', False)])).sum())
+                if _dp_m > 0:
+                    _c100 = 100 * float((_w_m * (_a_m[('e', True)] - _a_m[('e', False)])).sum()) / _dp_m
+            # Chequeo de horario: correlación energía–unidades corriendo las unidades hasta ±1 h dentro de cada día
+            _g_u = _bi.groupby('Fecha')['Unidades']
+            _lags = {_k * 15: _bi['kWh'].corr(_g_u.shift(-_k)) for _k in range(-4, 5)}
+            _lag = max(_lags, key=lambda _k: _lags[_k] if pd.notna(_lags[_k]) else -9)
+
+            _m1 = st.columns(4)
+            _m1[0].metric("Energía PRMTE (kWh)", _ncl(_e_tot, 0))
+            _m1[1].metric("Pax-km por kWh", _ncl(_pk_tot / _e_tot, 2) if _e_tot > 0 else "—", help=f"Pasajeros-km del período ({_ncl(_pk_tot, 0)}) dividido por la energía PRMTE.")
+            _m1[2].metric("Correlación con pasajeros", _ncl(_r_p, 2), help="Correlación (r) entre la energía de cada bloque de 15 min y los pasajeros a bordo.")
+            _m1[3].metric("Correlación con unidades", _ncl(_r_u, 2), help="Correlación (r) entre la energía de cada bloque de 15 min y las unidades en circulación.")
+            st.markdown(f"**Modelo por bloque de 15 min** · kWh = base sin trenes + extra con servicio + kWh por unidad × unidades circulando · ajuste R² = {_ncl(_r2, 2)}")
+            _m2 = st.columns(4)
+            _m2[0].metric("Base sin trenes", f"{_ncl(_base, 0)} kWh", help="kWh cada 15 min cuando no circula ningún tren con pasajeros (mediana de esos bloques).")
+            _m2[1].metric("Extra con servicio", f"{_ncl(_bs, 0)} kWh", help="kWh cada 15 min que se suman mientras hay servicio (estaciones abiertas, iluminación, equipos), aparte de los trenes.")
+            _m2[2].metric("Por unidad circulando", f"{_ncl(_bu, 1)} kWh", help="kWh cada 15 min por cada unidad en circulación. Un tren doble cuenta 2 unidades.")
+            _m2[3].metric("Por 100 pasajeros más", f"{_ncl(_c100, 2)} kWh" if pd.notna(_c100) else "—",
+                          help="kWh cada 15 min a igual hora y unidades: diferencia entre los bloques más cargados y los menos cargados, llevada a 100 pasajeros.")
+            if pd.notna(_c100) and _c100 > 0 and _bu > 0:
+                _txt_pax = f"A igual hora y unidades, 100 pasajeros más suman {_ncl(_c100, 2)} kWh cada 15 min ({_ncl(_c100 / _bu * 100, 1)} % de lo que consume una unidad)"
+            else:
+                _txt_pax = "A igual hora y unidades, más pasajeros no suben el consumo de forma medible"
+            st.info(f"**Lectura:** el consumo lo marca la cantidad de unidades en circulación: cada unidad suma {_ncl(_bu, 1)} kWh cada 15 min (r = {_ncl(_r_u, 2)}). "
+                    f"{_txt_pax}. La correlación con los pasajeros (r = {_ncl(_r_p, 2)}) se explica sobre todo porque con más demanda circulan más unidades; en promedio van {_ncl(_pxu, 0)} pasajeros por unidad.")
+            if abs(_lag) >= 30:
+                st.warning(f"⚠️ La energía calza mejor con la carga corrida {abs(_lag)} min. Revisa si PRMTE y Carga de pasajeros usan el mismo horario (cambio de hora).")
+            st.caption(f"Cada viaje de Carga de pasajeros se reparte en bloques de 15 min: unidades en circulación entre Hora Origen y Hora Fin, y pasajeros a bordo por tramo, con la hora de paso por cada estación interpolada según el km. "
+                       f"Se cruza con la energía PRMTE del mismo bloque: {_ncl(len(_bi), 0)} bloques de {_bi['Fecha'].nunique()} días. Los movimientos sin pasajeros (vacíos, maniobras, SFE) no están en Carga, así que su consumo aparece como diferencia sobre lo esperado. "
+                       f"Chequeo de horario: el mejor ajuste se da con {_lag} min de desfase.")
+
+            st.divider()
+            def _por_hora(_pf):
+                """Tabla por hora desde valores por franja de 15 min (promedio de días o un día)."""
+                _ph = _pf.assign(Hora=_pf['Franja'].str.slice(0, 2).astype(int)).groupby('Hora', as_index=False).agg(
+                    {'kWh': 'sum', 'kWh esperado': 'sum', 'Unidades': 'mean', 'Pax a bordo': 'mean', 'Pax-km': 'sum'})
+                _sv = _ph['Unidades'] >= 0.5
+                return pd.DataFrame({'Hora': _ph['Hora'].map(lambda _h: f"{_h:02d}:00"), 'kWh real': _ph['kWh'].round(0),
+                                     'kWh esperado': _ph['kWh esperado'].round(0), 'Diferencia kWh': (_ph['kWh'] - _ph['kWh esperado']).round(0),
+                                     'Unidades en circulación': _ph['Unidades'].round(1), 'Pasajeros a bordo': _ph['Pax a bordo'].round(0),
+                                     'Pasajeros por unidad': (_ph['Pax a bordo'] / _ph['Unidades']).where(_sv).round(0), 'Pax-km': _ph['Pax-km'].round(0),
+                                     'Pax-km por kWh': (_ph['Pax-km'] / _ph['kWh'].replace(0, np.nan)).where(_sv).round(2)})
+
+            # --- Selector de vista: promedio por tipo de día o un día puntual ---
+            _tipos_bi = [t for t in ['Laboral', 'Sábado', 'Domingo/Festivo'] if (_bi['Tipo de día'] == t).any()]
+            _ops_ver = [f"Promedio {t}" for t in _tipos_bi] + [pd.Timestamp(_f).strftime('%d-%m-%Y') for _f in sorted(_bi['Fecha'].unique())]
+            if st.session_state.get('_bi_ver') not in _ops_ver: st.session_state['_bi_ver'] = _ops_ver[0]
+            _cv_bi, _ = st.columns([1, 2])
+            _ver = _cv_bi.selectbox("Ver perfil de", _ops_ver, key="_bi_ver", help="Promedio por tipo de día o un día puntual. Aplica al perfil, a la eficiencia por hora y a la tabla por hora.")
+            _cols_v = ['kWh', 'kWh esperado', 'Unidades', 'Pax a bordo', 'Pax-km']
+            if _ver.startswith("Promedio "):
+                _sub = _bi[_bi['Tipo de día'] == _ver[len("Promedio "):]]
+                _pf = _sub.groupby('Franja', as_index=False)[_cols_v].mean()
+                _n_v = _sub['Fecha'].nunique()
+                _tit_v = f"{_ver} ({_n_v} {'día' if _n_v == 1 else 'días'})"
+            else:
+                _sub = _bi[_bi['Fecha'] == pd.to_datetime(_ver, format='%d-%m-%Y')]
+                _pf = _sub.groupby('Franja', as_index=False)[_cols_v].sum()
+                _tit_v = f"{_ver} ({_TIPO_TXT.get(get_tipo_dia(pd.to_datetime(_ver, format='%d-%m-%Y').date()), '')})"
+            _pf = _pf.sort_values('Franja')
+
+            st.markdown(f"#### Perfil cada 15 min — {_tit_v}")
+            _fp = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07, row_heights=[0.46, 0.27, 0.27],
+                                subplot_titles=("Energía (kWh cada 15 min)", "Unidades en circulación", "Pasajeros a bordo"))
+            _fp.add_trace(go.Bar(x=_pf['Franja'], y=_pf['kWh'], name='Energía real (PRMTE)', marker_color='#E85500',
+                                 hovertemplate='%{x} · real %{y:,.0f} kWh<extra></extra>'), row=1, col=1)
+            _fp.add_trace(go.Scatter(x=_pf['Franja'], y=_pf['kWh esperado'], name='Energía esperada (modelo)', mode='lines',
+                                     line=dict(color='#005195', width=2), hovertemplate='%{x} · esperada %{y:,.0f} kWh<extra></extra>'), row=1, col=1)
+            _fp.add_trace(go.Scatter(x=_pf['Franja'], y=_pf['Unidades'], name='Unidades en circulación', mode='lines', showlegend=False,
+                                     line=dict(color='#005195', width=2), hovertemplate='%{x} · %{y:,.1f} unidades<extra></extra>'), row=2, col=1)
+            _fp.add_trace(go.Scatter(x=_pf['Franja'], y=_pf['Pax a bordo'], name='Pasajeros a bordo', mode='lines', fill='tozeroy', showlegend=False,
+                                     line=dict(color='#0a7c6e', width=2), hovertemplate='%{x} · %{y:,.0f} pasajeros a bordo<extra></extra>'), row=3, col=1)
+            _fp.update_xaxes(type='category', categoryorder='array',
+                             categoryarray=[f"{_h:02d}:{_mi:02d}" for _h in range(24) for _mi in (0, 15, 30, 45)],
+                             tickvals=[f"{_h:02d}:00" for _h in range(0, 24, 2)])
+            _fp.update_layout(height=640, margin=dict(t=40, b=0, l=0, r=0), bargap=0.15, hovermode='x unified',
+                              legend=dict(orientation='h', yanchor='bottom', y=1.04, xanchor='right', x=1, title=''))
+            _pc(_fp, use_container_width=True, config={'locale': 'es'})
+            st.caption("Barras naranjas: energía real del PRMTE. Línea azul: lo que el modelo espera con las unidades en circulación de ese bloque. Si las barras superan la línea, se consumió más de lo que explica la operación con pasajeros.")
+
+            # --- Eficiencia por hora ---
+            _tab_bi = _por_hora(_pf)
+            st.markdown(f"#### Eficiencia por hora: pasajeros-km por kWh — {_tit_v}")
+            _feh = px.bar(_tab_bi.dropna(subset=['Pax-km por kWh']), x='Hora', y='Pax-km por kWh', color_discrete_sequence=['#0a7c6e'])
+            _feh.update_traces(hovertemplate='%{x}: %{y:,.2f} pax-km por kWh<extra></extra>')
+            _feh.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0), xaxis_title=None, yaxis_title='pax-km por kWh', bargap=0.25)
+            _pc(_feh, use_container_width=True, config={'locale': 'es'})
+            st.caption("Cuántos pasajeros-km mueve cada kWh en cada hora. Más alto = la energía de esa hora rinde más; las horas bajas muestran trenes circulando con poca carga para lo que consumen.")
+
+            # --- Dispersión energía vs unidades, coloreada por pasajeros ---
+            st.markdown("#### Energía vs unidades en circulación (todos los bloques del período)")
+            _sc = _bi.sample(n=8000, random_state=0) if len(_bi) > 8000 else _bi
+            _fsc = px.scatter(_sc, x='Unidades', y='kWh', color='Pax a bordo', render_mode='webgl',
+                              color_continuous_scale=[[0, '#d4ece8'], [1, '#064e45']],
+                              hover_data={'Fecha': '|%d-%m-%Y', 'Franja': True, 'Unidades': ':.1f', 'kWh': ':,.0f', 'Pax a bordo': ':,.0f'})
+            _fsc.update_traces(marker=dict(size=6, opacity=0.55))
+            _pfit = np.polyfit(_bi['Unidades'].to_numpy(float), _y, 1)
+            _xu = np.linspace(0, float(_bi['Unidades'].max()), 20)
+            _fsc.add_trace(go.Scatter(x=_xu, y=np.polyval(_pfit, _xu), mode='lines', name='Tendencia', line=dict(color='#E85500', width=2), hoverinfo='skip'))
+            _fsc.update_layout(height=430, margin=dict(t=10, b=0, l=0, r=0), xaxis_title='Unidades en circulación (promedio del bloque)', yaxis_title='kWh cada 15 min',
+                               coloraxis_colorbar=dict(title='Pasajeros<br>a bordo'), legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1, title=''))
+            _pc(_fsc, use_container_width=True, config={'locale': 'es'})
+            st.caption(f"Cada punto es un bloque de 15 min. Tendencia: {_ncl(_pfit[0], 1)} kWh por cada unidad adicional en circulación. "
+                       "El color muestra los pasajeros a bordo: con las mismas unidades, si los puntos más oscuros quedan más arriba, la carga empuja el consumo."
+                       + (f" Se dibujan 8.000 bloques al azar de {_ncl(len(_bi), 0)} para que cargue rápido; la tendencia usa todos." if len(_bi) > 8000 else ""))
+
+            # --- Mapa de calor: diferencia real − esperado por día y hora ---
+            st.markdown("#### ¿Cuándo se consumió más de lo esperado? (real − esperado, kWh por hora)")
+            _hm = _bi.pivot_table(index='Fecha', columns='Hora', values='Diferencia', aggfunc='sum').sort_index()
+            _lim = float(np.nanpercentile(np.abs(_hm.to_numpy(float)), 98)) if _hm.size else 1.0
+            _lim = _lim if _lim > 0 else 1.0
+            _fhm = go.Figure(go.Heatmap(z=_hm.to_numpy(float), x=[f"{int(_h):02d}:00" for _h in _hm.columns], y=[pd.Timestamp(_f).strftime('%d-%m-%y') for _f in _hm.index],
+                                        colorscale=[[0, '#005195'], [0.5, '#f1f5f9'], [1, '#c62828']], zmin=-_lim, zmax=_lim,
+                                        colorbar=dict(title='kWh'), hovertemplate='%{y} %{x}: %{z:+,.0f} kWh vs esperado<extra></extra>'))
+            _fhm.update_layout(height=min(900, 160 + 16 * len(_hm)), margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(autorange='reversed', type='category'),
+                               xaxis=dict(type='category'))
+            _pc(_fhm, use_container_width=True, config={'locale': 'es'})
+            st.caption("Rojo: se consumió más de lo que explican las unidades en circulación de esa hora (por ejemplo salidas de cochera, vacíos, maniobras, SFE nocturnos o equipos encendidos). Azul: menos de lo esperado.")
+
+            # --- Tabla por hora + descarga ---
+            st.markdown(f"#### Tabla por hora — {_tit_v}")
+            _tab_ui = _tab_bi.copy()
+            _tab_ui['Unidades en circulación'] = _tab_ui['Unidades en circulación'].map(lambda _v: _ncl(_v, 1))
+            _tab_ui['Pax-km por kWh'] = _tab_ui['Pax-km por kWh'].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '')
+            _st_df(_tab_ui, hide_index=True, use_container_width=True, height=35 * (len(_tab_ui) + 1) + 3)
+            st.caption("kWh y pax-km: total de la hora. Unidades y pasajeros a bordo: promedio de la hora." + (" En los promedios por tipo de día, cada valor es el promedio de esos días." if _ver.startswith("Promedio ") else ""))
+            @st.cache_data(show_spinner=False, max_entries=4)
+            def _excel_bi(datos, perfil, modelo):
+                # Parámetros sin "_" a propósito: Streamlit sí los usa como clave del caché.
+                _buf = BytesIO()
+                with pd.ExcelWriter(_buf, engine='xlsxwriter') as _w:
+                    datos.to_excel(_w, sheet_name='Datos 15 min', index=False)
+                    perfil.to_excel(_w, sheet_name='Perfil por hora', index=False)
+                    modelo.to_excel(_w, sheet_name='Modelo', index=False)
+                return _buf.getvalue()
+            _x15 = _bi[['Fecha', 'Franja', 'Tipo de día', 'kWh', 'kWh esperado', 'Diferencia', 'Trenes', 'Unidades', 'Pax a bordo', 'Pax-km']].round(2)
+            _x15['Fecha'] = _x15['Fecha'].dt.strftime('%d-%m-%Y')
+            _x_ph = pd.concat([_por_hora(_bi[_bi['Tipo de día'] == _t].groupby('Franja', as_index=False)[_cols_v].mean()).assign(**{'Tipo de día': _t})
+                               for _t in _tipos_bi], ignore_index=True)
+            _x_ph = _x_ph[['Tipo de día'] + [c for c in _x_ph.columns if c != 'Tipo de día']]
+            _x_mod = pd.DataFrame({'Indicador': ['Base sin trenes (kWh/15 min)', 'Extra en horario de servicio (kWh/15 min)', 'Por unidad en circulación (kWh/15 min)',
+                                                 'Efecto de 100 pasajeros más (kWh/15 min)', 'R² del modelo', 'r energía–pasajeros', 'r energía–unidades',
+                                                 'Pasajeros por unidad (en servicio)', 'Pax-km por kWh', 'Bloques de 15 min', 'Días', 'Desfase de mejor ajuste (min)'],
+                                   'Valor': [round(_base, 2), round(_bs, 2), round(_bu, 3), round(_c100, 3) if pd.notna(_c100) else None, round(_r2, 4),
+                                             round(_r_p, 4), round(_r_u, 4), round(_pxu, 1) if pd.notna(_pxu) else None,
+                                             round(_pk_tot / _e_tot, 3) if _e_tot > 0 else None, len(_bi), int(_bi['Fecha'].nunique()), _lag]})
+            st.download_button("⬇️ Descargar análisis BI en Excel (15 min + perfil por hora + modelo)", data=_excel_bi(_x15, _x_ph, _x_mod),
+                               file_name="bi_carga_vs_energia_15min.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_bi_carga")
