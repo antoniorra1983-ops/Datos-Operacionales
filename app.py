@@ -1953,6 +1953,124 @@ def fig_perfil_velocidades():
     fig.update_layout(title='Perfil de velocidades — Vía 1', xaxis_title='km desde Puerto', yaxis_title='km/h', height=300, margin=dict(t=40, b=20))
     return fig
 
+def _armar_df_ops(all_ops, all_tr, all_fact_full, all_prmte_full, all_seat):
+    """Tabla diaria: odómetro y tren-km del UMR (sin SFE en pruebas), energía por fuente y jerarquía
+    Factura > PRMTE > SEAT. La usa la carga principal y la línea base del año anterior. Devuelve (df_ops, seat_dups)."""
+    df_ops=pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum","Tren-Km [km]":"sum"}).reset_index()
+    # --- Excluir SFE en pruebas del Odómetro/Tren-Km ---
+    # Regla: hasta el 20-abr-2026 TODOS los SFE van aparte (en pruebas). Desde el
+    # 21-abr-2026 el SFE 412 se integra al total y el resto sigue aparte.
+    # El km diario de cada SFE se toma de all_tr (odómetro por tren). Se descuenta del
+    # total del UMR el aporte de los SFE que NO deben contar en cada fecha.
+    _SFE_CORTE = pd.Timestamp(2026, 4, 21)
+    _sfe_desc = {}
+    if all_tr:
+        _dt_all = pd.DataFrame(all_tr)
+        if {'Tren', 'Fecha', 'Valor'}.issubset(_dt_all.columns):
+            _dt_all['Fecha'] = pd.to_datetime(_dt_all['Fecha'], errors='coerce').dt.normalize()
+            _dt_all['Valor'] = pd.to_numeric(_dt_all['Valor'], errors='coerce')
+            if 'Clase' in _dt_all.columns and (_dt_all['Clase'] == 'km').any():
+                _dt_km = _dt_all[_dt_all['Clase'] == 'km']
+            else:
+                _dt_km = _dt_all[_dt_all['Valor'] < 50000]
+            _dt_km = _dt_km.dropna(subset=['Fecha', 'Valor'])
+            _es_sfe = _dt_km['Tren'].astype(str).str.upper().str.startswith('SFE')
+            # Km diario total por fecha reconstruido desde all_tr (todos los trenes)
+            _tot_tr = _dt_km.groupby('Fecha')['Valor'].sum()
+            # Km diario de SFE por fecha
+            _tot_sfe_dia = _dt_km[_es_sfe].groupby('Fecha')['Valor'].sum()
+            for _fe_s in _tot_sfe_dia.index:
+                # Solo descontar si el total del UMR para esa fecha INCLUYE el SFE
+                # (se compara la suma por tren con el odómetro del df_ops de esa fecha)
+                _od_umr = df_ops.loc[pd.to_datetime(df_ops['Fecha']).dt.normalize() == _fe_s, 'Odómetro [km]']
+                _od_umr = float(_od_umr.iloc[0]) if len(_od_umr) else 0.0
+                _tot_con_sfe = float(_tot_tr.get(_fe_s, 0.0))
+                _incluye_sfe = _od_umr > (_tot_con_sfe - float(_tot_sfe_dia[_fe_s])) + 1.0
+                if not _incluye_sfe:
+                    continue
+                # Sumar el km de los SFE que NO deben contar en esa fecha
+                _sfe_fe = _dt_km[_es_sfe & (_dt_km['Fecha'] == _fe_s)]
+                for _, _rs in _sfe_fe.iterrows():
+                    _es_412 = bool(re.search(r'\b412\b', str(_rs['Tren'])))
+                    _cuenta = _es_412 and (_fe_s >= _SFE_CORTE)
+                    if not _cuenta:
+                        _sfe_desc[_fe_s] = _sfe_desc.get(_fe_s, 0.0) + float(_rs['Valor'])
+    if _sfe_desc:
+        _sfe_ser = pd.Series(_sfe_desc)
+        _df_desc = pd.DataFrame({'Fecha': _sfe_ser.index, '_sfe_km': _sfe_ser.values})
+        _df_desc['Fecha'] = pd.to_datetime(_df_desc['Fecha']).dt.normalize()
+        df_ops['Fecha'] = pd.to_datetime(df_ops['Fecha']).dt.normalize()
+        df_ops = df_ops.merge(_df_desc, on='Fecha', how='left')
+        df_ops['_sfe_km'] = df_ops['_sfe_km'].fillna(0.0)
+        df_ops['Odómetro [km]'] = (df_ops['Odómetro [km]'] - df_ops['_sfe_km']).clip(lower=0)
+        df_ops = df_ops.drop(columns=['_sfe_km'])
+    df_f_d=(pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha","E_Fact"]))
+    df_p_d=(pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha","E_Prmte"]))
+    # SEAT: si una misma fecha viene en más de un archivo, manda el archivo de ESE mes
+    # (antes se sumaban y el día quedaba duplicado).
+    if all_seat:
+        _dse = pd.DataFrame(all_seat)
+        _dse['Fecha'] = pd.to_datetime(_dse['Fecha']).dt.normalize()
+        for _c in ['E_Total', 'E_Tr', 'E_12']:
+            _dse[_c] = pd.to_numeric(_dse[_c], errors='coerce')
+        if '_arch' not in _dse.columns:
+            _dse['_arch'] = ''
+        for _c in ['_arch_anio', '_arch_mes']:
+            if _c not in _dse.columns:
+                _dse[_c] = np.nan
+        # Un mismo archivo puede traer varias filas del día: se suman dentro del archivo
+        _dse = _dse.groupby(['Fecha', '_arch', '_arch_anio', '_arch_mes'], as_index=False, dropna=False).agg(
+            {'E_Total': 'sum', 'E_Tr': 'sum', 'E_12': 'sum'})
+        # Prioridad 1 = el archivo corresponde al mes/año de la fecha
+        _fx = pd.to_datetime(_dse['Fecha'])
+        _dse['_prio'] = ((_dse['_arch_mes'] == _fx.dt.month) & (_dse['_arch_anio'] == _fx.dt.year)).astype(int)
+        _n_antes = len(_dse)
+        _dse = _dse.sort_values(['Fecha', '_prio', '_arch'], ascending=[True, False, True])
+        _dse = _dse.drop_duplicates(subset=['Fecha'], keep='first')
+        _seat_dups = _n_antes - len(_dse)
+        df_s_d = _dse[['Fecha', 'E_Total', 'E_Tr', 'E_12']].rename(
+            columns={"E_Total": "E_Seat_T", "E_Tr": "E_Seat_Tr", "E_12": "E_Seat_12"})
+    else:
+        df_s_d = pd.DataFrame(columns=["Fecha", "E_Seat_T", "E_Seat_Tr", "E_Seat_12"])
+        _seat_dups = 0
+    
+    for dff in [df_ops,df_f_d,df_p_d,df_s_d]: dff['Fecha']=pd.to_datetime(dff['Fecha']).dt.normalize()
+    df_ops=(df_ops.merge(df_f_d,on="Fecha",how="left").merge(df_p_d,on="Fecha",how="left").merge(df_s_d,on="Fecha",how="left").fillna(0))
+    
+    df_ops['Tipo Día'] = df_ops['Fecha'].apply(lambda x: get_tipo_dia(x.date() if pd.notna(x) else None))
+    df_ops['Nombre Feriado'] = df_ops['Fecha'].apply(lambda x: obtener_nombre_feriado(x.date() if pd.notna(x) else None))
+    df_ops['Fecha (ES)'] = df_ops['Fecha'].apply(obtener_fecha_es)
+
+    # Proporción tracción / baja tensión del período, según la SUMA del SEAT (no un valor fijo).
+    # Se usa como respaldo para los días que no traen SEAT propio; los que sí lo traen usan su % diario.
+    _sT = pd.to_numeric(df_ops.get('E_Seat_T', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+    _sTr = pd.to_numeric(df_ops.get('E_Seat_Tr', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+    _s12 = pd.to_numeric(df_ops.get('E_Seat_12', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
+    if _sT > 0:
+        _r_tr_periodo = _sTr / _sT
+        _r_12_periodo = _s12 / _sT
+    else:
+        _r_tr_periodo, _r_12_periodo = 0.85, 0.15
+
+    def jerarquia(row):
+        if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
+        elif row['E_Prmte']>0:  tot,src=row['E_Prmte'],"PRMTE"
+        elif row['E_Seat_T']>0: tot,src=row['E_Seat_T'],"SEAT"
+        else: return 0,0,0,0,0,"N/A"
+        # % del día si trae SEAT; si no, el % del período (suma del SEAT), no un valor fijo
+        if row['E_Seat_T']>0:
+            r_tr=row['E_Seat_Tr']/row['E_Seat_T']
+            r_12=row['E_Seat_12']/row['E_Seat_T']
+        else:
+            r_tr=_r_tr_periodo
+            r_12=_r_12_periodo
+        return tot,tot*r_tr,tot*r_12,r_tr*100,r_12*100,src
+        
+    df_ops[['E_Total','E_Tr','E_12','% Tracción','% 12 kV','Fuente']]=df_ops.apply(jerarquia,axis=1,result_type='expand')
+    df_ops['IDE (kWh/km)']=df_ops.apply(lambda r: r['E_Tr']/r['Odómetro [km]'] if r['Odómetro [km]']>0 else 0,axis=1)
+    df_ops['UMR (%)'] = df_ops.apply(lambda r: (r['Tren-Km [km]'] / r['Odómetro [km]']) * 100 if r['Odómetro [km]'] > 0 else 0, axis=1)
+    return df_ops, _seat_dups
+
 # --- 6. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
     st.header("📅 Filtro Global")
@@ -2112,119 +2230,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     if _errores_proc: st.session_state['_errores_proc']=_errores_proc
 
     if all_ops:
-        df_ops=pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum","Tren-Km [km]":"sum"}).reset_index()
-        # --- Excluir SFE en pruebas del Odómetro/Tren-Km ---
-        # Regla: hasta el 20-abr-2026 TODOS los SFE van aparte (en pruebas). Desde el
-        # 21-abr-2026 el SFE 412 se integra al total y el resto sigue aparte.
-        # El km diario de cada SFE se toma de all_tr (odómetro por tren). Se descuenta del
-        # total del UMR el aporte de los SFE que NO deben contar en cada fecha.
-        _SFE_CORTE = pd.Timestamp(2026, 4, 21)
-        _sfe_desc = {}
-        if all_tr:
-            _dt_all = pd.DataFrame(all_tr)
-            if {'Tren', 'Fecha', 'Valor'}.issubset(_dt_all.columns):
-                _dt_all['Fecha'] = pd.to_datetime(_dt_all['Fecha'], errors='coerce').dt.normalize()
-                _dt_all['Valor'] = pd.to_numeric(_dt_all['Valor'], errors='coerce')
-                if 'Clase' in _dt_all.columns and (_dt_all['Clase'] == 'km').any():
-                    _dt_km = _dt_all[_dt_all['Clase'] == 'km']
-                else:
-                    _dt_km = _dt_all[_dt_all['Valor'] < 50000]
-                _dt_km = _dt_km.dropna(subset=['Fecha', 'Valor'])
-                _es_sfe = _dt_km['Tren'].astype(str).str.upper().str.startswith('SFE')
-                # Km diario total por fecha reconstruido desde all_tr (todos los trenes)
-                _tot_tr = _dt_km.groupby('Fecha')['Valor'].sum()
-                # Km diario de SFE por fecha
-                _tot_sfe_dia = _dt_km[_es_sfe].groupby('Fecha')['Valor'].sum()
-                for _fe_s in _tot_sfe_dia.index:
-                    # Solo descontar si el total del UMR para esa fecha INCLUYE el SFE
-                    # (se compara la suma por tren con el odómetro del df_ops de esa fecha)
-                    _od_umr = df_ops.loc[pd.to_datetime(df_ops['Fecha']).dt.normalize() == _fe_s, 'Odómetro [km]']
-                    _od_umr = float(_od_umr.iloc[0]) if len(_od_umr) else 0.0
-                    _tot_con_sfe = float(_tot_tr.get(_fe_s, 0.0))
-                    _incluye_sfe = _od_umr > (_tot_con_sfe - float(_tot_sfe_dia[_fe_s])) + 1.0
-                    if not _incluye_sfe:
-                        continue
-                    # Sumar el km de los SFE que NO deben contar en esa fecha
-                    _sfe_fe = _dt_km[_es_sfe & (_dt_km['Fecha'] == _fe_s)]
-                    for _, _rs in _sfe_fe.iterrows():
-                        _es_412 = bool(re.search(r'\b412\b', str(_rs['Tren'])))
-                        _cuenta = _es_412 and (_fe_s >= _SFE_CORTE)
-                        if not _cuenta:
-                            _sfe_desc[_fe_s] = _sfe_desc.get(_fe_s, 0.0) + float(_rs['Valor'])
-        if _sfe_desc:
-            _sfe_ser = pd.Series(_sfe_desc)
-            _df_desc = pd.DataFrame({'Fecha': _sfe_ser.index, '_sfe_km': _sfe_ser.values})
-            _df_desc['Fecha'] = pd.to_datetime(_df_desc['Fecha']).dt.normalize()
-            df_ops['Fecha'] = pd.to_datetime(df_ops['Fecha']).dt.normalize()
-            df_ops = df_ops.merge(_df_desc, on='Fecha', how='left')
-            df_ops['_sfe_km'] = df_ops['_sfe_km'].fillna(0.0)
-            df_ops['Odómetro [km]'] = (df_ops['Odómetro [km]'] - df_ops['_sfe_km']).clip(lower=0)
-            df_ops = df_ops.drop(columns=['_sfe_km'])
-        df_f_d=(pd.DataFrame(all_fact_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Fact"}) if all_fact_full else pd.DataFrame(columns=["Fecha","E_Fact"]))
-        df_p_d=(pd.DataFrame(all_prmte_full).groupby("Fecha")["Consumo"].sum().reset_index().rename(columns={"Consumo":"E_Prmte"}) if all_prmte_full else pd.DataFrame(columns=["Fecha","E_Prmte"]))
-        # SEAT: si una misma fecha viene en más de un archivo, manda el archivo de ESE mes
-        # (antes se sumaban y el día quedaba duplicado).
-        if all_seat:
-            _dse = pd.DataFrame(all_seat)
-            _dse['Fecha'] = pd.to_datetime(_dse['Fecha']).dt.normalize()
-            for _c in ['E_Total', 'E_Tr', 'E_12']:
-                _dse[_c] = pd.to_numeric(_dse[_c], errors='coerce')
-            if '_arch' not in _dse.columns:
-                _dse['_arch'] = ''
-            for _c in ['_arch_anio', '_arch_mes']:
-                if _c not in _dse.columns:
-                    _dse[_c] = np.nan
-            # Un mismo archivo puede traer varias filas del día: se suman dentro del archivo
-            _dse = _dse.groupby(['Fecha', '_arch', '_arch_anio', '_arch_mes'], as_index=False, dropna=False).agg(
-                {'E_Total': 'sum', 'E_Tr': 'sum', 'E_12': 'sum'})
-            # Prioridad 1 = el archivo corresponde al mes/año de la fecha
-            _fx = pd.to_datetime(_dse['Fecha'])
-            _dse['_prio'] = ((_dse['_arch_mes'] == _fx.dt.month) & (_dse['_arch_anio'] == _fx.dt.year)).astype(int)
-            _n_antes = len(_dse)
-            _dse = _dse.sort_values(['Fecha', '_prio', '_arch'], ascending=[True, False, True])
-            _dse = _dse.drop_duplicates(subset=['Fecha'], keep='first')
-            _seat_dups = _n_antes - len(_dse)
-            df_s_d = _dse[['Fecha', 'E_Total', 'E_Tr', 'E_12']].rename(
-                columns={"E_Total": "E_Seat_T", "E_Tr": "E_Seat_Tr", "E_12": "E_Seat_12"})
-        else:
-            df_s_d = pd.DataFrame(columns=["Fecha", "E_Seat_T", "E_Seat_Tr", "E_Seat_12"])
-            _seat_dups = 0
-        
-        for dff in [df_ops,df_f_d,df_p_d,df_s_d]: dff['Fecha']=pd.to_datetime(dff['Fecha']).dt.normalize()
-        df_ops=(df_ops.merge(df_f_d,on="Fecha",how="left").merge(df_p_d,on="Fecha",how="left").merge(df_s_d,on="Fecha",how="left").fillna(0))
-        
-        df_ops['Tipo Día'] = df_ops['Fecha'].apply(lambda x: get_tipo_dia(x.date() if pd.notna(x) else None))
-        df_ops['Nombre Feriado'] = df_ops['Fecha'].apply(lambda x: obtener_nombre_feriado(x.date() if pd.notna(x) else None))
-        df_ops['Fecha (ES)'] = df_ops['Fecha'].apply(obtener_fecha_es)
-
-        # Proporción tracción / baja tensión del período, según la SUMA del SEAT (no un valor fijo).
-        # Se usa como respaldo para los días que no traen SEAT propio; los que sí lo traen usan su % diario.
-        _sT = pd.to_numeric(df_ops.get('E_Seat_T', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
-        _sTr = pd.to_numeric(df_ops.get('E_Seat_Tr', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
-        _s12 = pd.to_numeric(df_ops.get('E_Seat_12', pd.Series(dtype=float)), errors='coerce').fillna(0).sum()
-        if _sT > 0:
-            _r_tr_periodo = _sTr / _sT
-            _r_12_periodo = _s12 / _sT
-        else:
-            _r_tr_periodo, _r_12_periodo = 0.85, 0.15
-
-        def jerarquia(row):
-            if row['E_Fact']>0:    tot,src=row['E_Fact'],"Factura"
-            elif row['E_Prmte']>0:  tot,src=row['E_Prmte'],"PRMTE"
-            elif row['E_Seat_T']>0: tot,src=row['E_Seat_T'],"SEAT"
-            else: return 0,0,0,0,0,"N/A"
-            # % del día si trae SEAT; si no, el % del período (suma del SEAT), no un valor fijo
-            if row['E_Seat_T']>0:
-                r_tr=row['E_Seat_Tr']/row['E_Seat_T']
-                r_12=row['E_Seat_12']/row['E_Seat_T']
-            else:
-                r_tr=_r_tr_periodo
-                r_12=_r_12_periodo
-            return tot,tot*r_tr,tot*r_12,r_tr*100,r_12*100,src
-            
-        df_ops[['E_Total','E_Tr','E_12','% Tracción','% 12 kV','Fuente']]=df_ops.apply(jerarquia,axis=1,result_type='expand')
-        df_ops['IDE (kWh/km)']=df_ops.apply(lambda r: r['E_Tr']/r['Odómetro [km]'] if r['Odómetro [km]']>0 else 0,axis=1)
-        df_ops['UMR (%)'] = df_ops.apply(lambda r: (r['Tren-Km [km]'] / r['Odómetro [km]']) * 100 if r['Odómetro [km]'] > 0 else 0, axis=1)
+        df_ops, _seat_dups = _armar_df_ops(all_ops, all_tr, all_fact_full, all_prmte_full, all_seat)
 
     diag_thdr=[]
     if f_v1_all:
@@ -2582,7 +2588,7 @@ st.markdown("""<style>
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base energética"]
 
 with st.container(key="_topbar"):
     _cl, _cn = st.columns([1, 9], vertical_alignment="center")
@@ -7155,3 +7161,181 @@ if _seccion == _SECCIONES[16]:
                                   'Var. sobre lo esperado (pp)': _ev['vDV'].round(2)})
             st.download_button("⬇️ Descargar análisis BI en Excel (seguimiento, rankings, 15 min, perfil y modelo)", data=_excel_bi(_x15, _x_ph, _x_mod, _x_ev, _tab_rd, _tab_rh.head(500)),
                                file_name="bi_carga_vs_energia_15min.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_bi_carga")
+
+# ===== Línea base energética: cada año se compara con un modelo ajustado con el año anterior (2026 vs 2025, 2027 vs 2026...) =====
+# Meta contra la línea base (% de energía real sobre la esperada): 0 = no superarla; -3 = consumir al menos 3 % menos. Cámbiala aquí para dejarla fija.
+_METAS_LB = {'meta': 0.0, 'tolerancia': 2.0}
+
+def _firma_anio_lb(anio):
+    """Archivos (nombre, tamaño) de UMR, SEAT y Facturación de un año: si cambian, la línea base se recalcula."""
+    return tuple(sorted((os.path.basename(_p), os.path.getsize(_p)) for _k in ('umr', 'seat', 'bill')
+                        for _p in listar_archivos(DATA_DIRS[_k]) if _anio_de_nombre(os.path.basename(_p)) == anio))
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def _tabla_anual_lb(anio, firma):
+    """Tabla diaria del año completo, armada igual que la carga principal (_armar_df_ops).
+    Parámetros sin "_" a propósito: Streamlit los usa como clave del caché."""
+    _sd, _ed = date(anio, 1, 1), date(anio, 12, 31)
+    _ops, _tr, _fact, _prm, _seat = [], [], [], [], []
+    for _k in ('umr', 'seat', 'bill'):
+        for _p in listar_archivos(DATA_DIRS[_k]):
+            _nom = os.path.basename(_p)
+            if _anio_de_nombre(_nom) != anio:
+                continue
+            try:
+                with open(_p, 'rb') as _fh:
+                    _b = _fh.read()
+                if _k == 'umr':
+                    _r = _umr_cache(_nom, _b, _sd, _ed); _ops.extend(_r[0]); _tr.extend(_r[1])
+                elif _k == 'seat':
+                    _r = _seat_cache(_nom, _b, _sd, _ed); _seat.extend(_r[0])
+                else:
+                    _r = _bill_cache(_nom, _b, _sd, _ed); _fact.extend(_r[0]); _prm.extend(_r[1])
+            except Exception:
+                continue
+    if not _ops:
+        return pd.DataFrame()
+    return _armar_df_ops(_ops, _tr, _fact, _prm, _seat)[0]
+
+def _modelo_lb(df):
+    """kWh/día = fijo + kWh por km × odómetro + ajuste sábado + ajuste domingo/festivo (mínimos cuadrados)."""
+    _d = df[(pd.to_numeric(df['E_Total'], errors='coerce') > 0) & (pd.to_numeric(df['Odómetro [km]'], errors='coerce') > 0)]
+    if len(_d) < 60:
+        return None
+    _X = np.column_stack([np.ones(len(_d)), _d['Odómetro [km]'].astype(float),
+                          (_d['Tipo Día'] == 'S').astype(float), (_d['Tipo Día'] == 'D/F').astype(float)])
+    _y = _d['E_Total'].astype(float).to_numpy()
+    _b = np.linalg.lstsq(_X, _y, rcond=None)[0]
+    _r = _y - _X @ _b
+    return {'b': _b, 'r2': 1 - float((_r ** 2).sum()) / float(((_y - _y.mean()) ** 2).sum()),
+            'cv': float(np.sqrt((_r ** 2).sum() / max(len(_y) - 4, 1)) / _y.mean() * 100), 'n': int(len(_d))}
+
+if _seccion == _SECCIONES[17]:
+    st.markdown("### 📏 Línea base energética (año anterior)")
+    st.caption("Cada año se compara con un modelo ajustado con el año anterior completo: 2026 contra 2025, 2027 contra 2026, y así. "
+               "El modelo explica la energía diaria (jerarquía Factura > PRMTE > SEAT) con los km de odómetro y el tipo de día. "
+               "La línea base no cambia con los filtros: lo que filtras es el período que se compara.")
+    if df_ops.empty or 'E_Total' not in df_ops.columns or 'Odómetro [km]' not in df_ops.columns:
+        st.info("Carga UMR y energía en la barra lateral y aprieta **🔄 Cargar / actualizar datos**.")
+    else:
+        _rp = df_ops[(pd.to_numeric(df_ops['E_Total'], errors='coerce') > 0) & (pd.to_numeric(df_ops['Odómetro [km]'], errors='coerce') > 0)].copy()
+        _rp['Fecha'] = pd.to_datetime(_rp['Fecha']).dt.normalize()
+        _anios_rp = sorted(int(_a) for _a in _rp['Fecha'].dt.year.unique())
+        _mods_lb = {}
+        with st.spinner("Preparando la línea base del año anterior (la primera vez lee sus archivos)…"):
+            for _a in _anios_rp:
+                _ta = _tabla_anual_lb(_a - 1, _firma_anio_lb(_a - 1))
+                _mods_lb[_a] = _modelo_lb(_ta) if not _ta.empty else None
+        _sin_lb = [_a for _a in _anios_rp if _mods_lb.get(_a) is None]
+        if _sin_lb:
+            st.warning("Sin línea base para " + ", ".join(str(_a) for _a in _sin_lb) + ": faltan datos de UMR o de energía de "
+                       + ", ".join(str(_a - 1) for _a in _sin_lb) + " en el repositorio.")
+        _rp = _rp[_rp['Fecha'].dt.year.isin([_a for _a in _anios_rp if _mods_lb.get(_a) is not None])]
+        if _rp.empty:
+            st.info("No hay días del período filtrado con línea base disponible.")
+        else:
+            _B = np.vstack([_mods_lb[int(_a)]['b'] for _a in _rp['Fecha'].dt.year])
+            _rp['Esperado'] = (_B[:, 0] + _B[:, 1] * _rp['Odómetro [km]'].astype(float).to_numpy()
+                               + _B[:, 2] * (_rp['Tipo Día'] == 'S').to_numpy(float) + _B[:, 3] * (_rp['Tipo Día'] == 'D/F').to_numpy(float))
+            _rp['Diferencia'] = _rp['E_Total'] - _rp['Esperado']
+            # Días con energía incompleta (por ejemplo PRMTE parcial): real menor a la mitad o mayor a 1,5 veces lo esperado
+            _malos = (_rp['E_Total'] < 0.5 * _rp['Esperado']) | (_rp['E_Total'] > 1.5 * _rp['Esperado'])
+            _excl_lb = _rp[_malos]
+            _rp = _rp[~_malos].sort_values('Fecha').reset_index(drop=True)
+            _rp['Acumulado'] = _rp['Diferencia'].cumsum()
+
+            # --- Modelo de cada línea base usada ---
+            for _a in sorted(set(int(_x) for _x in _rp['Fecha'].dt.year)):
+                _m = _mods_lb[_a]; _b = _m['b']
+                st.markdown(f"**Línea base {_a - 1} → se aplica a {_a}** · kWh/día = {_ncl(_b[0], 0)} + {_ncl(_b[1], 2)} × km de odómetro "
+                            f"{'−' if _b[2] < 0 else '+'} {_ncl(abs(_b[2]), 0)} si es sábado {'−' if _b[3] < 0 else '+'} {_ncl(abs(_b[3]), 0)} si es domingo o festivo")
+                _mm = st.columns(4)
+                _mm[0].metric("kWh por km de odómetro", _ncl(_b[1], 2), help=f"Cuánto sube la energía del día por cada km recorrido, según {_a - 1}.")
+                _mm[1].metric("Ajuste del modelo (R²)", _ncl(_m['r2'], 3))
+                _mm[2].metric("Error típico de un día", f"{_ncl(_m['cv'], 1)} %", help="CV(RMSE): error típico del modelo en un día, como % del consumo diario promedio.")
+                _mm[3].metric(f"Días de {_a - 1} usados", _ncl(_m['n'], 0))
+
+            # --- Desempeño del período filtrado ---
+            st.divider()
+            _cm = st.columns([1, 1, 2])
+            _meta_lb = _cm[0].number_input("Meta vs línea base (máx. %)", value=float(_METAS_LB['meta']), step=0.5, format="%.1f", key="_lb_meta",
+                                           help="0 = no superar la línea base; −3 = consumir al menos 3 % menos que la línea base.")
+            _tol_lb = _cm[1].number_input("Tolerancia amarillo (pp)", min_value=0.0, value=float(_METAS_LB['tolerancia']), step=0.5, format="%.1f", key="_lb_tol",
+                                          help="Amarillo = no cumple la meta por menos de estos puntos porcentuales.")
+
+            def _sem_lb(_v):
+                if _v is None or pd.isna(_v):
+                    return "⚪"
+                return "🟢" if _v <= _meta_lb else ("🟡" if _v <= _meta_lb + _tol_lb else "🔴")
+
+            _E_lb = float(_rp['E_Total'].sum()); _Es_lb = float(_rp['Esperado'].sum())
+            _D_lb = _E_lb - _Es_lb; _Dp_lb = _D_lb / _Es_lb * 100 if _Es_lb else np.nan
+            _kk = st.columns(4)
+            _kk[0].metric("Energía real (kWh)", _ncl(_E_lb, 0))
+            _kk[1].metric("Esperada por línea base (kWh)", _ncl(_Es_lb, 0))
+            _kk[2].metric(f"{_sem_lb(_Dp_lb)} Real vs línea base", f"{'+' if _Dp_lb > 0 else ''}{_ncl(_Dp_lb, 1)} %",
+                          delta=f"{'+' if _D_lb > 0 else ''}{_ncl(_D_lb, 0)} kWh", delta_color="inverse",
+                          help=f"Meta: {_ncl(_meta_lb, 1)} % o menos. Positivo = se consumió más que la línea base (sobreconsumo); negativo = ahorro.")
+            _kk[3].metric("Días evaluados", _ncl(len(_rp), 0))
+            if not _excl_lb.empty:
+                _n_ex = len(_excl_lb)
+                st.caption(("Se dejó fuera 1 día" if _n_ex == 1 else f"Se dejaron fuera {_n_ex} días") + " con energía incompleta (real menor a la mitad o mayor a 1,5 veces lo esperado): "
+                           + ", ".join(pd.Timestamp(_f).strftime('%d-%m-%Y') for _f in _excl_lb['Fecha'].head(10)) + ("…" if _n_ex > 10 else "") + ".")
+
+            st.markdown("#### Energía diaria: real vs línea base")
+            _fdl = go.Figure()
+            _fdl.add_trace(go.Scatter(x=_rp['Fecha'], y=_rp['E_Total'], name='Real', mode='lines', line=dict(color='#E85500', width=2),
+                                      hovertemplate='%{x|%d-%m-%Y}: %{y:,.0f} kWh<extra>Real</extra>'))
+            _fdl.add_trace(go.Scatter(x=_rp['Fecha'], y=_rp['Esperado'], name='Línea base', mode='lines', line=dict(color='#005195', width=2),
+                                      hovertemplate='%{x|%d-%m-%Y}: %{y:,.0f} kWh<extra>Línea base</extra>'))
+            _fdl.update_layout(height=360, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh por día', hovermode='x unified', xaxis=dict(tickformat='%d-%m-%y'),
+                               legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1, title=''))
+            _pc(_fdl, use_container_width=True, config={'locale': 'es'})
+
+            st.markdown("#### Diferencia acumulada (CUSUM)")
+            _fcu = go.Figure(go.Scatter(x=_rp['Fecha'], y=_rp['Acumulado'], mode='lines', line=dict(color='#E85500', width=2),
+                                        fill='tozeroy', fillcolor='rgba(232,85,0,0.12)', hovertemplate='%{x|%d-%m-%Y}: %{y:+,.0f} kWh acumulados<extra></extra>'))
+            _fcu.add_hline(y=0, line=dict(color='#64748b', width=1))
+            _fcu.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh acumulados (real − línea base)', xaxis=dict(tickformat='%d-%m-%y'))
+            _pc(_fcu, use_container_width=True, config={'locale': 'es'})
+            st.caption("Suma acumulada de la diferencia diaria entre la energía real y la línea base. Si la curva sube, se está consumiendo más que la línea base; si baja, hay ahorro. "
+                       "Un cambio de pendiente marca desde cuándo cambió el desempeño.")
+
+            # --- Por mes ---
+            _MES_LB = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+            _mes_lb = (_rp.groupby(_rp['Fecha'].dt.to_period('M'))
+                          .agg(Dias=('Fecha', 'nunique'), Real=('E_Total', 'sum'), Esp=('Esperado', 'sum'), Km=('Odómetro [km]', 'sum')))
+            _mes_lb['Dif'] = _mes_lb['Real'] - _mes_lb['Esp']
+            _mes_lb['Pct'] = _mes_lb['Dif'] / _mes_lb['Esp'] * 100
+            _mes_lb['Mes'] = [f"{_MES_LB[_p.month - 1]} {_p.year}" for _p in _mes_lb.index]
+            st.markdown("#### Real vs línea base por mes")
+            _fms = go.Figure(go.Bar(x=_mes_lb['Mes'], y=_mes_lb['Pct'], marker_color=np.where(_mes_lb['Pct'] > 0, '#c62828', '#005195'),
+                                    text=[f"{'+' if _v > 0 else ''}{_ncl(_v, 1)} %" for _v in _mes_lb['Pct']], textposition='outside',
+                                    hovertemplate='%{x}: %{y:+,.1f} %<extra></extra>'))
+            _fms.add_hline(y=_meta_lb, line=dict(color='#64748b', width=1.5, dash='dash'), annotation_text=f"Meta {_ncl(_meta_lb, 1)} %",
+                           annotation_position='top left', annotation_font=dict(size=11, color='#64748b'))
+            _fms.update_layout(height=320, margin=dict(t=20, b=0, l=0, r=0), yaxis_title='% sobre la línea base', bargap=0.35, xaxis=dict(type='category'))
+            _pc(_fms, use_container_width=True, config={'locale': 'es'})
+            st.caption("Rojo: el mes consumió más que la línea base. Azul: consumió menos (ahorro).")
+            _tab_lb = pd.DataFrame({'Mes': _mes_lb['Mes'].values, 'Días': _mes_lb['Dias'].values, 'Real kWh': _mes_lb['Real'].round(0).values,
+                                    'Línea base kWh': _mes_lb['Esp'].round(0).values, 'Diferencia kWh': _mes_lb['Dif'].round(0).values,
+                                    'Real vs base': [f"{_sem_lb(_v)} {'+' if _v > 0 else ''}{_ncl(_v, 1)} %" for _v in _mes_lb['Pct']],
+                                    'Odómetro km': _mes_lb['Km'].round(0).values, 'kWh/km real': (_mes_lb['Real'] / _mes_lb['Km']).round(2).values,
+                                    'kWh/km línea base': (_mes_lb['Esp'] / _mes_lb['Km']).round(2).values})
+            _st_df(_tab_lb, hide_index=True, use_container_width=True)
+            st.caption("🟢 cumple la meta · 🟡 no cumple por menos de la tolerancia · 🔴 no cumple. kWh/km línea base = lo que habría gastado por km el año base con los mismos km y tipos de día. "
+                       "Esta línea base es un modelo que se recalcula solo cada año; no reemplaza a la IDE LB que cargas como archivo.")
+
+            _buf_lb = BytesIO()
+            with pd.ExcelWriter(_buf_lb, engine='xlsxwriter') as _w:
+                _xd = _rp[['Fecha', 'Tipo Día', 'Odómetro [km]', 'E_Total', 'Esperado', 'Diferencia', 'Acumulado', 'Fuente']].rename(
+                    columns={'E_Total': 'Real kWh', 'Esperado': 'Línea base kWh', 'Diferencia': 'Diferencia kWh', 'Acumulado': 'Acumulado kWh'}).round(1)
+                _xd['Fecha'] = _xd['Fecha'].dt.strftime('%d-%m-%Y')
+                _xd.to_excel(_w, sheet_name='Diario', index=False)
+                _tab_lb.assign(**{'Real vs base %': _mes_lb['Pct'].round(2).values}).drop(columns=['Real vs base']).to_excel(_w, sheet_name='Mensual', index=False)
+                pd.DataFrame([{'Año evaluado': _a, 'Año de la línea base': _a - 1, 'Fijo (kWh/día)': round(_m['b'][0], 1), 'kWh por km de odómetro': round(_m['b'][1], 4),
+                               'Ajuste sábado (kWh/día)': round(_m['b'][2], 1), 'Ajuste domingo/festivo (kWh/día)': round(_m['b'][3], 1),
+                               'R²': round(_m['r2'], 4), 'CV(RMSE) %': round(_m['cv'], 2), 'Días usados': _m['n']}
+                              for _a, _m in _mods_lb.items() if _m is not None]).to_excel(_w, sheet_name='Modelo', index=False)
+            st.download_button("⬇️ Descargar línea base en Excel (diario, mensual y modelo)", data=_buf_lb.getvalue(), file_name="linea_base_energetica.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_linea_base")
