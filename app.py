@@ -2588,7 +2588,7 @@ st.markdown("""<style>
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base energética"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh"]
 
 with st.container(key="_topbar"):
     _cl, _cn = st.columns([1, 9], vertical_alignment="center")
@@ -7162,8 +7162,8 @@ if _seccion == _SECCIONES[16]:
             st.download_button("⬇️ Descargar análisis BI en Excel (seguimiento, rankings, 15 min, perfil y modelo)", data=_excel_bi(_x15, _x_ph, _x_mod, _x_ev, _tab_rd, _tab_rh.head(500)),
                                file_name="bi_carga_vs_energia_15min.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_bi_carga")
 
-# ===== Línea base energética: cada año se compara con un modelo ajustado con el año anterior (2026 vs 2025, 2027 vs 2026...) =====
-# Meta contra la línea base (% de energía real sobre la esperada): 0 = no superarla; -3 = consumir al menos 3 % menos. Cámbiala aquí para dejarla fija.
+# ===== Línea base: pax-km por kWh de tracción, por día. Cada año se compara con el año anterior por tipo de día (como la IDE LB) =====
+# Meta contra la línea base (% del indicador sobre la línea base): 0 = al menos igual; 2 = 2 % mejor. Cámbiala aquí para dejarla fija.
 _METAS_LB = {'meta': 0.0, 'tolerancia': 2.0}
 
 def _firma_anio_lb(anio):
@@ -7171,9 +7171,14 @@ def _firma_anio_lb(anio):
     return tuple(sorted((os.path.basename(_p), os.path.getsize(_p)) for _k in ('umr', 'seat', 'bill')
                         for _p in listar_archivos(DATA_DIRS[_k]) if _anio_de_nombre(os.path.basename(_p)) == anio))
 
+def _firma_carga_lb(anio):
+    """Export de Carga de pasajeros que pueden traer datos de ese año (por nombre del archivo)."""
+    return tuple(sorted((os.path.basename(_p), os.path.getsize(_p)) for _k in ('carga_v1', 'carga_v2')
+                        for _p in listar_archivos(DATA_DIRS[_k]) if _anio_de_nombre(os.path.basename(_p)) in (None, anio)))
+
 @st.cache_data(show_spinner=False, max_entries=6)
 def _tabla_anual_lb(anio, firma):
-    """Tabla diaria del año completo, armada igual que la carga principal (_armar_df_ops).
+    """Tabla diaria del año completo (energía y tracción), armada igual que la carga principal (_armar_df_ops).
     Parámetros sin "_" a propósito: Streamlit los usa como clave del caché."""
     _sd, _ed = date(anio, 1, 1), date(anio, 12, 31)
     _ops, _tr, _fact, _prm, _seat = [], [], [], [], []
@@ -7197,145 +7202,214 @@ def _tabla_anual_lb(anio, firma):
         return pd.DataFrame()
     return _armar_df_ops(_ops, _tr, _fact, _prm, _seat)[0]
 
-def _modelo_lb(df):
-    """kWh/día = fijo + kWh por km × odómetro + ajuste sábado + ajuste domingo/festivo (mínimos cuadrados)."""
-    _d = df[(pd.to_numeric(df['E_Total'], errors='coerce') > 0) & (pd.to_numeric(df['Odómetro [km]'], errors='coerce') > 0)]
-    if len(_d) < 60:
-        return None
-    _X = np.column_stack([np.ones(len(_d)), _d['Odómetro [km]'].astype(float),
-                          (_d['Tipo Día'] == 'S').astype(float), (_d['Tipo Día'] == 'D/F').astype(float)])
-    _y = _d['E_Total'].astype(float).to_numpy()
-    _b = np.linalg.lstsq(_X, _y, rcond=None)[0]
-    _r = _y - _X @ _b
-    return {'b': _b, 'r2': 1 - float((_r ** 2).sum()) / float(((_y - _y.mean()) ** 2).sum()),
-            'cv': float(np.sqrt((_r ** 2).sum() / max(len(_y) - 4, 1)) / _y.mean() * 100), 'n': int(len(_d))}
+def _paxkm_por_dia(df):
+    """Pax-km por día de un export de Carga: en cada viaje, pasajeros a bordo de cada tramo × km del tramo."""
+    if df is None or getattr(df, 'empty', True) or 'Fecha' not in df.columns:
+        return pd.Series(dtype=float)
+    _kmc = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
+    _cods = [c for c in df.columns if c in _kmc]
+    if len(_cods) < 2:
+        return pd.Series(dtype=float)
+    _L = df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
+    _km = np.abs(np.diff(np.array([_kmc[c] for c in _cods], dtype=float)))
+    _f = pd.to_datetime(df['Fecha'], errors='coerce').dt.normalize()
+    return pd.Series((_L[:, :-1] * _km[None, :]).sum(axis=1), index=_f.values).groupby(level=0).sum()
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def _paxkm_anual_lb(anio, firma):
+    """Pax-km por día de un año completo, desde los export de Carga de ese año."""
+    _sd, _ed = date(anio, 1, 1), date(anio, 12, 31)
+    _tot = pd.Series(dtype=float)
+    for _k in ('carga_v1', 'carga_v2'):
+        for _p in listar_archivos(DATA_DIRS[_k]):
+            _nom = os.path.basename(_p)
+            if _anio_de_nombre(_nom) not in (None, anio):
+                continue
+            try:
+                with open(_p, 'rb') as _fh:
+                    _s = _paxkm_por_dia(_carga_cache(_nom, _fh.read(), _sd, _ed))
+                _tot = _tot.add(_s, fill_value=0) if len(_tot) else _s
+            except Exception:
+                continue
+    return _tot
+
+def _lb_por_tipo(pk, en):
+    """Línea base por tipo de día: pax-km ÷ kWh de tracción del año, sumando los días que tienen ambos datos."""
+    _m = (en[['Fecha', 'E_Tr', 'Tipo Día']].assign(Fecha=pd.to_datetime(en['Fecha']).dt.normalize(), E_Tr=pd.to_numeric(en['E_Tr'], errors='coerce'))
+            .set_index('Fecha').join(pk.rename('PK'), how='inner'))
+    _m = _m[(_m['PK'] > 0) & (_m['E_Tr'] > 0)]
+    _g = _m.groupby('Tipo Día').agg(Dias=('PK', 'size'), PK=('PK', 'sum'), ETr=('E_Tr', 'sum'))
+    _g = _g[_g['Dias'] >= 5]
+    _g['LB'] = _g['PK'] / _g['ETr']
+    return _g
 
 if _seccion == _SECCIONES[17]:
-    st.markdown("### 📏 Línea base energética (año anterior)")
-    st.caption("Cada año se compara con un modelo ajustado con el año anterior completo: 2026 contra 2025, 2027 contra 2026, y así. "
-               "El modelo explica la energía diaria (jerarquía Factura > PRMTE > SEAT) con los km de odómetro y el tipo de día. "
-               "La línea base no cambia con los filtros: lo que filtras es el período que se compara.")
-    if df_ops.empty or 'E_Total' not in df_ops.columns or 'Odómetro [km]' not in df_ops.columns:
-        st.info("Carga UMR y energía en la barra lateral y aprieta **🔄 Cargar / actualizar datos**.")
+    st.markdown("### 📏 Línea base: pax-km por kWh de tracción")
+    st.caption("Indicador de cada día = pasajeros-km del día (Carga de pasajeros: pasajeros a bordo de cada tramo × km del tramo) ÷ kWh de tracción del día "
+               "(energía con jerarquía Factura > PRMTE > SEAT × % de tracción del SEAT). La línea base de cada año es el valor del año anterior por tipo de día, "
+               "como la IDE LB: 2026 contra 2025, 2027 contra 2026, y así, para cualquier año que tenga Carga, UMR y energía del año anterior.")
+    _TIPO_LB = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo/Festivo'}
+    _MES_LB = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+    _cg_lb = [d for d in [df_carga_v1, df_carga_v2] if d is not None and not d.empty and 'Fecha' in d.columns]
+    if df_ops.empty or 'E_Tr' not in df_ops.columns or not _cg_lb:
+        st.info("Esta pestaña necesita **Carga de pasajeros (V1/V2)**, **UMR** y **energía** del período. Cárgalos y aprieta **🔄 Cargar / actualizar datos**.")
     else:
-        _rp = df_ops[(pd.to_numeric(df_ops['E_Total'], errors='coerce') > 0) & (pd.to_numeric(df_ops['Odómetro [km]'], errors='coerce') > 0)].copy()
-        _rp['Fecha'] = pd.to_datetime(_rp['Fecha']).dt.normalize()
-        _anios_rp = sorted(int(_a) for _a in _rp['Fecha'].dt.year.unique())
-        _mods_lb = {}
-        with st.spinner("Preparando la línea base del año anterior (la primera vez lee sus archivos)…"):
-            for _a in _anios_rp:
-                _ta = _tabla_anual_lb(_a - 1, _firma_anio_lb(_a - 1))
-                _mods_lb[_a] = _modelo_lb(_ta) if not _ta.empty else None
-        _sin_lb = [_a for _a in _anios_rp if _mods_lb.get(_a) is None]
-        if _sin_lb:
-            st.warning("Sin línea base para " + ", ".join(str(_a) for _a in _sin_lb) + ": faltan datos de UMR o de energía de "
-                       + ", ".join(str(_a - 1) for _a in _sin_lb) + " en el repositorio.")
-        _rp = _rp[_rp['Fecha'].dt.year.isin([_a for _a in _anios_rp if _mods_lb.get(_a) is not None])]
+        _pk_rp = pd.Series(dtype=float)
+        for _dc in _cg_lb:
+            _s_pk = _paxkm_por_dia(_dc)
+            _pk_rp = _pk_rp.add(_s_pk, fill_value=0) if len(_pk_rp) else _s_pk
+        _rp = (df_ops[['Fecha', 'E_Tr', 'Tipo Día']].assign(Fecha=pd.to_datetime(df_ops['Fecha']).dt.normalize(), E_Tr=pd.to_numeric(df_ops['E_Tr'], errors='coerce'))
+                 .set_index('Fecha').join(_pk_rp.rename('PK'), how='inner'))
+        _rp = _rp[(_rp['PK'] > 0) & (_rp['E_Tr'] > 0)].rename_axis('Fecha').reset_index().sort_values('Fecha').reset_index(drop=True)
         if _rp.empty:
-            st.info("No hay días del período filtrado con línea base disponible.")
+            st.info("No hay días con pasajeros-km y energía de tracción a la vez en el período filtrado.")
         else:
-            _B = np.vstack([_mods_lb[int(_a)]['b'] for _a in _rp['Fecha'].dt.year])
-            _rp['Esperado'] = (_B[:, 0] + _B[:, 1] * _rp['Odómetro [km]'].astype(float).to_numpy()
-                               + _B[:, 2] * (_rp['Tipo Día'] == 'S').to_numpy(float) + _B[:, 3] * (_rp['Tipo Día'] == 'D/F').to_numpy(float))
-            _rp['Diferencia'] = _rp['E_Total'] - _rp['Esperado']
-            # Días con energía incompleta (por ejemplo PRMTE parcial): real menor a la mitad o mayor a 1,5 veces lo esperado
-            _malos = (_rp['E_Total'] < 0.5 * _rp['Esperado']) | (_rp['E_Total'] > 1.5 * _rp['Esperado'])
-            _excl_lb = _rp[_malos]
-            _rp = _rp[~_malos].sort_values('Fecha').reset_index(drop=True)
-            _rp['Acumulado'] = _rp['Diferencia'].cumsum()
+            _rp['Ind'] = _rp['PK'] / _rp['E_Tr']
+            _rp['Tipo'] = _rp['Tipo Día'].map(_TIPO_LB).fillna(_rp['Tipo Día'])
+            _anios_rp = sorted(int(_a) for _a in _rp['Fecha'].dt.year.unique())
+            _lbs = {}
+            with st.spinner("Preparando la línea base del año anterior (la primera vez lee sus archivos)…"):
+                for _a in _anios_rp:
+                    _lbs[_a] = None
+                    _pk_lb = _paxkm_anual_lb(_a - 1, _firma_carga_lb(_a - 1))
+                    if len(_pk_lb) and float(_pk_lb.sum()) > 0:
+                        _en_lb = _tabla_anual_lb(_a - 1, _firma_anio_lb(_a - 1))
+                        if not _en_lb.empty and 'E_Tr' in _en_lb.columns:
+                            _g_lb = _lb_por_tipo(_pk_lb, _en_lb)
+                            _lbs[_a] = _g_lb if not _g_lb.empty else None
+            _sin_lb = [_a for _a in _anios_rp if _lbs.get(_a) is None]
+            if _sin_lb:
+                st.warning("Sin línea base para " + ", ".join(str(_a) for _a in _sin_lb) + ": faltan Carga de pasajeros, UMR o energía de "
+                           + ", ".join(str(_a - 1) for _a in _sin_lb) + " en el repositorio. Los pax-km salen de la Carga: cuando estén los export de ese año, "
+                           "la línea base se arma sola. Mientras tanto se muestra el indicador diario del período.")
+            _rp['LB'] = [(_lbs[int(_f.year)]['LB'].get(_t, np.nan) if _lbs.get(int(_f.year)) is not None else np.nan)
+                         for _f, _t in zip(_rp['Fecha'], _rp['Tipo Día'])]
+            _rp['Dif'] = (_rp['Ind'] / _rp['LB'] - 1) * 100
+            # Días fuera de rango (posible falla de datos): indicador menor a la mitad o mayor a 1,5 veces la línea base
+            _rp['Fuera'] = _rp['LB'].notna() & ((_rp['Ind'] < 0.5 * _rp['LB']) | (_rp['Ind'] > 1.5 * _rp['LB']))
+            _excl_lb = _rp[_rp['Fuera']]
+            _ok = _rp[~_rp['Fuera']].copy()
+            _ok['Esp'] = _ok['PK'] / _ok['LB']   # kWh de tracción que habría usado el día con la eficiencia de la línea base
+            _hay_lb = _ok['LB'].notna().any()
 
-            # --- Modelo de cada línea base usada ---
-            for _a in sorted(set(int(_x) for _x in _rp['Fecha'].dt.year)):
-                _m = _mods_lb[_a]; _b = _m['b']
-                st.markdown(f"**Línea base {_a - 1} → se aplica a {_a}** · kWh/día = {_ncl(_b[0], 0)} + {_ncl(_b[1], 2)} × km de odómetro "
-                            f"{'−' if _b[2] < 0 else '+'} {_ncl(abs(_b[2]), 0)} si es sábado {'−' if _b[3] < 0 else '+'} {_ncl(abs(_b[3]), 0)} si es domingo o festivo")
-                _mm = st.columns(4)
-                _mm[0].metric("kWh por km de odómetro", _ncl(_b[1], 2), help=f"Cuánto sube la energía del día por cada km recorrido, según {_a - 1}.")
-                _mm[1].metric("Ajuste del modelo (R²)", _ncl(_m['r2'], 3))
-                _mm[2].metric("Error típico de un día", f"{_ncl(_m['cv'], 1)} %", help="CV(RMSE): error típico del modelo en un día, como % del consumo diario promedio.")
-                _mm[3].metric(f"Días de {_a - 1} usados", _ncl(_m['n'], 0))
+            # --- Valores de la línea base usada ---
+            for _a in _anios_rp:
+                _g = _lbs.get(_a)
+                if _g is None:
+                    continue
+                st.markdown(f"**Línea base {_a - 1} → se aplica a {_a}** · pax-km por kWh de tracción de {_a - 1}, por tipo de día")
+                _cl = st.columns(3)
+                for _i, _t in enumerate(['L', 'S', 'D/F']):
+                    if _t in _g.index:
+                        _cl[_i].metric(_TIPO_LB[_t], _ncl(_g.loc[_t, 'LB'], 2),
+                                       help=f"{int(_g.loc[_t, 'Dias'])} días de {_a - 1}: {_ncl(_g.loc[_t, 'PK'], 0)} pax-km ÷ {_ncl(_g.loc[_t, 'ETr'], 0)} kWh de tracción.")
+                    else:
+                        _cl[_i].metric(_TIPO_LB[_t], "—", help=f"Menos de 5 días de {_a - 1} con datos.")
 
             # --- Desempeño del período filtrado ---
             st.divider()
-            _cm = st.columns([1, 1, 2])
-            _meta_lb = _cm[0].number_input("Meta vs línea base (máx. %)", value=float(_METAS_LB['meta']), step=0.5, format="%.1f", key="_lb_meta",
-                                           help="0 = no superar la línea base; −3 = consumir al menos 3 % menos que la línea base.")
-            _tol_lb = _cm[1].number_input("Tolerancia amarillo (pp)", min_value=0.0, value=float(_METAS_LB['tolerancia']), step=0.5, format="%.1f", key="_lb_tol",
-                                          help="Amarillo = no cumple la meta por menos de estos puntos porcentuales.")
+            _PK = float(_ok['PK'].sum()); _ET = float(_ok['E_Tr'].sum()); _IND = _PK / _ET if _ET else np.nan
+            if _hay_lb:
+                _cm = st.columns([1, 1, 2])
+                _meta_lb = _cm[0].number_input("Meta vs línea base (mín. %)", value=float(_METAS_LB['meta']), step=0.5, format="%.1f", key="_lb_meta",
+                                               help="0 = al menos igual a la línea base; 2 = al menos 2 % más pax-km por kWh de tracción.")
+                _tol_lb = _cm[1].number_input("Tolerancia amarillo (pp)", min_value=0.0, value=float(_METAS_LB['tolerancia']), step=0.5, format="%.1f", key="_lb_tol",
+                                              help="Amarillo = no cumple la meta por menos de estos puntos porcentuales.")
 
-            def _sem_lb(_v):
-                if _v is None or pd.isna(_v):
-                    return "⚪"
-                return "🟢" if _v <= _meta_lb else ("🟡" if _v <= _meta_lb + _tol_lb else "🔴")
+                def _sem_lb(_v):
+                    if _v is None or pd.isna(_v):
+                        return "⚪"
+                    return "🟢" if _v >= _meta_lb else ("🟡" if _v >= _meta_lb - _tol_lb else "🔴")
 
-            _E_lb = float(_rp['E_Total'].sum()); _Es_lb = float(_rp['Esperado'].sum())
-            _D_lb = _E_lb - _Es_lb; _Dp_lb = _D_lb / _Es_lb * 100 if _Es_lb else np.nan
-            _kk = st.columns(4)
-            _kk[0].metric("Energía real (kWh)", _ncl(_E_lb, 0))
-            _kk[1].metric("Esperada por línea base (kWh)", _ncl(_Es_lb, 0))
-            _kk[2].metric(f"{_sem_lb(_Dp_lb)} Real vs línea base", f"{'+' if _Dp_lb > 0 else ''}{_ncl(_Dp_lb, 1)} %",
-                          delta=f"{'+' if _D_lb > 0 else ''}{_ncl(_D_lb, 0)} kWh", delta_color="inverse",
-                          help=f"Meta: {_ncl(_meta_lb, 1)} % o menos. Positivo = se consumió más que la línea base (sobreconsumo); negativo = ahorro.")
-            _kk[3].metric("Días evaluados", _ncl(len(_rp), 0))
+                _c = _ok.dropna(subset=['LB'])
+                _ES = float(_c['Esp'].sum()); _ET_c = float(_c['E_Tr'].sum()); _PK_c = float(_c['PK'].sum())
+                _IND_c = _PK_c / _ET_c; _LBQ = _PK_c / _ES; _DP = (_IND_c / _LBQ - 1) * 100
+                _kk = st.columns(4)
+                _kk[0].metric(f"{_sem_lb(_DP)} Pax-km por kWh tracción", _ncl(_IND_c, 2), delta=f"{'+' if _DP > 0 else ''}{_ncl(_DP, 1)} % vs línea base",
+                              help=f"Meta: {_ncl(_meta_lb, 1)} % o más sobre la línea base. Más alto = cada kWh de tracción mueve más pasajeros-km.")
+                _kk[1].metric("Línea base del período", _ncl(_LBQ, 2), help="Línea base de cada tipo de día, ponderada por los pax-km de los días del período.")
+                _kk[2].metric("kWh de tracción", _ncl(_ET_c, 0), delta=f"{'+' if _ET_c > _ES else ''}{_ncl(_ET_c - _ES, 0)} kWh vs línea base", delta_color="inverse",
+                              help="Diferencia contra los kWh que se habrían usado con la eficiencia de la línea base para los mismos pax-km. Negativo = ahorro.")
+                _kk[3].metric("Días evaluados", _ncl(len(_c), 0))
+            else:
+                _kk = st.columns(4)
+                _kk[0].metric("Pax-km por kWh tracción", _ncl(_IND, 2))
+                _kk[1].metric("Pasajeros-km", _ncl(_PK, 0))
+                _kk[2].metric("kWh de tracción", _ncl(_ET, 0))
+                _kk[3].metric("Días", _ncl(len(_ok), 0))
             if not _excl_lb.empty:
                 _n_ex = len(_excl_lb)
-                st.caption(("Se dejó fuera 1 día" if _n_ex == 1 else f"Se dejaron fuera {_n_ex} días") + " con energía incompleta (real menor a la mitad o mayor a 1,5 veces lo esperado): "
+                st.caption(("Se dejó fuera 1 día" if _n_ex == 1 else f"Se dejaron fuera {_n_ex} días") + " con el indicador fuera de rango (menos de la mitad o más de 1,5 veces la línea base; posible falla de datos): "
                            + ", ".join(pd.Timestamp(_f).strftime('%d-%m-%Y') for _f in _excl_lb['Fecha'].head(10)) + ("…" if _n_ex > 10 else "") + ".")
 
-            st.markdown("#### Energía diaria: real vs línea base")
-            _fdl = go.Figure()
-            _fdl.add_trace(go.Scatter(x=_rp['Fecha'], y=_rp['E_Total'], name='Real', mode='lines', line=dict(color='#E85500', width=2),
-                                      hovertemplate='%{x|%d-%m-%Y}: %{y:,.0f} kWh<extra>Real</extra>'))
-            _fdl.add_trace(go.Scatter(x=_rp['Fecha'], y=_rp['Esperado'], name='Línea base', mode='lines', line=dict(color='#005195', width=2),
-                                      hovertemplate='%{x|%d-%m-%Y}: %{y:,.0f} kWh<extra>Línea base</extra>'))
-            _fdl.update_layout(height=360, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh por día', hovermode='x unified', xaxis=dict(tickformat='%d-%m-%y'),
-                               legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1, title=''))
-            _pc(_fdl, use_container_width=True, config={'locale': 'es'})
+            st.markdown("#### Pax-km por kWh de tracción, día a día")
+            _fd = go.Figure()
+            _fd.add_trace(go.Scatter(x=_ok['Fecha'], y=_ok['Ind'], name='Real', mode='lines+markers', line=dict(color='#0a7c6e', width=2), marker=dict(size=5),
+                                     customdata=_ok['Tipo'], hovertemplate='%{x|%d-%m-%Y} (%{customdata}): %{y:,.2f}<extra>Real</extra>'))
+            if _hay_lb:
+                _fd.add_trace(go.Scatter(x=_ok['Fecha'], y=_ok['LB'], name='Línea base', mode='lines', line=dict(color='#005195', width=2, dash='dash', shape='hv'),
+                                         hovertemplate='%{x|%d-%m-%Y}: %{y:,.2f}<extra>Línea base</extra>'))
+            _fd.update_layout(height=360, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='pax-km por kWh de tracción', hovermode='x unified',
+                              xaxis=dict(tickformat='%d-%m-%y'), legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1, title=''))
+            _pc(_fd, use_container_width=True, config={'locale': 'es'})
+            st.caption("Cada punto es un día. La línea base cambia según el tipo de día (laboral, sábado o domingo/festivo), por eso tiene escalones." if _hay_lb else
+                       "Cada punto es un día.")
 
-            st.markdown("#### Diferencia acumulada (CUSUM)")
-            _fcu = go.Figure(go.Scatter(x=_rp['Fecha'], y=_rp['Acumulado'], mode='lines', line=dict(color='#E85500', width=2),
-                                        fill='tozeroy', fillcolor='rgba(232,85,0,0.12)', hovertemplate='%{x|%d-%m-%Y}: %{y:+,.0f} kWh acumulados<extra></extra>'))
-            _fcu.add_hline(y=0, line=dict(color='#64748b', width=1))
-            _fcu.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='kWh acumulados (real − línea base)', xaxis=dict(tickformat='%d-%m-%y'))
-            _pc(_fcu, use_container_width=True, config={'locale': 'es'})
-            st.caption("Suma acumulada de la diferencia diaria entre la energía real y la línea base. Si la curva sube, se está consumiendo más que la línea base; si baja, hay ahorro. "
-                       "Un cambio de pendiente marca desde cuándo cambió el desempeño.")
-
+            # --- Por tipo de día ---
+            _gt = _ok.groupby('Tipo Día').agg(Dias=('Fecha', 'size'), PK=('PK', 'sum'), ETr=('E_Tr', 'sum'), Esp=('Esp', 'sum'), LB=('LB', 'first'))
+            _gt = _gt.reindex([_t for _t in ['L', 'S', 'D/F'] if _t in _gt.index])
+            _tab_t = pd.DataFrame({'Tipo de día': [_TIPO_LB.get(_t, _t) for _t in _gt.index], 'Días': _gt['Dias'].values, 'Pax-km': _gt['PK'].round(0).values,
+                                   'kWh tracción': _gt['ETr'].round(0).values, 'Pax-km/kWh real': (_gt['PK'] / _gt['ETr']).round(2).values})
             # --- Por mes ---
-            _MES_LB = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
-            _mes_lb = (_rp.groupby(_rp['Fecha'].dt.to_period('M'))
-                          .agg(Dias=('Fecha', 'nunique'), Real=('E_Total', 'sum'), Esp=('Esperado', 'sum'), Km=('Odómetro [km]', 'sum')))
-            _mes_lb['Dif'] = _mes_lb['Real'] - _mes_lb['Esp']
-            _mes_lb['Pct'] = _mes_lb['Dif'] / _mes_lb['Esp'] * 100
-            _mes_lb['Mes'] = [f"{_MES_LB[_p.month - 1]} {_p.year}" for _p in _mes_lb.index]
-            st.markdown("#### Real vs línea base por mes")
-            _fms = go.Figure(go.Bar(x=_mes_lb['Mes'], y=_mes_lb['Pct'], marker_color=np.where(_mes_lb['Pct'] > 0, '#c62828', '#005195'),
-                                    text=[f"{'+' if _v > 0 else ''}{_ncl(_v, 1)} %" for _v in _mes_lb['Pct']], textposition='outside',
-                                    hovertemplate='%{x}: %{y:+,.1f} %<extra></extra>'))
-            _fms.add_hline(y=_meta_lb, line=dict(color='#64748b', width=1.5, dash='dash'), annotation_text=f"Meta {_ncl(_meta_lb, 1)} %",
-                           annotation_position='top left', annotation_font=dict(size=11, color='#64748b'))
-            _fms.update_layout(height=320, margin=dict(t=20, b=0, l=0, r=0), yaxis_title='% sobre la línea base', bargap=0.35, xaxis=dict(type='category'))
-            _pc(_fms, use_container_width=True, config={'locale': 'es'})
-            st.caption("Rojo: el mes consumió más que la línea base. Azul: consumió menos (ahorro).")
-            _tab_lb = pd.DataFrame({'Mes': _mes_lb['Mes'].values, 'Días': _mes_lb['Dias'].values, 'Real kWh': _mes_lb['Real'].round(0).values,
-                                    'Línea base kWh': _mes_lb['Esp'].round(0).values, 'Diferencia kWh': _mes_lb['Dif'].round(0).values,
-                                    'Real vs base': [f"{_sem_lb(_v)} {'+' if _v > 0 else ''}{_ncl(_v, 1)} %" for _v in _mes_lb['Pct']],
-                                    'Odómetro km': _mes_lb['Km'].round(0).values, 'kWh/km real': (_mes_lb['Real'] / _mes_lb['Km']).round(2).values,
-                                    'kWh/km línea base': (_mes_lb['Esp'] / _mes_lb['Km']).round(2).values})
-            _st_df(_tab_lb, hide_index=True, use_container_width=True)
-            st.caption("🟢 cumple la meta · 🟡 no cumple por menos de la tolerancia · 🔴 no cumple. kWh/km línea base = lo que habría gastado por km el año base con los mismos km y tipos de día. "
-                       "Esta línea base es un modelo que se recalcula solo cada año; no reemplaza a la IDE LB que cargas como archivo.")
+            _gm = _ok.groupby(_ok['Fecha'].dt.to_period('M')).agg(Dias=('Fecha', 'size'), PK=('PK', 'sum'), ETr=('E_Tr', 'sum'), Esp=('Esp', 'sum'))
+            _tab_m = pd.DataFrame({'Mes': [f"{_MES_LB[_p.month - 1]} {_p.year}" for _p in _gm.index], 'Días': _gm['Dias'].values, 'Pax-km': _gm['PK'].round(0).values,
+                                   'kWh tracción': _gm['ETr'].round(0).values, 'Pax-km/kWh real': (_gm['PK'] / _gm['ETr']).round(2).values})
+            if _hay_lb:
+                _dif_t = ((_gt['PK'] / _gt['ETr']) / _gt['LB'] - 1) * 100
+                _tab_t['Línea base'] = _gt['LB'].round(2).values
+                _tab_t['Real vs base'] = [f"{_sem_lb(_v)} {'+' if _v > 0 else ''}{_ncl(_v, 1)} %" if pd.notna(_v) else "" for _v in _dif_t]
+                _lbq_m = (_gm['PK'] / _gm['Esp'].replace(0, np.nan))
+                _dif_m = ((_gm['PK'] / _gm['ETr']) / _lbq_m - 1) * 100
+                _tab_m['Línea base'] = _lbq_m.round(2).values
+                _tab_m['Real vs base'] = [f"{_sem_lb(_v)} {'+' if _v > 0 else ''}{_ncl(_v, 1)} %" if pd.notna(_v) else "" for _v in _dif_m]
+                _tab_m['kWh tracción vs base'] = (_gm['ETr'] - _gm['Esp']).round(0).values
+
+                st.markdown("#### Real vs línea base por mes")
+                _fms = go.Figure(go.Bar(x=_tab_m['Mes'], y=_dif_m.values, marker_color=np.where(_dif_m.values < 0, '#c62828', '#005195'),
+                                        text=[f"{'+' if _v > 0 else ''}{_ncl(_v, 1)} %" if pd.notna(_v) else "" for _v in _dif_m.values], textposition='outside',
+                                        hovertemplate='%{x}: %{y:+,.1f} % vs línea base<extra></extra>'))
+                _fms.add_hline(y=_meta_lb, line=dict(color='#64748b', width=1.5, dash='dash'), annotation_text=f"Meta {_ncl(_meta_lb, 1)} %",
+                               annotation_position='top left', annotation_font=dict(size=11, color='#64748b'))
+                _fms.update_layout(height=320, margin=dict(t=20, b=0, l=0, r=0), yaxis_title='% sobre la línea base', bargap=0.35, xaxis=dict(type='category'))
+                _pc(_fms, use_container_width=True, config={'locale': 'es'})
+                st.caption("Azul: el mes movió más pax-km por kWh de tracción que la línea base (mejor). Rojo: movió menos (peor).")
+
+            def _fmt2(_t):
+                _u = _t.copy()
+                for _c in ['Pax-km/kWh real', 'Línea base']:
+                    if _c in _u.columns:
+                        _u[_c] = _u[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '')
+                return _u
+            st.markdown("#### Por tipo de día")
+            _st_df(_fmt2(_tab_t), hide_index=True, use_container_width=True)
+            st.markdown("#### Por mes")
+            _st_df(_fmt2(_tab_m), hide_index=True, use_container_width=True)
+            st.caption(("🟢 cumple la meta · 🟡 no cumple por menos de la tolerancia · 🔴 no cumple. Línea base del mes = la de cada tipo de día ponderada por los pax-km de sus días. "
+                        "kWh tracción vs base: kWh de más (+) o de menos (−) contra la eficiencia de la línea base. " if _hay_lb else "")
+                       + "Los valores de este año serán la línea base del año siguiente.")
 
             _buf_lb = BytesIO()
             with pd.ExcelWriter(_buf_lb, engine='xlsxwriter') as _w:
-                _xd = _rp[['Fecha', 'Tipo Día', 'Odómetro [km]', 'E_Total', 'Esperado', 'Diferencia', 'Acumulado', 'Fuente']].rename(
-                    columns={'E_Total': 'Real kWh', 'Esperado': 'Línea base kWh', 'Diferencia': 'Diferencia kWh', 'Acumulado': 'Acumulado kWh'}).round(1)
+                _xd = _ok[['Fecha', 'Tipo', 'PK', 'E_Tr', 'Ind', 'LB', 'Dif']].rename(columns={'Tipo': 'Tipo de día', 'PK': 'Pax-km', 'E_Tr': 'kWh tracción',
+                                                                                               'Ind': 'Pax-km/kWh tracción', 'LB': 'Línea base', 'Dif': 'Real vs base %'}).round(3)
                 _xd['Fecha'] = _xd['Fecha'].dt.strftime('%d-%m-%Y')
                 _xd.to_excel(_w, sheet_name='Diario', index=False)
-                _tab_lb.assign(**{'Real vs base %': _mes_lb['Pct'].round(2).values}).drop(columns=['Real vs base']).to_excel(_w, sheet_name='Mensual', index=False)
-                pd.DataFrame([{'Año evaluado': _a, 'Año de la línea base': _a - 1, 'Fijo (kWh/día)': round(_m['b'][0], 1), 'kWh por km de odómetro': round(_m['b'][1], 4),
-                               'Ajuste sábado (kWh/día)': round(_m['b'][2], 1), 'Ajuste domingo/festivo (kWh/día)': round(_m['b'][3], 1),
-                               'R²': round(_m['r2'], 4), 'CV(RMSE) %': round(_m['cv'], 2), 'Días usados': _m['n']}
-                              for _a, _m in _mods_lb.items() if _m is not None]).to_excel(_w, sheet_name='Modelo', index=False)
-            st.download_button("⬇️ Descargar línea base en Excel (diario, mensual y modelo)", data=_buf_lb.getvalue(), file_name="linea_base_energetica.xlsx",
+                _tab_t.to_excel(_w, sheet_name='Por tipo de día', index=False)
+                _tab_m.to_excel(_w, sheet_name='Por mes', index=False)
+                _xl = [pd.DataFrame({'Año evaluado': _a, 'Año de la línea base': _a - 1, 'Tipo de día': [_TIPO_LB.get(_t, _t) for _t in _g.index], 'Días': _g['Dias'].values,
+                                     'Pax-km': _g['PK'].round(0).values, 'kWh tracción': _g['ETr'].round(0).values, 'Línea base pax-km/kWh': _g['LB'].round(3).values})
+                       for _a, _g in _lbs.items() if _g is not None]
+                if _xl:
+                    pd.concat(_xl, ignore_index=True).to_excel(_w, sheet_name='Línea base', index=False)
+            st.download_button("⬇️ Descargar en Excel (diario, por tipo de día, por mes y línea base)", data=_buf_lb.getvalue(), file_name="linea_base_paxkm_kwh_traccion.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_linea_base")
