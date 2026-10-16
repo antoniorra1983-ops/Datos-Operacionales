@@ -718,6 +718,90 @@ def _key_fig(_fig):
     _used.add(_k)
     return _k
 
+# ===== Gráficos sin choques (se aplica a TODOS los gráficos, dentro de _pc) =====
+# Arriba de cada gráfico queda una franja libre para la barra de herramientas (zoom, descargar…), que en el iPad aparece
+# al tocar el gráfico. El título va a la izquierda, debajo de esa franja; la leyenda horizontal va abajo (Plotly le hace
+# espacio sola); las barras con el valor escrito afuera dejan aire en el eje; los números van en formato chileno.
+_FRANJA_BARRA = 36   # px libres arriba para la barra de herramientas
+_ALTO_TITULO = 26    # px por línea de título
+_CFG_GRAFICOS = {'displaylogo': False,
+                 'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d', 'toggleSpikelines',
+                                            'hoverClosestCartesian', 'hoverCompareCartesian', 'zoomIn2d', 'zoomOut2d']}
+
+
+def _holgura_textos(_fig):
+    """Barras con el valor escrito afuera: el eje de valores deja un 14 % de aire para que el texto no se corte ni choque."""
+    _apil = _fig.layout.barmode in ('stack', 'relative')
+    for _eje in ('x', 'y'):
+        _barras = [_t for _t in _fig.data if _t.type == 'bar' and (_t.orientation == 'h') == (_eje == 'x')
+                   and (_t.xaxis or 'x') == 'x' and (_t.yaxis or 'y') == 'y']
+        _afuera = [_t for _t in _barras if 'outside' in ([_t.textposition] if isinstance(_t.textposition, str) else list(_t.textposition or []))]
+        if not _afuera:
+            continue
+        for _t in _afuera:
+            _t.cliponaxis = False
+        _ax = _fig.layout.xaxis if _eje == 'x' else _fig.layout.yaxis
+        if _ax.range is not None or _ax.type in ('log', 'date', 'category') or _ax.autorange == 'reversed':
+            continue
+        _pos, _neg = {}, {}
+        for _t in _barras:
+            _v = pd.to_numeric(pd.Series(list(getattr(_t, _eje) if getattr(_t, _eje) is not None else [])), errors='coerce').fillna(0).tolist()
+            _c = getattr(_t, 'y' if _eje == 'x' else 'x')
+            _c = list(_c) if _c is not None else list(range(len(_v)))
+            for _k, _x in zip(_c if _apil else range(len(_v)), _v):
+                _k = (_k if _apil else (id(_t), _k))
+                if _x >= 0:
+                    _pos[_k] = (_pos.get(_k, 0) + _x) if _apil else max(_pos.get(_k, 0), _x)
+                else:
+                    _neg[_k] = (_neg.get(_k, 0) + _x) if _apil else min(_neg.get(_k, 0), _x)
+        _hi = max(_pos.values(), default=0); _lo = min(_neg.values(), default=0)
+        _sp = _hi - _lo
+        if _sp > 0:
+            _rng = [_lo - (0.14 * _sp if _lo < 0 else 0), _hi + (0.14 * _sp if _hi > 0 else 0)]
+            _fig.update_layout(**{f'{_eje}axis_range': _rng})
+
+
+def _sin_choques(_fig):
+    """Ordena título, leyenda, márgenes y textos para que nada se tape (título, leyenda, barra de herramientas, datos)."""
+    try:
+        _L = _fig.layout
+        _t0 = _L.margin.t if _L.margin.t is not None else 100
+        _h0 = _L.height
+        _fig.update_layout(separators=',.')
+        # Título: a la izquierda, debajo de la franja de la barra de herramientas (los largos van en 2 líneas)
+        _tit = _L.title.text if (_L.title is not None and _L.title.text) else ''
+        _lin = 0
+        if _tit:
+            if len(_tit) > 48 and '<br>' not in _tit:
+                _p = _tit.rfind(' ', 0, len(_tit) // 2 + 8)
+                if _p > 12:
+                    _tit = _tit[:_p] + '<br>' + _tit[_p + 1:]
+            _lin = _tit.count('<br>') + 1
+            _fig.update_layout(title=dict(text=_tit, x=0, xanchor='left', xref='container', y=1, yanchor='top',
+                                          yref='container', pad=dict(t=_FRANJA_BARRA, l=6)))
+        # Leyenda horizontal (la de arriba chocaba con el título y la barra): abajo, en el borde del gráfico
+        # (Plotly muestra la leyenda si hay al menos una serie visible en ella y 2 o más series en total, una torta o showlegend=True)
+        _vis = [_t for _t in _fig.data if _t.visible is not False]
+        _ley_vis = _L.showlegend is True or (_L.showlegend is None and any(_t.showlegend is not False for _t in _vis)
+                                             and (len(_vis) > 1 or any(_t.type == 'pie' or _t.showlegend is True for _t in _vis)))
+        _ley_h = (_L.legend.orientation == 'h') and _ley_vis
+        if _L.legend.orientation == 'h':
+            _fig.update_layout(legend=dict(x=0, xanchor='left', y=0, yanchor='bottom', yref='container'))
+        # Títulos de subgráficos u otras notas que van justo encima del área de datos
+        _arriba = any(str(getattr(_a, 'yref', '') or '').endswith(('paper', 'domain')) and _a.y is not None
+                      and (_a.y > 1.0 or (_a.y >= 0.99 and _a.yanchor == 'bottom')) for _a in (_L.annotations or []))
+        _t = _FRANJA_BARRA + (_ALTO_TITULO * _lin + 6 if _lin else 0) + (22 if _arriba else 0)
+        _fig.update_layout(margin=dict(t=_t))
+        if _h0:  # se agranda el gráfico lo que se agregó arriba/abajo, para no achicar el área de datos
+            _fig.update_layout(height=int(_h0 + max(0, _t - _t0) + (26 if _ley_h else 0)))
+        _fig.update_xaxes(automargin=True)
+        _fig.update_yaxes(automargin=True)
+        _holgura_textos(_fig)
+    except Exception:
+        pass
+    return _fig
+
+
 def _pc(_fig, key=None, **kw):
     """Reemplazo de st.plotly_chart con click-to-filter automático.
     Si el gráfico es de barras con eje día/mes/año, al pulsar una barra filtra el dashboard
@@ -725,6 +809,8 @@ def _pc(_fig, key=None, **kw):
     kw.pop('on_select', None)
     if 'use_container_width' not in kw:
         kw['use_container_width'] = True
+    _fig = _sin_choques(_fig)
+    kw['config'] = {**_CFG_GRAFICOS, **(kw.get('config') or {})}
     _modo = _modo_x_temporal(_fig)
     if not _modo:
         return st.plotly_chart(_fig, **kw)
@@ -2793,6 +2879,12 @@ st.markdown("""<style>
 }
 .st-key-_topbar [data-testid="stImage"] { margin: 0 !important; }
 .st-key-_topbar [role="radiogroup"] { gap: 0.1rem 0.4rem !important; }
+/* Pantalla angosta (iPad vertical): los gráficos que van lado a lado se ponen uno bajo otro para que no se aprieten */
+@media (max-width: 1000px) {
+  [data-testid="stHorizontalBlock"]:has(.js-plotly-plot) { flex-wrap: wrap !important; }
+  [data-testid="stHorizontalBlock"]:has(.js-plotly-plot) > [data-testid="stColumn"],
+  [data-testid="stHorizontalBlock"]:has(.js-plotly-plot) > [data-testid="column"] { flex: 1 1 100% !important; min-width: 100% !important; width: 100% !important; }
+}
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
               "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh"]
@@ -6745,7 +6837,7 @@ if _seccion == _SECCIONES[14]:
         if not _sp.empty:
             fig.add_trace(go.Scatter(x=_sp['Fecha'], y=_sp['E'], mode='lines+markers', name='Proyectado', line=dict(color='#E85500', dash='dash')))
         fig.update_layout(title=f'{_lbl} — real y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
-        st.plotly_chart(fig, use_container_width=True, key='proj_td')
+        st.plotly_chart(_sin_choques(fig), use_container_width=True, key='proj_td', config=_CFG_GRAFICOS)
 
         _pocos = _pf[_pf['Dias'] < 2]['Tipo'].tolist()
         if _pocos:
