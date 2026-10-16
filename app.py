@@ -1781,89 +1781,291 @@ def _umr_cache(_nombre, _bytes, _sd, _ed):
     return _ops, _tr, _kms, None
 
 
+# ===== Lector general de Factura y PRMTE =====
+# No depende del nombre de la hoja, de la fila del encabezado ni de cómo venga escrita la fecha:
+# - reconoce las columnas por su contenido, sin tildes ni caracteres invisibles ('DÍA' = 'DIA', 'Hoja1' = 'Consumo Factura');
+# - lee fechas de Excel, números de serie o texto (día-mes-año; mes-día-año solo si calza mejor con el PRMTE);
+# - pasa a hora local una factura armada en hora UTC (lo detecta comparándola con el PRMTE del mismo archivo);
+# - no usa filas de factura fuera del período del PRMTE del archivo;
+# - deja una ficha por archivo con lo que leyó, lo que ajustó y lo que falta (pestaña Energía).
+import json as _json
+import warnings as _warnings
+import unicodedata as _ud
+_BOM = chr(0xFEFF)
+_H_MIN_DIA = 22  # horas con energía (de 24) para dar por completo un día de Factura o PRMTE
+_TOK_HDR = ('FECHA', 'ANO', 'YEAR', 'MES', 'DIA', 'HORA', 'CONSUMO', 'FACTURA', 'RETIRO', 'ENERGIA', 'KWH')
+
+
+def _txt_norm(_v):
+    """Texto sin tildes ni caracteres invisibles y en mayúsculas: 'Día ' → 'DIA', 'AÑO' → 'ANO'."""
+    _s = _ud.normalize('NFKD', str(_v).replace(_BOM, '')).encode('ascii', 'ignore').decode()
+    return re.sub(r'\s+', ' ', _s).strip().upper()
+
+
+def _num_txt(_s):
+    """Números aunque vengan como texto o con caracteres invisibles."""
+    return pd.to_numeric(pd.Series(_s).astype(str).str.replace(_BOM, '', regex=False).str.strip(), errors='coerce')
+
+
+def _fechas_generales(_s, _ref=None):
+    """Fecha-hora venga como venga: fecha de Excel, número de serie o texto. El texto tipo 2026-06-01 se lee tal cual;
+    el resto (01-06-26) se lee día-mes-año, salvo que mes-día-año calce mejor con el período _ref = (inicio, fin).
+    Devuelve (fechas, cómo se leyó el texto)."""
+    _s = pd.Series(_s).reset_index(drop=True)
+    _out = pd.Series(pd.NaT, index=_s.index, dtype='datetime64[ns]')
+    _es_f = _s.map(lambda _v: isinstance(_v, (datetime, date)))
+    if _es_f.any():
+        _out[_es_f] = pd.to_datetime(_s[_es_f], errors='coerce')
+    _n = pd.to_numeric(_s.where(~_es_f), errors='coerce')
+    _es_n = _n.between(20000, 80000)  # número de serie de Excel
+    if _es_n.any():
+        _out[_es_n] = pd.Timestamp('1899-12-30') + pd.to_timedelta(_n[_es_n], unit='D')
+    _t = _s.astype(str).str.replace(_BOM, '', regex=False).str.strip()
+    _t = _t.where(_s.notna() & ~_es_f & ~_es_n & (_t != ''))
+    _modo = ''
+    with _warnings.catch_warnings():
+        _warnings.simplefilter('ignore')
+        _iso = _t.str.match(r'^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}', na=False)
+        if _iso.any():
+            _out[_iso] = pd.to_datetime(_t[_iso], errors='coerce', format='mixed')
+        _otro = _t.notna() & ~_iso
+        if _otro.any():
+            _a = pd.to_datetime(_t[_otro], errors='coerce', dayfirst=True, format='mixed')
+            _b = pd.to_datetime(_t[_otro], errors='coerce', dayfirst=False, format='mixed')
+            if _ref is not None:
+                _pa, _pb = int(_a.between(*_ref).sum()), int(_b.between(*_ref).sum())
+            else:
+                _pa, _pb = -_a.dt.to_period('M').nunique(), -_b.dt.to_period('M').nunique()
+            _usa_b = _pb > _pa
+            _out[_otro] = _b if _usa_b else _a
+            if _out[_otro].notna().any():
+                _modo = 'fecha en texto mes-día-año' if _usa_b else 'fecha en texto día-mes-año'
+    return _out.dt.round('s'), _modo  # al segundo: el número de serie de Excel trae decimales (00:59:59,999 → 01:00)
+
+
+def _tabla_energia(_raw, _ref=None):
+    """De una hoja leída sin encabezado arma (tabla ts/Consumo, tipo, notas). Tipo 'PRMTE' si trae columnas de
+    retiro de energía activa; si no, 'Factura'. None si la hoja no tiene fecha y consumo."""
+    _raw = _raw.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
+    if _raw.shape[0] < 2 or _raw.shape[1] < 2:
+        return None
+    _h = next((_i for _i in range(min(30, len(_raw)))
+               if sum(any(_k in _txt_norm(_v) for _k in _TOK_HDR) for _v in _raw.iloc[_i].tolist() if pd.notna(_v)) >= 2), None)
+    if _h is not None:
+        _nom = [_txt_norm(_v) if pd.notna(_v) else '' for _v in _raw.iloc[_h].tolist()]
+        _d = _raw.iloc[_h + 1:].reset_index(drop=True)
+    else:  # sin encabezado: la columna con más fechas es la fecha
+        _cnt = [int(_raw[_c].map(lambda _v: isinstance(_v, (datetime, date))).sum()) for _c in _raw.columns]
+        if max(_cnt) < 24:
+            return None
+        _nom = ['FECHA' if _j == int(np.argmax(_cnt)) else '' for _j in range(_raw.shape[1])]
+        _d = _raw.reset_index(drop=True)
+    _d.columns = range(_d.shape[1])
+    _col = lambda _f: next((_j for _j, _n in enumerate(_nom) if _n and _f(_n)), None)
+    _cA = _col(lambda _n: _n.startswith('ANO') or _n == 'YEAR')
+    _cM = _col(lambda _n: _n.startswith('MES') or _n == 'MONTH')
+    _cD = _col(lambda _n: _n.startswith('DIA') or _n == 'DAY')
+    _cH = _col(lambda _n: _n.startswith('HORA') and 'UTC' not in _n)
+    _cU = _col(lambda _n: _n.startswith('HORA') and 'UTC' in _n)
+    _cI = _col(lambda _n: 'INICIO' in _n or _n.startswith('MINUTO'))
+    _cF = _col(lambda _n: 'FECHA' in _n)
+    _ret = [_j for _j, _n in enumerate(_nom) if 'RETIRO' in _n and 'ACTIVA' in _n and 'REACTIVA' not in _n]
+    _notas, _lbl_utc = [], None
+    if _cA is not None and _cM is not None and _cD is not None:
+        # Fecha armada con año/mes/día/hora/minuto (PRMTE)
+        _y, _m, _dd = _num_txt(_d[_cA]), _num_txt(_d[_cM]), _num_txt(_d[_cD])
+        _mi = _num_txt(_d[_cI]).fillna(0) if _cI is not None else 0
+        _hc = _cH if _cH is not None else _cU
+        _hh = _num_txt(_d[_hc]) if _hc is not None else pd.Series(0, index=_d.index)
+        _ts = pd.to_datetime(dict(year=_y, month=_m, day=_dd, hour=_hh, minute=_mi), errors='coerce')
+        if _cH is None and _cU is not None:
+            _notas.append('solo trae hora UTC')
+        if _cH is not None and _cU is not None:  # "día local + hora UTC": para detectar una factura armada en hora UTC
+            _lbl_utc = pd.to_datetime(dict(year=_y, month=_m, day=_dd, hour=_num_txt(_d[_cU])), errors='coerce')
+    elif _cF is not None:
+        _ts, _modo = _fechas_generales(_d[_cF], _ref)
+        if _modo:
+            _notas.append(_modo)
+        if _cH is not None and len(_ts.dropna()) and (_ts.dropna().dt.hour == 0).all():
+            # Fecha y hora en columnas separadas (hora 1..24 = hora que termina)
+            _hh = _num_txt(_d[_cH])
+            if _hh.isna().all():
+                _hh = pd.to_datetime(_d[_cH].astype(str), errors='coerce', format='mixed').dt.hour
+            if _hh.min() >= 1 and _hh.max() == 24:
+                _hh = _hh - 1
+            _ts = _ts + pd.to_timedelta(_hh.fillna(0), unit='h')
+    else:
+        return None
+    if _ret:
+        _tipo = 'PRMTE'
+        _v = sum(_d[_j].map(parse_latam_number) for _j in _ret)
+    else:
+        _tipo = 'Factura'
+        _usadas = {_cF, _cA, _cM, _cD, _cH, _cU, _cI}
+        _jv = _col(lambda _n: 'FECHA' not in _n and (_n.startswith('EA ') or any(_k in _n for _k in ('FACTURA', 'CONSUMO', 'KWH', 'ENERGIA', 'VALOR'))))
+        if _jv is None:
+            _cand = [_j for _j in range(_d.shape[1]) if _j not in _usadas]
+            _jv = max(_cand, key=lambda _j: int(_num_txt(_d[_j]).notna().sum()), default=None)
+        if _jv is None:
+            return None
+        _v = _d[_jv].map(parse_latam_number).abs()
+    _ok = _ts.notna()
+    if int(_ok.sum()) < 4:
+        return None
+    _t = pd.DataFrame({'ts': _ts[_ok].values, 'Consumo': pd.Series(_v, index=_d.index)[_ok].values})
+    if _lbl_utc is not None:
+        _t['lbl_utc'] = _lbl_utc[_ok].values
+    return _t, _tipo, _notas
+
+
+def _dias_cortados(_t):
+    """Días cortados en los bordes del archivo (bajado antes de terminar el día o el mes, o empezado tarde): los días
+    sin energía al inicio o al final, y el primer o último día con energía si trae menos de _H_MIN_DIA horas.
+    Un día del medio con horas en cero (p. ej. el apagón del 25-02-2025) es dato real y se usa."""
+    if _t is None or _t.empty:
+        return []
+    _dias = pd.date_range(_t['ts'].min().normalize(), _t['ts'].max().normalize())
+    _p = _t[_t['Consumo'] > 0]
+    if _p.empty:
+        return list(_dias)
+    _h = _p.groupby(_p['ts'].dt.normalize())['ts'].apply(lambda _s: _s.dt.hour.nunique()).reindex(_dias, fill_value=0)
+    _con = _h[_h > 0].index
+    _cort = [_f for _f in _dias if _f < _con.min() or _f > _con.max()]
+    _cort += [_f for _f in {_con.min(), _con.max()} if _h[_f] < _H_MIN_DIA]
+    return sorted(_cort)
+
+
 # Sin @st.cache_data a propósito: con parámetros "_" Streamlit no los usa como clave y devolvía siempre el 1er archivo. El caché en disco ya distingue cada archivo.
 def _bill_cache(_nombre, _bytes, _sd, _ed):
-    """Procesa Factura y PRMTE (vectorizado + Parquet en disco). Devuelve
-    (factura, prmte_rango, prmte_2025, error). El PRMTE cada 15 min es de los más pesados."""
-    _key = _hash_bytes(_bytes, _nombre, _sd, _ed, _PARSE_VERSION)
-    _pf = os.path.join(_CACHE_DIR, f"bill_{_key}_fact.parquet")
-    _pp = os.path.join(_CACHE_DIR, f"bill_{_key}_prmte.parquet")
-    _p25 = os.path.join(_CACHE_DIR, f"bill_{_key}_prmte25.parquet")
-    if os.path.exists(_pf) and os.path.exists(_pp) and os.path.exists(_p25):
+    """Factura y PRMTE de un archivo con el lector general. Devuelve (factura, prmte_rango, prmte_2025, error, ficha).
+    Se guarda en Parquet en disco para no reprocesar."""
+    _key = _hash_bytes(_bytes, _nombre, _sd, _ed, _PARSE_VERSION, "lector-general-1")
+    _pf, _pp, _p25, _pj = [os.path.join(_CACHE_DIR, f"bill_{_key}_{_s}") for _s in ("fact.parquet", "prmte.parquet", "prmte25.parquet", "ficha.json")]
+    if all(os.path.exists(_x) for _x in (_pf, _pp, _p25, _pj)):
         try:
-            return (pd.read_parquet(_pf).to_dict('records'),
-                    pd.read_parquet(_pp).to_dict('records'),
-                    pd.read_parquet(_p25).to_dict('records'), None)
+            with open(_pj, encoding='utf-8') as _fh:
+                _ficha = _json.load(_fh)
+            return (pd.read_parquet(_pf).to_dict('records'), pd.read_parquet(_pp).to_dict('records'),
+                    pd.read_parquet(_p25).to_dict('records'), None, _ficha)
         except Exception:
-            pass  # Parquet corrupto: reprocesa
-    _fact = []; _prmte = []; _prmte25 = []
+            pass  # caché corrupto: reprocesa
+    _fact, _prmte, _prmte25 = [], [], []
+    _ficha = {'Archivo': _nombre, 'Factura': '—', 'PRMTE': '—', 'Ajustes automáticos': '', 'Avisos': ''}
+    _aj, _av = [], []
+    _dm = lambda _x: pd.Timestamp(_x).strftime('%d-%m-%y')
     try:
         _eb = "xlrd" if _nombre.lower().endswith(".xls") else "openpyxl"
-        _xl = pd.ExcelFile(BytesIO(_bytes), engine=_eb)
-        for _sn in _xl.sheet_names:
-            if _sn == "Consumo Factura":
-                _dff = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, engine=_eb)
-                _cf = next((c for c in _dff.columns if 'FECHA' in str(c).upper()), _dff.columns[0])
-                _cv = next((c for c in _dff.columns if 'CONSUMO' in str(c).upper() or 'VALOR' in str(c).upper()), _dff.columns[1])
-                _dt = pd.to_datetime(_dff[_cf], errors='coerce')
-                _msk = _dt.notna() & ~_dff[_cf].astype(str).str.upper().str.contains('TOTAL', na=False)
-                _dt = _dt[_msk]
-                _cons = _dff.loc[_msk, _cv].map(parse_latam_number).abs()
-                if len(_dt):
-                    _ff = pd.DataFrame({
-                        'Fecha': _dt.dt.normalize().values,
-                        'Hora': _dt.dt.strftime('%H:00').values,
-                        '15min': (_dt.dt.strftime('%H:') + (_dt.dt.minute // 15 * 15).map(lambda _m: f"{_m:02d}")).values,
-                        'Consumo': _cons.values})
-                    _fact = _ff.to_dict('records')
-
-            if 'PRMTE' in _sn.upper():
-                _raw = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, header=None, engine=_eb)
-                _h = next((i for i in range(min(20, len(_raw))) if any(k in str(_raw.iloc[i]).upper() for k in ['AÑO', 'ANO', 'YEAR'])), 0)
-                _dp = pd.read_excel(BytesIO(_bytes), sheet_name=_sn, header=_h, engine=_eb).dropna(how='all')
-                _ca = next((c for c in _dp.columns if str(c).upper().replace('Ñ', 'N').startswith('AN')), None)
-                _cm = next((c for c in _dp.columns if str(c).upper().startswith('MES')), None)
-                _cd = next((c for c in _dp.columns if str(c).upper().startswith('DIA')), None)
-                _ch = next((c for c in _dp.columns if str(c).upper() == 'HORA'), None)
-                _ci = next((c for c in _dp.columns if 'INICIO' in str(c).upper()), None)
-                if not (_ca and _cm and _cd and _ch):
-                    return _fact, _prmte, _prmte25, f"PRMTE: columnas de fecha no encontradas"
-                # Timestamp vectorizado desde año/mes/día/hora/minuto
-                _mn = pd.to_numeric(_dp[_ci], errors='coerce').fillna(0).astype(int) if _ci else 0
-                _ts = pd.to_datetime(dict(
-                    year=pd.to_numeric(_dp[_ca], errors='coerce'),
-                    month=pd.to_numeric(_dp[_cm], errors='coerce'),
-                    day=pd.to_numeric(_dp[_cd], errors='coerce'),
-                    hour=pd.to_numeric(_dp[_ch], errors='coerce'),
-                    minute=_mn), errors='coerce')
-                _cols_ret = [c for c in _dp.columns if 'Retiro_Energia_Activa' in str(c)]
-                if not _cols_ret:
-                    _cols_ret = [c for c in _dp.columns if 'RETIRO' in str(c).upper() or ('ENERGIA' in str(c).upper() and 'ACTIVA' in str(c).upper())]
-                # Consumo vectorizado: suma de las columnas de retiro
-                _cons = sum(_dp[c].map(parse_latam_number) for c in _cols_ret) if _cols_ret else pd.Series(0.0, index=_dp.index)
-                _ok = _ts.notna()
-                _df_p = pd.DataFrame({
-                    'ts': _ts[_ok],
-                    'Fecha': _ts[_ok].dt.normalize(),
-                    'Hora': _ts[_ok].dt.strftime('%H:00'),
-                    '15min': _ts[_ok].dt.strftime('%H:%M'),
-                    'Consumo': pd.Series(_cons, index=_dp.index)[_ok].values})
-                _d_date = _df_p['ts'].dt.date
-                _in_rng = (_d_date >= _sd) & (_d_date <= _ed)
-                _is25 = _df_p['ts'].dt.year == 2025
-                _cols_out = ['Fecha', 'Hora', '15min', 'Consumo']
-                _prmte = _df_p.loc[_in_rng, _cols_out].to_dict('records')
-                _prmte25 = _df_p.loc[_is25, _cols_out].to_dict('records')
+        _hojas = pd.read_excel(BytesIO(_bytes), sheet_name=None, header=None, engine=_eb)
+        # 1) Se clasifica cada hoja por su contenido. El PRMTE va primero: su período sirve para leer bien la factura.
+        _tp, _hf, _vacias = None, [], []
+        for _sn, _raw in _hojas.items():
+            _r = _tabla_energia(_raw)
+            if _r is None:
+                if 'PRMTE' not in _sn.upper():
+                    _vacias.append(_sn)
+                continue
+            if _r[1] == 'PRMTE':
+                if _tp is None or len(_r[0]) > len(_tp[0]):
+                    _tp = _r
+            else:
+                _hf.append(_sn)
+        _ref, _p_loc = None, None
+        if _tp is not None:
+            _dfp = _tp[0]
+            _aj.extend(_tp[2])
+            _ref = (_dfp['ts'].min().normalize() - pd.Timedelta(days=1), _dfp['ts'].max().normalize() + pd.Timedelta(days=2))
+            _p_loc = _dfp.groupby(_dfp['ts'].dt.floor('h'))['Consumo'].sum()
+            _ficha['PRMTE'] = f"{_ncl(len(_dfp), 0)} reg. 15 min · {_dm(_dfp['ts'].min())} → {_dm(_dfp['ts'].max())} · {_ncl(_dfp['Consumo'].sum(), 0)} kWh"
+            _cort = _dias_cortados(_dfp)
+            if _cort:  # un día cortado no sirve como total del día: no se usa (manda la fuente siguiente)
+                _av.append("PRMTE cortado, no se usa: " + ", ".join(_q.strftime('%d-%m') for _q in _cort[:6]) + ("…" if len(_cort) > 6 else ""))
+                _dfp = _dfp[~_dfp['ts'].dt.normalize().isin(_cort)]
+            _pr = pd.DataFrame({'Fecha': _dfp['ts'].dt.normalize(), 'Hora': _dfp['ts'].dt.strftime('%H:00'),
+                                '15min': _dfp['ts'].dt.strftime('%H:%M'), 'Consumo': _dfp['Consumo']})
+            _dd = _dfp['ts'].dt.date
+            _prmte = _pr[((_dd >= _sd) & (_dd <= _ed)).values].to_dict('records')
+            _prmte25 = _pr[(_dfp['ts'].dt.year == 2025).values].to_dict('records')
+        # 2) Factura: la hoja con más filas de fecha y consumo, leída con el período del PRMTE como referencia
+        _tf = None
+        for _sn in _hf:
+            _r = _tabla_energia(_hojas[_sn], _ref)
+            if _r is not None and (_tf is None or len(_r[0]) > len(_tf[0][0])):
+                _tf = (_r, _sn)
+        if _tf is not None:
+            (_f, _tipo_f, _nf), _snf = _tf
+            _aj.extend(_nf)
+            # Factura armada con la hora UTC del PRMTE: calza con el PRMTE solo en hora UTC → se pasa a hora local
+            if _tp is not None and 'lbl_utc' in _tp[0].columns:
+                _dfp = _tp[0]
+                _p_utc = _dfp.groupby('lbl_utc')['Consumo'].sum()
+                _h0 = _f['ts'].dt.floor('h')
+                _fh = _f.groupby(_h0)['Consumo'].sum()
+                _e_loc = (_fh - _p_loc.reindex(_fh.index)).abs().mean()
+                _e_utc = (_fh - _p_utc.reindex(_fh.index)).abs().mean()
+                if pd.notna(_e_utc) and pd.notna(_e_loc) and _e_utc < 0.2 * _e_loc:
+                    _mapa = pd.Series(_dfp['ts'].dt.floor('h').values, index=_dfp['lbl_utc'].values)
+                    _mapa = _mapa[~_mapa.index.duplicated()]
+                    _f = _f.assign(ts=_h0.map(_mapa) + (_f['ts'] - _h0)).dropna(subset=['ts'])
+                    _aj.append('factura en hora UTC → hora local')
+            if _ref is not None:
+                _fuera = ~_f['ts'].between(*_ref)
+                if _fuera.any():
+                    _av.append(f"{int(_fuera.sum())} filas de factura fuera del período del PRMTE (no se usan)")
+                    _f = _f[~_fuera]
+            _cort = _dias_cortados(_f)
+            if _cort:
+                _av.append("factura cortada, no se usa: " + ", ".join(_q.strftime('%d-%m') for _q in _cort[:6]) + ("…" if len(_cort) > 6 else ""))
+            if not _f.empty:
+                _ficha['Factura'] = f"«{_snf}» · {_f['ts'].dt.floor('h').nunique()} h · {_dm(_f['ts'].min())} → {_dm(_f['ts'].max())} · {_ncl(_f['Consumo'].sum(), 0)} kWh"
+                _f = _f[~_f['ts'].dt.normalize().isin(_cort)]
+            if not _f.empty:
+                _dt = pd.to_datetime(_f['ts'])
+                _fact = pd.DataFrame({'Fecha': _dt.dt.normalize().values, 'Hora': _dt.dt.strftime('%H:00').values,
+                                      '15min': (_dt.dt.strftime('%H:') + (_dt.dt.minute // 15 * 15).map(lambda _m: f"{_m:02d}")).values,
+                                      'Consumo': _f['Consumo'].values}).to_dict('records')
+                if _p_loc is not None:
+                    _fh = _f.groupby(_f['ts'].dt.floor('h'))['Consumo'].sum()
+                    _com = _fh.index.intersection(_p_loc.index)
+                    if len(_com) >= 24 and _p_loc[_com].sum() > 0:
+                        _dif = (_fh[_com].sum() / _p_loc[_com].sum() - 1) * 100
+                        if abs(_dif) > 2:
+                            _av.append(f"factura y PRMTE difieren {_ncl(_dif, 1)} % en las mismas horas")
+        elif _vacias:
+            _ficha['Factura'] = "— (hoja " + ", ".join(f"«{_s}»" for _s in _vacias) + " sin datos)"
+        else:
+            _ficha['Factura'] = "— (no trae)"
+        if _tp is None:
+            _av.append("no se encontró PRMTE")
     except Exception as _e:
-        return _fact, _prmte, _prmte25, f"Factura/PRMTE: {_e}"
+        _ficha['Avisos'] = f"no se pudo leer: {_e}"
+        return _fact, _prmte, _prmte25, f"Factura/PRMTE: {_e}", _ficha
+    _ficha['Ajustes automáticos'] = "; ".join(dict.fromkeys(_aj))
+    _ficha['Avisos'] = "; ".join(_av)
     # Guardar en Parquet para las próximas cargas (y tras reinicios del servidor)
     try:
         pd.DataFrame(_fact).to_parquet(_pf, index=False)
         pd.DataFrame(_prmte).to_parquet(_pp, index=False)
         pd.DataFrame(_prmte25).to_parquet(_p25, index=False)
+        with open(_pj, 'w', encoding='utf-8') as _fh:
+            _json.dump(_ficha, _fh, ensure_ascii=False)
     except Exception:
         pass
-    return _fact, _prmte, _prmte25, None
+    return _fact, _prmte, _prmte25, None, _ficha
+
+
+def _unir_por_fecha(_listas):
+    """Junta los registros de varios archivos sin duplicar días: si un día viene en más de un archivo
+    (copias, meses que se traslapan), se usa el que trae más horas con energía ese día."""
+    _dfs = [pd.DataFrame(_l).assign(_arch=_i) for _i, _l in enumerate(_listas) if _l]
+    if not _dfs:
+        return []
+    _d = pd.concat(_dfs, ignore_index=True)
+    if _d['_arch'].nunique() > 1:
+        _d['Fecha'] = pd.to_datetime(_d['Fecha']).dt.normalize()
+        _n = (_d[pd.to_numeric(_d['Consumo'], errors='coerce') > 0].groupby(['Fecha', '_arch'])['Hora'].nunique().rename('_n')
+              .reset_index().sort_values(['Fecha', '_n', '_arch'], ascending=[True, False, True]).drop_duplicates('Fecha'))
+        _d = _d.merge(_n[['Fecha', '_arch']], on=['Fecha', '_arch'])
+    return _d.drop(columns='_arch').to_dict('records')
 
 
 def procesar_viajes_contrato(f, start_date, end_date):
@@ -2215,17 +2417,22 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _errores_proc[f.name] = f"SEAT: {e}"
             
     if f_bill_all:
+        # Lector general de Factura/PRMTE (cualquier hoja, encabezado o formato de fecha) con una ficha por archivo.
+        # Si un mismo día viene en dos archivos no se suma: se usa el que trae más horas con energía.
+        _lf, _lp, _l25, _fichas = [], [], [], []
         for f in f_bill_all:
             try:
                 f.seek(0); _bb = f.read(); f.seek(0)
-                _fact_r, _prmte_r, _prmte25_r, _err_b = _bill_cache(f.name, _bb, start_date, end_date)
+                _fact_r, _prmte_r, _prmte25_r, _err_b, _ficha_b = _bill_cache(f.name, _bb, start_date, end_date)
                 if _err_b:
                     _errores_proc[f.name] = _err_b
-                all_fact_full.extend(_fact_r)
-                all_prmte_full.extend(_prmte_r)
-                all_prmte_2025.extend(_prmte25_r)
+                _lf.append(_fact_r); _lp.append(_prmte_r); _l25.append(_prmte25_r); _fichas.append(_ficha_b)
             except Exception as e:
                 _errores_proc[f.name] = f"Factura/PRMTE: {e}"
+        all_fact_full.extend(_unir_por_fecha(_lf))
+        all_prmte_full.extend(_unir_por_fecha(_lp))
+        all_prmte_2025.extend(_unir_por_fecha(_l25))
+        st.session_state['_fichas_energia'] = _fichas
             
     if _errores_proc: st.session_state['_errores_proc']=_errores_proc
 
@@ -3760,6 +3967,16 @@ if _seccion == _SECCIONES[2]:
         if all_prmte_full or all_fact_full:
             st.divider()
             st.markdown("#### ⏱️ Consumo PRMTE y Factura — por día y por hora")
+            _fichas_e = st.session_state.get('_fichas_energia', [])
+            if _fichas_e:
+                _n_av = sum(1 for _x in _fichas_e if _x.get('Avisos'))
+                with st.expander(f"🧾 Qué leyó la app de cada archivo de Factura/PRMTE · {len(_fichas_e)} archivos · "
+                                 + (f"⚠️ {_n_av} con avisos" if _n_av else "sin avisos"), expanded=False):
+                    _st_df(pd.DataFrame(_fichas_e), use_container_width=True, hide_index=True)
+                    st.caption("La factura y el PRMTE se buscan en cualquier hoja y fila de encabezado, y las fechas se leen vengan como fecha de Excel, "
+                               "número o texto (día-mes-año). Una factura en hora UTC se pasa sola a hora local. Un día cortado en el borde del archivo "
+                               "(bajado antes de terminar) no se usa y manda la fuente siguiente (Factura > PRMTE > SEAT). Si un día viene en dos archivos, "
+                               "se usa el que trae más horas, sin sumarlos.")
             _cmap_h = {'PRMTE': '#0891b2', 'Factura': '#7c3aed'}
             _srcs_h = []
             if all_prmte_full: _srcs_h.append(('PRMTE', all_prmte_full))
@@ -7195,12 +7412,12 @@ def _tabla_anual_lb(anio, firma):
                 elif _k == 'seat':
                     _r = _seat_cache(_nom, _b, _sd, _ed); _seat.extend(_r[0])
                 else:
-                    _r = _bill_cache(_nom, _b, _sd, _ed); _fact.extend(_r[0]); _prm.extend(_r[1])
+                    _r = _bill_cache(_nom, _b, _sd, _ed); _fact.append(_r[0]); _prm.append(_r[1])
             except Exception:
                 continue
     if not _ops:
         return pd.DataFrame()
-    return _armar_df_ops(_ops, _tr, _fact, _prm, _seat)[0]
+    return _armar_df_ops(_ops, _tr, _unir_por_fecha(_fact), _unir_por_fecha(_prm), _seat)[0]
 
 def _paxkm_por_dia(df):
     """Pax-km por día de un export de Carga: en cada viaje, pasajeros a bordo de cada tramo × km del tramo."""
