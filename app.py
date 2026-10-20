@@ -2359,6 +2359,114 @@ def _armar_df_ops(all_ops, all_tr, all_fact_full, all_prmte_full, all_seat):
     df_ops['UMR (%)'] = df_ops.apply(lambda r: (r['Tren-Km [km]'] / r['Odómetro [km]']) * 100 if r['Odómetro [km]'] > 0 else 0, axis=1)
     return df_ops, _seat_dups
 
+def _oit_archivo(f, start_date, end_date, h_ini=0, h_fin=7):
+    """Lee una Consulta OIT y devuelve (órdenes de prueba SFE cerradas de madrugada dentro del rango, diagnóstico).
+    La usan la carga principal y la pestaña de causa raíz, que la llama año por año."""
+    _rows = []
+    _eng = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
+    _raw_o = pd.read_excel(f, header=None, engine=_eng)
+    # Detectar la fila de encabezado: la que trae Área / Sistema / Trabajos
+    _hdr = None
+    for _r in range(min(20, len(_raw_o))):
+        _fila = " | ".join(_norm(v) for v in _raw_o.iloc[_r].tolist() if pd.notna(v))
+        if ('AREA' in _fila) and ('SISTEMA' in _fila or 'TRABAJO' in _fila):
+            _hdr = _r
+            break
+    if _hdr is None:
+        for _r in range(min(20, len(_raw_o))):
+            _fila = " | ".join(_norm(v) for v in _raw_o.iloc[_r].tolist() if pd.notna(v))
+            if 'SISTEMA' in _fila or 'TRABAJO' in _fila or 'CIERRE' in _fila:
+                _hdr = _r
+                break
+    if _hdr is None:
+        return [], {'error': 'No se encontró la fila de encabezados. Primeras filas: ' +
+                             " || ".join(" | ".join(str(v) for v in _raw_o.iloc[_r].tolist()[:6] if pd.notna(v)) for _r in range(min(3, len(_raw_o))))}
+    _do = pd.read_excel(f, header=_hdr, engine=_eng)
+    _do = _do.dropna(how='all')
+
+    def _col_oit(*_claves):
+        for _c in _do.columns:
+            _cn = _norm(_c)
+            if any(_k in _cn for _k in _claves):
+                return _c
+        return None
+    _c_area = _col_oit('AREA')
+    _c_sist = _col_oit('SISTEMA')
+    _c_trab = _col_oit('TRABAJO', 'DESCRIP', 'DETALLE', 'GLOSA')
+    _c_ot = _col_oit('OIT', 'NUMERO', 'FOLIO', 'ORDEN')
+    _c_eq = _col_oit('EQUIPO', 'UNIDAD', 'MOVIL', 'SERIE', 'FLOTA')
+    # Fecha de cierre: primero la que tenga FECHA+CIERRE (evita "Comentarios cierre",
+    # que es texto). Si no, cualquier columna de fecha con hora que diga cierre/fin.
+    _c_cierre = None
+    for _c in _do.columns:
+        _cn = _norm(_c)
+        if ('FECHA' in _cn or 'F.' in _cn) and ('CIERRE' in _cn or 'CIERR' in _cn or 'TERMINO' in _cn or 'FIN' in _cn):
+            _c_cierre = _c
+            break
+    if _c_cierre is None:
+        for _c in _do.columns:
+            _cn = _norm(_c)
+            if 'CIERRE' in _cn and 'COMENTARIO' not in _cn and 'RESPONSABLE' not in _cn and 'USUARIO' not in _cn:
+                # que sea parseable como fecha antes de aceptarla
+                _try = pd.to_datetime(_do[_c], errors='coerce', dayfirst=True)
+                if _try.notna().sum() > 0:
+                    _c_cierre = _c
+                    break
+
+    _txt_sist = _do[_c_sist].astype(str) if _c_sist else pd.Series([''] * len(_do), index=_do.index)
+    _txt_trab = _do[_c_trab].astype(str) if _c_trab else pd.Series([''] * len(_do), index=_do.index)
+    _txt_eq = _do[_c_eq].astype(str) if _c_eq else pd.Series([''] * len(_do), index=_do.index)
+    _txt_all = (_txt_sist + ' ' + _txt_trab + ' ' + _txt_eq).map(_norm)
+    # SFE en cualquier parte del texto (pegado o separado): "SFE", "SFE412", "SFE 413"…
+    _es_sfe = _txt_all.str.contains('SFE', na=False)
+    # Área: se registra a qué área pertenece cada orden, pero NO se filtra por ella.
+    # Las pruebas de SFE de madrugada pueden estar en Material Rodante, Vías u otra área.
+    _area_val = _do[_c_area].astype(str) if _c_area else pd.Series(['(sin área)'] * len(_do), index=_do.index)
+    # Fecha y hora de cierre (formato típico "dd-mm-aaaa HH:MM")
+    if _c_cierre:
+        _fc = pd.to_datetime(_do[_c_cierre], format='%d-%m-%Y %H:%M', errors='coerce')
+        if _fc.isna().all():
+            _fc = pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True)
+        else:
+            _fc = _fc.fillna(pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True))
+    else:
+        _fc = pd.Series([pd.NaT] * len(_do), index=_do.index)
+    _hora_c = _fc.dt.hour + _fc.dt.minute / 60.0
+    _es_madrugada = (_hora_c >= h_ini) & (_hora_c < h_fin)
+    _en_rango = _fc.dt.date.map(lambda _d: (pd.notna(_d) and start_date <= _d <= end_date))
+    # Filtro: SFE + fecha de cierre en madrugada + dentro del rango (sin filtrar por área)
+    _sel = _es_sfe & _fc.notna() & _es_madrugada & _en_rango
+    # Diagnóstico: cuántas filas sobreviven a cada filtro
+    _diag = {
+        'error': None,
+        'header_fila': _hdr,
+        'columnas': list(_do.columns),
+        'col_area': _c_area, 'col_sistema': _c_sist, 'col_trabajos': _c_trab,
+        'col_cierre': _c_cierre,
+        'filas': len(_do),
+        'con_sfe': int(_es_sfe.sum()),
+        'fecha_valida': int(_fc.notna().sum()),
+        'madrugada': int((_fc.notna() & _es_madrugada).sum()),
+        'en_rango_fechas': int(_en_rango.sum()),
+        'seleccionadas': int(_sel.sum())}
+    for _i in _do.index[_sel]:
+        _f_cierre = _fc.loc[_i]
+        _txt_i = _txt_all.loc[_i]
+        _mn = re.search(r'SFE[\s\-_.]*(\d{3})', _txt_i) or re.search(r'\b(4[01]\d)\b', _txt_i)
+        _n_sfe = int(_mn.group(1)) if _mn else np.nan
+        _rows.append({
+            'Fecha': _f_cierre.normalize(),
+            'Hora cierre': _f_cierre.strftime('%H:%M'),
+            'Hora_n': float(_hora_c.loc[_i]),
+            'SFE': (f"SFE {_n_sfe}" if pd.notna(_n_sfe) else "SFE (sin número)"),
+            'N_SFE': _n_sfe,
+            'Área': str(_area_val.loc[_i]).strip(),
+            'Sistema': (str(_do.at[_i, _c_sist])[:80] if _c_sist else ''),
+            'Trabajos': (str(_do.at[_i, _c_trab])[:150] if _c_trab else ''),
+            'OT': (str(_do.at[_i, _c_ot]) if _c_ot else '')})
+    return _rows, _diag
+
+
 # --- 6. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
     st.header("📅 Filtro Global")
@@ -2701,108 +2809,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         _oit_rows = []
         for f in f_oit_all:
             try:
-                _eng = "xlrd" if f.name.lower().endswith(".xls") else "openpyxl"
-                _raw_o = pd.read_excel(f, header=None, engine=_eng)
-                # Detectar la fila de encabezado: la que trae Área / Sistema / Trabajos
-                _hdr = None
-                for _r in range(min(20, len(_raw_o))):
-                    _fila = " | ".join(_norm(v) for v in _raw_o.iloc[_r].tolist() if pd.notna(v))
-                    if ('AREA' in _fila) and ('SISTEMA' in _fila or 'TRABAJO' in _fila):
-                        _hdr = _r
-                        break
-                if _hdr is None:
-                    for _r in range(min(20, len(_raw_o))):
-                        _fila = " | ".join(_norm(v) for v in _raw_o.iloc[_r].tolist() if pd.notna(v))
-                        if 'SISTEMA' in _fila or 'TRABAJO' in _fila or 'CIERRE' in _fila:
-                            _hdr = _r
-                            break
-                if _hdr is None:
-                    _oit_diag[f.name] = {'error': 'No se encontró la fila de encabezados. Primeras filas: ' +
-                                         " || ".join(" | ".join(str(v) for v in _raw_o.iloc[_r].tolist()[:6] if pd.notna(v)) for _r in range(min(3, len(_raw_o))))}
-                    continue
-                _do = pd.read_excel(f, header=_hdr, engine=_eng)
-                _do = _do.dropna(how='all')
-
-                def _col_oit(*_claves):
-                    for _c in _do.columns:
-                        _cn = _norm(_c)
-                        if any(_k in _cn for _k in _claves):
-                            return _c
-                    return None
-                _c_area = _col_oit('AREA')
-                _c_sist = _col_oit('SISTEMA')
-                _c_trab = _col_oit('TRABAJO', 'DESCRIP', 'DETALLE', 'GLOSA')
-                _c_ot = _col_oit('OIT', 'NUMERO', 'FOLIO', 'ORDEN')
-                _c_eq = _col_oit('EQUIPO', 'UNIDAD', 'MOVIL', 'SERIE', 'FLOTA')
-                # Fecha de cierre: primero la que tenga FECHA+CIERRE (evita "Comentarios cierre",
-                # que es texto). Si no, cualquier columna de fecha con hora que diga cierre/fin.
-                _c_cierre = None
-                for _c in _do.columns:
-                    _cn = _norm(_c)
-                    if ('FECHA' in _cn or 'F.' in _cn) and ('CIERRE' in _cn or 'CIERR' in _cn or 'TERMINO' in _cn or 'FIN' in _cn):
-                        _c_cierre = _c
-                        break
-                if _c_cierre is None:
-                    for _c in _do.columns:
-                        _cn = _norm(_c)
-                        if 'CIERRE' in _cn and 'COMENTARIO' not in _cn and 'RESPONSABLE' not in _cn and 'USUARIO' not in _cn:
-                            # que sea parseable como fecha antes de aceptarla
-                            _try = pd.to_datetime(_do[_c], errors='coerce', dayfirst=True)
-                            if _try.notna().sum() > 0:
-                                _c_cierre = _c
-                                break
-
-                _txt_sist = _do[_c_sist].astype(str) if _c_sist else pd.Series([''] * len(_do), index=_do.index)
-                _txt_trab = _do[_c_trab].astype(str) if _c_trab else pd.Series([''] * len(_do), index=_do.index)
-                _txt_eq = _do[_c_eq].astype(str) if _c_eq else pd.Series([''] * len(_do), index=_do.index)
-                _txt_all = (_txt_sist + ' ' + _txt_trab + ' ' + _txt_eq).map(_norm)
-                # SFE en cualquier parte del texto (pegado o separado): "SFE", "SFE412", "SFE 413"…
-                _es_sfe = _txt_all.str.contains('SFE', na=False)
-                # Área: se registra a qué área pertenece cada orden, pero NO se filtra por ella.
-                # Las pruebas de SFE de madrugada pueden estar en Material Rodante, Vías u otra área.
-                _area_val = _do[_c_area].astype(str) if _c_area else pd.Series(['(sin área)'] * len(_do), index=_do.index)
-                # Fecha y hora de cierre (formato típico "dd-mm-aaaa HH:MM")
-                if _c_cierre:
-                    _fc = pd.to_datetime(_do[_c_cierre], format='%d-%m-%Y %H:%M', errors='coerce')
-                    if _fc.isna().all():
-                        _fc = pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True)
-                    else:
-                        _fc = _fc.fillna(pd.to_datetime(_do[_c_cierre], errors='coerce', dayfirst=True))
-                else:
-                    _fc = pd.Series([pd.NaT] * len(_do), index=_do.index)
-                _hora_c = _fc.dt.hour + _fc.dt.minute / 60.0
-                _es_madrugada = (_hora_c >= _OIT_H_INI) & (_hora_c < _OIT_H_FIN)
-                _en_rango = _fc.dt.date.map(lambda _d: (pd.notna(_d) and start_date <= _d <= end_date))
-                # Filtro: SFE + fecha de cierre en madrugada + dentro del rango (sin filtrar por área)
-                _sel = _es_sfe & _fc.notna() & _es_madrugada & _en_rango
-                # Diagnóstico: cuántas filas sobreviven a cada filtro
-                _oit_diag[f.name] = {
-                    'error': None,
-                    'header_fila': _hdr,
-                    'columnas': list(_do.columns),
-                    'col_area': _c_area, 'col_sistema': _c_sist, 'col_trabajos': _c_trab,
-                    'col_cierre': _c_cierre,
-                    'filas': len(_do),
-                    'con_sfe': int(_es_sfe.sum()),
-                    'fecha_valida': int(_fc.notna().sum()),
-                    'madrugada': int((_fc.notna() & _es_madrugada).sum()),
-                    'en_rango_fechas': int(_en_rango.sum()),
-                    'seleccionadas': int(_sel.sum())}
-                for _i in _do.index[_sel]:
-                    _f_cierre = _fc.loc[_i]
-                    _txt_i = _txt_all.loc[_i]
-                    _mn = re.search(r'SFE[\s\-_.]*(\d{3})', _txt_i) or re.search(r'\b(4[01]\d)\b', _txt_i)
-                    _n_sfe = int(_mn.group(1)) if _mn else np.nan
-                    _oit_rows.append({
-                        'Fecha': _f_cierre.normalize(),
-                        'Hora cierre': _f_cierre.strftime('%H:%M'),
-                        'Hora_n': float(_hora_c.loc[_i]),
-                        'SFE': (f"SFE {_n_sfe}" if pd.notna(_n_sfe) else "SFE (sin número)"),
-                        'N_SFE': _n_sfe,
-                        'Área': str(_area_val.loc[_i]).strip(),
-                        'Sistema': (str(_do.at[_i, _c_sist])[:80] if _c_sist else ''),
-                        'Trabajos': (str(_do.at[_i, _c_trab])[:150] if _c_trab else ''),
-                        'OT': (str(_do.at[_i, _c_ot]) if _c_ot else '')})
+                _rows_f, _diag_f = _oit_archivo(f, start_date, end_date, _OIT_H_INI, _OIT_H_FIN)
+                _oit_diag[f.name] = _diag_f
+                _oit_rows.extend(_rows_f)
             except Exception as _e:
                 _oit_diag[f.name] = {'error': str(_e)}
                 _errores_proc[f.name] = f"OIT: {_e}"
@@ -2884,10 +2893,15 @@ st.markdown("""<style>
   [data-testid="stHorizontalBlock"]:has(.js-plotly-plot) { flex-wrap: wrap !important; }
   [data-testid="stHorizontalBlock"]:has(.js-plotly-plot) > [data-testid="stColumn"],
   [data-testid="stHorizontalBlock"]:has(.js-plotly-plot) > [data-testid="column"] { flex: 1 1 100% !important; min-width: 100% !important; width: 100% !important; }
+  /* Filas de 4 o más tarjetas (st.metric): 2 por fila y las etiquetas largas bajan de línea, para que no se corten los números */
+  [data-testid="stHorizontalBlock"]:has(> :nth-child(4)):has([data-testid="stMetric"]):not(:has(.js-plotly-plot)) { flex-wrap: wrap !important; }
+  [data-testid="stHorizontalBlock"]:has(> :nth-child(4)):has([data-testid="stMetric"]):not(:has(.js-plotly-plot)) > [data-testid="stColumn"],
+  [data-testid="stHorizontalBlock"]:has(> :nth-child(4)):has([data-testid="stMetric"]):not(:has(.js-plotly-plot)) > [data-testid="column"] { flex: 1 1 calc(50% - 1rem) !important; min-width: calc(50% - 1rem) !important; }
+  [data-testid="stMetricLabel"] [data-testid="stMarkdownContainer"], [data-testid="stMetricLabel"] p { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }
 }
 </style>""", unsafe_allow_html=True)
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía", "⚖️ Perfil Horario & Anomalías",
-              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh"]
+              "🌙 Consumo Nocturno", "🚨 Atípicos", "📋 THDR", "🔬 Análisis Multivariante", "👥 Pasajeros", "📝 Informe Ejecutivo", "🩺 Diagnóstico de Causas", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo"]
 
 with st.container(key="_topbar"):
     _cl, _cn = st.columns([1, 9], vertical_alignment="center")
@@ -7814,3 +7828,365 @@ if _seccion == _SECCIONES[17]:
                     pd.DataFrame(_xm).to_excel(_w, sheet_name='Regresión', index=False)
             st.download_button("⬇️ Descargar en Excel (diario, por tipo de día, por mes y regresión)", data=_buf_lb.getvalue(), file_name="linea_base_traccion_paxkm.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_linea_base")
+
+# ===== Causa raíz del consumo: cambio del consumo diario entre dos períodos del mismo año, separado en sus causas =====
+# Usa los archivos de data/ del año elegido y del anterior (UMR, SEAT, Facturación/PRMTE, Pasajeros por contrato y
+# Consulta OIT), sin depender del rango cargado en la barra lateral: se recalcula solo cuando cambian esos archivos.
+_RCA_MESES = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+
+
+def _rca_sg(x, dec=1):
+    """Número con signo: +1,2 / −1,2 (signo menos tipográfico)."""
+    return ('+' if x >= 0 else '−') + _ncl(abs(x), dec)
+
+
+def _firma_rca(anio):
+    """Archivos (carpeta, nombre, tamaño) del año en las carpetas que usa el análisis."""
+    return tuple(sorted((_k, os.path.basename(_p), os.path.getsize(_p)) for _k in ('umr', 'seat', 'bill', 'viajes', 'oit')
+                        for _p in listar_archivos(DATA_DIRS[_k]) if _anio_de_nombre(os.path.basename(_p)) == anio))
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _datos_rca_anual(anio, firma):
+    """Día a día del año: energía (Factura > PRMTE > SEAT, igual que la carga principal), km del UMR, energía de
+    00:00 a 05:00 del PRMTE, servicios simples y dobles (UMR, hoja KM-Servicio), pasajeros por contrato y noches
+    con prueba de trenes SFE (Consulta OIT). Parámetros sin "_" a propósito: Streamlit los usa como clave del caché."""
+    _sd, _ed = date(anio, 1, 1), date(anio, 12, 31)
+    _ops, _tr, _kms, _seat, _lf, _lp, _vj, _oit, _oit_meses = [], [], [], [], [], [], [], [], set()
+    for _k in ('umr', 'seat', 'bill', 'viajes', 'oit'):
+        for _p in listar_archivos(DATA_DIRS[_k]):
+            _nom = os.path.basename(_p)
+            if _anio_de_nombre(_nom) != anio:
+                continue
+            try:
+                with open(_p, 'rb') as _fh:
+                    _b = _fh.read()
+                if _k == 'umr':
+                    _r = _umr_cache(_nom, _b, _sd, _ed); _ops.extend(_r[0]); _tr.extend(_r[1]); _kms.extend(_r[2])
+                elif _k == 'seat':
+                    _seat.extend(_seat_cache(_nom, _b, _sd, _ed)[0])
+                elif _k == 'bill':
+                    _r = _bill_cache(_nom, _b, _sd, _ed); _lf.append(_r[0]); _lp.append(_r[1])
+                elif _k == 'viajes':
+                    _v = _viajes_cache(_nom, _b, _sd, _ed)
+                    if _v is not None and not _v.empty:
+                        _vj.append(_v)
+                else:
+                    _oit.extend(_oit_archivo(_ArchivoEnDisco(_p), _sd, _ed)[0])
+                    if _mes_de_nombre(_nom):
+                        _oit_meses.add(_mes_de_nombre(_nom))
+            except Exception:
+                continue
+    if not _ops:
+        return {}
+    _prm = _unir_por_fecha(_lp)
+    d = _armar_df_ops(_ops, _tr, _unir_por_fecha(_lf), _prm, _seat)[0]
+    d = d[['Fecha', 'E_Total', 'E_Tr', 'E_12', 'Odómetro [km]', 'Tipo Día', 'Fuente']].copy()
+    d['Fecha'] = pd.to_datetime(d['Fecha']).dt.normalize()
+    if _prm:
+        _p = pd.DataFrame(_prm)
+        _p['Fecha'] = pd.to_datetime(_p['Fecha']).dt.normalize()
+        _p['h'] = pd.to_numeric(_p['15min'].astype(str).str[:2], errors='coerce')
+        d = d.merge(_p.groupby('Fecha')['Consumo'].count().rename('n_15min').reset_index(), on='Fecha', how='left')
+        d = d.merge(_p[_p['h'] < 5].groupby('Fecha')['Consumo'].sum().rename('Noche_kWh').reset_index(), on='Fecha', how='left')
+    else:
+        d['n_15min'] = np.nan; d['Noche_kWh'] = np.nan
+    d['Serv_simples'] = np.nan; d['Serv_dobles'] = np.nan
+    if _kms:
+        _ks = pd.DataFrame(_kms)
+        if {'Fecha', 'SimR', 'DobR'}.issubset(_ks.columns):
+            _ks['Fecha'] = pd.to_datetime(_ks['Fecha'], errors='coerce').dt.normalize()
+            for _c in ('SimR', 'DobR'):
+                _ks[_c] = pd.to_numeric(_ks[_c], errors='coerce')
+            _g = _ks.groupby('Fecha')[['SimR', 'DobR']].sum(min_count=1).rename(columns={'SimR': 'Serv_simples', 'DobR': 'Serv_dobles'}).reset_index()
+            d = d.drop(columns=['Serv_simples', 'Serv_dobles']).merge(_g, on='Fecha', how='left')
+    d['Pasajeros'] = np.nan
+    if _vj:
+        _v = pd.concat(_vj, ignore_index=True)
+        _cv = next((c for c in _v.columns if any(k in _norm(c) for k in ('VIAJE', 'PASAJ', 'PAX'))), None)
+        if 'Fecha' in _v.columns and _cv is not None:
+            _v['Fecha'] = pd.to_datetime(_v['Fecha'], errors='coerce').dt.normalize()
+            _v['_p'] = pd.to_numeric(_v[_cv], errors='coerce')
+            _v = _v.dropna(subset=['Fecha']).drop_duplicates(subset=['Fecha'])
+            d = d.drop(columns=['Pasajeros']).merge(_v[['Fecha', '_p']].rename(columns={'_p': 'Pasajeros'}), on='Fecha', how='left')
+    _sfe = set(pd.to_datetime([_r['Fecha'] for _r in _oit]).normalize()) if _oit else set()
+    d['Prueba_SFE'] = d['Fecha'].isin(_sfe)
+    return {'dias': d.sort_values('Fecha').reset_index(drop=True), 'oit_meses': sorted(_oit_meses)}
+
+
+def _rca_validos(d):
+    """Días que sirven para el análisis: con energía, con km del UMR y con el PRMTE completo (para medir la noche)."""
+    return d[(d['E_Total'] > 0) & (d['Odómetro [km]'] > 0) & (d['n_15min'] >= 92) & d['Noche_kWh'].notna()]
+
+
+def _rca_puente(d, mb, ma):
+    """Cambio del consumo diario entre los meses mb (base) y ma (a explicar). La energía del día = noche (00:00–05:00)
+    + resto; el resto se separa (LMDI) en km × kWh por km; la noche, en el exceso de las noches con prueba SFE (sobre las
+    noches sin prueba del mismo mes) y el resto de las noches. Las partes suman exactamente el cambio."""
+    v = _rca_validos(d).copy()
+    v['m'] = v['Fecha'].dt.month
+    b, a = v[v['m'].isin(mb)], v[v['m'].isin(ma)]
+    if len(b) < 5 or len(a) < 5:
+        return None
+    E0, E1 = b['E_Total'].mean(), a['E_Total'].mean()
+    N0, N1 = b['Noche_kWh'].mean(), a['Noche_kWh'].mean()
+    K0, K1 = b['Odómetro [km]'].mean(), a['Odómetro [km]'].mean()
+    D0, D1 = E0 - N0, E1 - N1
+    L = (D1 - D0) / np.log(D1 / D0) if abs(D1 - D0) > 1e-9 else D0
+    _sin = v[~v['Prueba_SFE']].groupby('m')['Noche_kWh'].mean()
+    v['Exceso_SFE'] = np.where(v['Prueba_SFE'], v['Noche_kWh'] - v['m'].map(_sin), 0.0)
+    v['Exceso_SFE'] = v['Exceso_SFE'].fillna(0.0)
+    s0, s1 = v.loc[b.index, 'Exceso_SFE'].mean(), v.loc[a.index, 'Exceso_SFE'].mean()
+    return {'E0': E0, 'E1': E1, 'N0': N0, 'N1': N1, 'K0': K0, 'K1': K1, 'L': L,
+            'ef_km': L * np.log(K1 / K0), 'ef_int': L * np.log((D1 / K1) / (D0 / K0)),
+            'sfe': s1 - s0, 'noche_resto': (N1 - N0) - (s1 - s0), 'v': v, 'b': v.loc[b.index], 'a': v.loc[a.index]}
+
+
+def _rca_conclusiones(pasos, total):
+    """Conclusión de cada paso según su peso en el cambio total (del mismo signo = causa; de signo contrario = compensa)."""
+    sg = 1 if total >= 0 else -1
+    mismos = {k: v for k, v in pasos.items() if v * sg > 0}
+    suma = sum(abs(v) for v in mismos.values()) or 1.0
+    top = max(mismos, key=lambda k: abs(mismos[k])) if mismos else None
+    out = {}
+    for k, v in pasos.items():
+        if abs(v) < 50:
+            out[k] = 'Sin efecto'
+        elif k == top:
+            out[k] = 'Causa principal' if sg > 0 else 'Causa principal de la baja'
+        elif v * sg > 0:
+            out[k] = 'Causa secundaria' if abs(v) >= 0.15 * suma else 'Poco peso'
+        else:
+            out[k] = 'Compensa en parte'
+    return out
+
+
+if _seccion == _SECCIONES[18]:
+    st.markdown("### 🧭 Causa raíz del consumo de energía")
+    st.caption("Compara el consumo por día de dos períodos del mismo año y separa el cambio en sus causas: km recorridos, "
+               "kWh por km de día, pruebas nocturnas de trenes SFE y noches sin pruebas. El año anterior sirve de referencia "
+               "del cambio normal de cada año. Usa los archivos de data/ en GitHub (UMR, SEAT, Facturación/PRMTE, Pasajeros "
+               "por contrato y Consulta OIT); no depende del rango cargado ni de los filtros de arriba. La primera vez tarda 1 a 2 minutos.")
+    _anios_u = {_anio_de_nombre(os.path.basename(_p)) for _p in listar_archivos(DATA_DIRS['umr'])}
+    _anios_b = {_anio_de_nombre(os.path.basename(_p)) for _p in listar_archivos(DATA_DIRS['bill'])}
+    _anios_rca = sorted(a for a in (_anios_u & _anios_b) if a)
+    if not _anios_rca:
+        st.info("Faltan archivos del UMR y de Facturación del mismo año en GitHub (data/umr y data/facturacion).")
+    else:
+        _c1, _c2, _c3 = st.columns([1, 2, 2])
+        _anio_r = _c1.selectbox("Año", _anios_rca[::-1], key='_rca_anio')
+        with st.spinner("Calculando con los archivos del año y del anterior…"):
+            _D = _datos_rca_anual(_anio_r, _firma_rca(_anio_r))
+            _R = _datos_rca_anual(_anio_r - 1, _firma_rca(_anio_r - 1)) if (_anio_r - 1) in _anios_rca else {}
+        _dias = _D.get('dias', pd.DataFrame())
+        _val = _rca_validos(_dias) if not _dias.empty else _dias
+        _meses_ok = sorted(_val['Fecha'].dt.month.unique().tolist()) if not _val.empty else []
+        if len(_meses_ok) < 2:
+            st.info(f"{_anio_r} tiene menos de dos meses con energía, km del UMR y PRMTE completo: no hay con qué comparar.")
+        else:
+            _op = [_RCA_MESES[m - 1] for m in _meses_ok]
+            _n_b = 2 if len(_op) >= 3 else 1
+            _sel_b = _c2.select_slider("Período base", options=_op, value=(_op[0], _op[_n_b - 1]), key=f'_rca_base_{_anio_r}')
+            _sel_a = _c3.select_slider("Período a explicar", options=_op, value=(_op[_n_b], _op[-1]), key=f'_rca_act_{_anio_r}')
+            _rango = lambda s: [m for m in _meses_ok if _RCA_MESES.index(s[0]) + 1 <= m <= _RCA_MESES.index(s[1]) + 1]
+            _mb, _ma = _rango(_sel_b), _rango(_sel_a)
+            _txt_b = _sel_b[0] if _sel_b[0] == _sel_b[1] else f"{_sel_b[0]}–{_sel_b[1]}"
+            _txt_a = _sel_a[0] if _sel_a[0] == _sel_a[1] else f"{_sel_a[0]}–{_sel_a[1]}"
+            _P = _rca_puente(_dias, _mb, _ma) if not set(_mb) & set(_ma) else None
+            if set(_mb) & set(_ma):
+                st.warning("El período base y el período a explicar no pueden compartir meses.")
+            elif _P is None:
+                st.info("Cada período necesita al menos 5 días con energía, km del UMR y PRMTE completo.")
+            else:
+                _dR = _R.get('dias', pd.DataFrame()) if _R else pd.DataFrame()
+                _PR = _rca_puente(_dR, _mb, _ma) if not _dR.empty else None
+                _hay_oit = bool(_D.get('oit_meses'))
+                _ra = _anio_r - 1
+                _dE = _P['E1'] - _P['E0']
+                # --- Pasos del puente (kWh/día); suman exactamente el cambio ---
+                _pasos = {}
+                if _PR is not None:
+                    _km_norm = _P['L'] * np.log(_PR['K1'] / _PR['K0'])
+                    _pasos[f'Km recorridos: cambio normal del año (como {_ra})'] = _km_norm
+                    _pasos[f'Km recorridos: propio de {_anio_r}'] = _P['ef_km'] - _km_norm
+                else:
+                    _pasos['Km recorridos'] = _P['ef_km']
+                _pasos['kWh por km de día'] = _P['ef_int']
+                if _hay_oit:
+                    _pasos['Pruebas nocturnas de trenes SFE'] = _P['sfe']
+                    _pasos['Noches sin pruebas'] = _P['noche_resto']
+                else:
+                    _pasos['Noches (00:00–05:00)'] = _P['sfe'] + _P['noche_resto']
+                _concl = _rca_conclusiones(_pasos, _dE)
+                _top = max(_pasos, key=lambda k: _pasos[k] * (1 if _dE >= 0 else -1))
+                _pct = (_P['E1'] / _P['E0'] - 1) * 100
+                _pct_r = (_PR['E1'] / _PR['E0'] - 1) * 100 if _PR is not None else None
+                _m1 = st.columns(4)
+                _m1[0].metric(f"{_txt_b} (MWh/día)", _ncl(_P['E0'] / 1000, 1))
+                _m1[1].metric(f"{_txt_a} (MWh/día)", _ncl(_P['E1'] / 1000, 1), f"{'+' if _pct >= 0 else ''}{_ncl(_pct, 1)} %", delta_color='inverse')
+                _m1[2].metric("Mayor causa", _rca_sg(_pasos[_top] / 1000, 2), help=f"{_top}: {_rca_sg(_pasos[_top] / 1000, 2)} MWh/día.")
+                _m1[3].metric(f"Cambio en {_ra}", f"{_rca_sg(_pct_r, 1)} %" if _pct_r is not None else "Sin datos",
+                              help="Cambio del consumo diario entre los mismos meses del año anterior: lo normal de la estación.")
+                st.markdown(f"**{_txt_a} {_anio_r}: {_ncl(_P['E1'] / 1000, 1)} MWh/día, {_rca_sg(_pct, 1)} % respecto de "
+                            f"{_txt_b} ({_ncl(_P['E0'] / 1000, 1)}).** Lo que más pesa: {_top.lower()} "
+                            f"({_rca_sg(_pasos[_top] / 1000, 2)} MWh/día)."
+                            + (f" En {_ra} el mismo cambio fue de {_rca_sg(_pct_r, 1)} %." if _pct_r is not None else ""))
+
+                # --- Consumo por día de cada mes, año elegido y anterior ---
+                _vm = _P['v'].groupby('m')['E_Total'].mean() / 1000
+                _fmes = go.Figure()
+                if _PR is not None:
+                    _vr = _PR['v'].groupby('m')['E_Total'].mean() / 1000
+                    _fmes.add_trace(go.Scatter(x=[_RCA_MESES[m - 1] for m in _vr.index], y=_vr.values, name=str(_ra), mode='lines+markers',
+                                               line=dict(color='#94a3b8', width=2), hovertemplate='%{x} ' + str(_ra) + ': %{y:.1f} MWh/día<extra></extra>'))
+                _fmes.add_trace(go.Scatter(x=[_RCA_MESES[m - 1] for m in _vm.index], y=_vm.values, name=str(_anio_r), mode='lines+markers',
+                                           line=dict(color='#005195', width=2.5), hovertemplate='%{x} ' + str(_anio_r) + ': %{y:.1f} MWh/día<extra></extra>'))
+                _ys = list(_vm.values) + (list(_vr.values) if _PR is not None else []) + [_P['E0'] / 1000, _P['E1'] / 1000]
+                _cerca = abs(_P['E1'] - _P['E0']) / 1000 < 0.08 * ((max(_ys) - min(_ys)) or 1.0)
+                for _ms, _ev, _txt in ((_mb, _P['E0'], _txt_b), (_ma, _P['E1'], _txt_a)):
+                    _xs = [_RCA_MESES[m - 1] for m in _ms]
+                    _dy = 0 if not _cerca else (9 if _ev >= max(_P['E0'], _P['E1']) else -9)
+                    _fmes.add_trace(go.Scatter(x=_xs if len(_xs) > 1 else _xs * 2, y=[_ev / 1000] * max(2, len(_xs)), mode='lines', showlegend=False,
+                                               line=dict(color='#64748b', width=1.5, dash='dash'), hoverinfo='skip'))
+                    _fmes.add_annotation(x=1, xref='paper', y=_ev / 1000, text=f"{_txt}: {_ncl(_ev / 1000, 1)}", showarrow=False, xanchor='left', yanchor='middle',
+                                         xshift=6, yshift=_dy, font=dict(size=11, color='#334155'))
+                _fmes.update_layout(height=340, margin=dict(t=10, b=0, l=0, r=110), yaxis_title='MWh por día', xaxis=dict(type='category'),
+                                    legend=dict(orientation='h'), hovermode='x unified',
+                                    title=f"Consumo por día de cada mes: {_anio_r} y {_ra}" if _PR is not None else f"Consumo por día de cada mes: {_anio_r}")
+                _pc(_fmes, use_container_width=True, config={'locale': 'es'})
+                st.caption("Promedio de los días con energía, km del UMR y PRMTE completo. Las líneas punteadas son los promedios de cada período.")
+
+                # --- Puente del cambio (cascada) ---
+                _etq = list(_pasos.keys()) + ['Cambio total']
+                _vals = [v / 1000 for v in _pasos.values()] + [_dE / 1000]
+                _fw = go.Figure(go.Waterfall(orientation='h', y=_etq, x=_vals, measure=['relative'] * len(_pasos) + ['total'],
+                                             text=[f"{'+' if v >= 0 else '−'}{_ncl(abs(v), 2)}" for v in _vals], textposition='outside',
+                                             increasing=dict(marker=dict(color='#d9534f')), decreasing=dict(marker=dict(color='#3c9a5f')),
+                                             totals=dict(marker=dict(color='#94a3b8')), connector=dict(line=dict(color='#cbd5e1', width=1, dash='dot')),
+                                             cliponaxis=False, hovertemplate='%{y}: %{x:+.2f} MWh/día<extra></extra>'))
+                _acum = np.cumsum([0.0] + _vals[:-1])
+                _lo_w, _hi_w = min(0.0, float(_acum.min()), _vals[-1]), max(0.0, float(_acum.max()), _vals[-1])
+                _pad_w = 0.18 * ((_hi_w - _lo_w) or 1.0)
+                _fw.update_layout(height=60 + 46 * len(_etq), margin=dict(t=10, b=0, l=0, r=10),
+                                  xaxis=dict(range=[_lo_w - (_pad_w if _lo_w < 0 else 0.05 * _pad_w), _hi_w + _pad_w], title=f'MWh/día ({_txt_b} → {_txt_a})'),
+                                  yaxis=dict(autorange='reversed'), showlegend=False,
+                                  title=f"Qué explica el cambio de {'+' if _dE >= 0 else '−'}{_ncl(abs(_dE) / 1000, 2)} MWh/día")
+                _pc(_fw, use_container_width=True, config={'locale': 'es'})
+                st.caption("Rojo: sube el consumo · Verde: lo baja · Gris: cambio total. La noche es la energía del PRMTE entre 00:00 y 05:00; "
+                           "el resto del día se separa en km × kWh por km (método LMDI)."
+                           + ("" if _hay_oit else f" No hay Consulta OIT de {_anio_r}, así que las pruebas SFE no se separan de la noche."))
+
+                # --- Causas revisadas: evidencia de cada una ---
+                _b, _a = _P['b'], _P['a']
+                _fil = []
+                _pk = (_P['K1'] / _P['K0'] - 1) * 100
+                _pkr = (_PR['K1'] / _PR['K0'] - 1) * 100 if _PR is not None else None
+                for _k, _v in _pasos.items():
+                    if _k.startswith('Km recorridos: cambio normal'):
+                        _ev = f"En {_ra} los km por día cambiaron {_rca_sg(_pkr, 1)} % entre los mismos meses."
+                    elif _k.startswith('Km recorridos'):
+                        _ev = (f"Km por día: {_ncl(_P['K0'], 0)} → {_ncl(_P['K1'], 0)} ({_rca_sg(_pk, 1)} %)"
+                               + (f"; en {_ra}: {_rca_sg(_pkr, 1)} %." if _pkr is not None else "."))
+                    elif _k == 'kWh por km de día':
+                        _i0 = _b['E_Tr'].sum() / _b['Odómetro [km]'].sum(); _i1 = _a['E_Tr'].sum() / _a['Odómetro [km]'].sum()
+                        _pi = ((_P['E1'] - _P['N1']) / _P['K1']) / ((_P['E0'] - _P['N0']) / _P['K0']) * 100 - 100
+                        _ev = f"Tracción: {_ncl(_i0, 2)} → {_ncl(_i1, 2)} kWh/km; energía de día por km {_rca_sg(_pi, 1)} %."
+                    elif _k == 'Pruebas nocturnas de trenes SFE':
+                        _ab = pd.concat([_b, _a]); _con, _sin = _ab[_ab['Prueba_SFE']], _ab[~_ab['Prueba_SFE']]
+                        _ev = (f"{int(_a['Prueba_SFE'].sum())} noches con prueba en {_txt_a} y {int(_b['Prueba_SFE'].sum())} en {_txt_b}. "
+                               + (f"Con prueba: {_ncl(_con['Noche_kWh'].mean(), 0)} kWh entre 00:00 y 05:00; sin prueba: {_ncl(_sin['Noche_kWh'].mean(), 0)}."
+                                  if len(_con) and len(_sin) else "Sin noches con prueba para comparar."))
+                    else:
+                        _ev = (f"{_ncl(_P['N0'] / 1000 - _b['Exceso_SFE'].mean() / 1000, 2)} → {_ncl(_P['N1'] / 1000 - _a['Exceso_SFE'].mean() / 1000, 2)} MWh por noche"
+                               + (f"; en {_ra} la noche {'subió' if _PR['N1'] >= _PR['N0'] else 'bajó'} {_ncl(abs(_PR['N1'] - _PR['N0']) / 1000, 2)}." if _PR is not None else "."))
+                    _fil.append({'Causa': _k, 'Qué muestran los datos': _ev, 'Aporte (MWh/día)': f"{'+' if _v >= 0 else '−'}{_ncl(abs(_v) / 1000, 2)}",
+                                 'Conclusión': _concl[_k]})
+                _sd_b, _sd_a = _b['Serv_dobles'].sum(), _a['Serv_dobles'].sum()
+                _ss_b, _ss_a = _b['Serv_simples'].sum(), _a['Serv_simples'].sum()
+                if (_sd_b + _ss_b) > 0 and (_sd_a + _ss_a) > 0:
+                    _d0, _d1 = _sd_b / (_sd_b + _ss_b) * 100, _sd_a / (_sd_a + _ss_a) * 100
+                    _txt_r = ""
+                    if _PR is not None and (_PR['a']['Serv_dobles'].sum() + _PR['a']['Serv_simples'].sum()) > 0:
+                        _dr = _PR['a']['Serv_dobles'].sum() / (_PR['a']['Serv_dobles'].sum() + _PR['a']['Serv_simples'].sum()) * 100
+                        _txt_r = f"; en {_txt_a} {_ra}: {_ncl(_dr, 0)} %"
+                    _fil.append({'Causa': 'Trenes dobles', 'Qué muestran los datos': f"Servicios en doble: {_ncl(_d0, 0)} % → {_ncl(_d1, 0)} %{_txt_r}.",
+                                 'Aporte (MWh/día)': 'Dentro de km', 'Conclusión': 'Explica parte del cambio de km' if abs(_d1 - _d0) >= 3 else 'Sin cambio relevante'})
+                    _sv0, _sv1 = (_b['Serv_dobles'] + _b['Serv_simples']).mean(), (_a['Serv_dobles'] + _a['Serv_simples']).mean()
+                    _fil.append({'Causa': 'Servicios por día', 'Qué muestran los datos': f"{_ncl(_sv0, 0)} → {_ncl(_sv1, 0)} servicios por día.",
+                                 'Aporte (MWh/día)': 'Dentro de km', 'Conclusión': 'Explica parte del cambio de km' if abs(_sv1 / _sv0 - 1) >= 0.02 else 'Sin cambio relevante'})
+                if _b['Pasajeros'].notna().any() and _a['Pasajeros'].notna().any():
+                    _p0, _p1 = _b['Pasajeros'].mean(), _a['Pasajeros'].mean()
+                    _txt_r = ""
+                    _mp = _a.loc[_a['Pasajeros'].notna(), 'Fecha'].dt.month.unique()
+                    _par = _PR['a'][_PR['a']['Fecha'].dt.month.isin(_mp)] if _PR is not None else pd.DataFrame()
+                    if not _par.empty and _par['Pasajeros'].notna().any():
+                        _pr1 = _par['Pasajeros'].mean()
+                        _meses_p = ", ".join(_RCA_MESES[m - 1].lower() for m in sorted(_mp))
+                        _txt_r = f"; {_ncl(abs(_p1 / _pr1 - 1) * 100, 0)} % {'más' if _p1 >= _pr1 else 'menos'} que en {_ra} ({_meses_p})"
+                    _fil.append({'Causa': 'Pasajeros', 'Qué muestran los datos': f"{_ncl(_p0, 0)} → {_ncl(_p1, 0)} pasajeros por día{_txt_r}.",
+                                 'Aporte (MWh/día)': 'Dentro de km', 'Conclusión': ('Sube la demanda' if _p1 > _p0 else 'Baja la demanda') if abs(_p1 / _p0 - 1) >= 0.05 else 'Sin cambio relevante'})
+                _e12b, _e12a = _b['E_12'].mean(), _a['E_12'].mean()
+                _txt_r = (f"; en {_txt_a} {_ra}: {_ncl(_PR['a']['E_12'].mean() / 1000, 2)}" if _PR is not None else "")
+                _fil.append({'Causa': 'Auxiliares 12 kV', 'Qué muestran los datos': f"{_ncl(_e12b / 1000, 2)} → {_ncl(_e12a / 1000, 2)} MWh/día{_txt_r}.",
+                             'Aporte (MWh/día)': 'Dentro de kWh por km', 'Conclusión': 'Sin cambio relevante' if abs(_e12a - _e12b) < 300 else 'Revisar consumo de auxiliares'})
+                _l0, _l1 = (_b['Tipo Día'] == 'L').mean() * 100, (_a['Tipo Día'] == 'L').mean() * 100
+                _fil.append({'Causa': 'Calendario', 'Qué muestran los datos': f"Días laborales: {_ncl(_l0, 1)} % → {_ncl(_l1, 1)} %.",
+                             'Aporte (MWh/día)': '≈ 0' if abs(_l1 - _l0) < 3 else 'Dentro de km', 'Conclusión': 'Sin efecto' if abs(_l1 - _l0) < 3 else 'Puede pesar'})
+                _tab_c = pd.DataFrame(_fil)[['Causa', 'Aporte (MWh/día)', 'Conclusión', 'Qué muestran los datos']]
+                st.markdown("#### Causas revisadas")
+                try:
+                    st.table(_tab_c, hide_index=True)
+                except TypeError:  # versiones de Streamlit sin hide_index en st.table
+                    st.table(_tab_c.set_index('Causa'))
+
+                # --- Noches: pruebas SFE ---
+                if _hay_oit:
+                    _vn = _P['v']
+                    _fn = go.Figure()
+                    for _es, _col, _nm in ((False, '#94a3b8', 'Noche sin prueba'), (True, '#d9534f', 'Noche con prueba SFE (OIT)')):
+                        _s = _vn[_vn['Prueba_SFE'] == _es]
+                        _fn.add_trace(go.Scatter(x=_s['Fecha'], y=_s['Noche_kWh'], mode='markers', name=_nm, marker=dict(color=_col, size=6 if _es else 5),
+                                                 hovertemplate='%{x|%d-%m-%Y}: %{y:,.0f} kWh<extra>' + _nm + '</extra>'))
+                    _ini_mes = pd.date_range(_vn['Fecha'].min().to_period('M').to_timestamp(), _vn['Fecha'].max(), freq='MS')
+                    _fn.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation='h'),
+                                      yaxis=dict(title='kWh de 00:00 a 05:00', tickformat=',d'),
+                                      xaxis=dict(tickvals=list(_ini_mes), ticktext=[_RCA_MESES[_t.month - 1] for _t in _ini_mes]),
+                                      title=f"Energía de cada noche en {_anio_r}")
+                    _pc(_fn, use_container_width=True, config={'locale': 'es'})
+                    st.caption("Las noches con una OIT de prueba de trenes SFE (cerrada de madrugada) consumen más: es energía sin servicio comercial.")
+
+                # --- Datos excluidos o que faltan ---
+                _todos = _dias[_dias['Fecha'].dt.month.isin(_mb + _ma)]
+                _sin_km = _todos[_todos['Odómetro [km]'] <= 0]['Fecha']
+                _sin_pr = _todos[(_todos['Odómetro [km]'] > 0) & ~((_todos['n_15min'] >= 92) & _todos['Noche_kWh'].notna())]['Fecha']
+                _avisos = []
+                if len(_sin_km):
+                    _avisos.append(f"{len(_sin_km)} día(s) sin km en el UMR: " + ", ".join(_x.strftime('%d-%m') for _x in _sin_km.head(8)) + ("…" if len(_sin_km) > 8 else ""))
+                if len(_sin_pr):
+                    _avisos.append(f"{len(_sin_pr)} día(s) con el PRMTE incompleto: " + ", ".join(_x.strftime('%d-%m') for _x in _sin_pr.head(8)) + ("…" if len(_sin_pr) > 8 else ""))
+                _ult = _val['Fecha'].max()
+                if pd.notna(_ult) and _ult.month == max(_ma) and _ult.day < pd.Timestamp(_ult).days_in_month:
+                    _avisos.append(f"El último mes llega hasta el {_ult.strftime('%d-%m')}.")
+                if _a['Pasajeros'].isna().all():
+                    _avisos.append(f"Sin Pasajeros por contrato en {_txt_a}.")
+                if not _hay_oit:
+                    _avisos.append(f"Sin Consulta OIT de {_anio_r}: no se pueden separar las pruebas SFE.")
+                if _PR is None:
+                    _avisos.append(f"Sin datos de {_ra} para comparar con lo normal de la estación.")
+                with st.expander(f"Datos que faltan o se excluyeron ({len(_avisos)})" if _avisos else "Datos: todo completo", expanded=False):
+                    for _x in _avisos:
+                        st.markdown(f"- {_x}")
+                    st.caption("Se usan solo los días con energía, km del UMR y PRMTE completo; los demás quedan fuera de los promedios.")
+
+                # --- Descarga ---
+                _buf_rca = BytesIO()
+                with pd.ExcelWriter(_buf_rca, engine='openpyxl') as _w:
+                    pd.DataFrame({'Paso': _etq, 'MWh/día': [round(v, 3) for v in _vals]}).to_excel(_w, sheet_name='Puente', index=False)
+                    _tab_c.to_excel(_w, sheet_name='Causas', index=False)
+                    _xd = _P['v'].drop(columns=['m']).copy()
+                    _xd['Período'] = np.where(_xd['Fecha'].dt.month.isin(_mb), _txt_b, np.where(_xd['Fecha'].dt.month.isin(_ma), _txt_a, ''))
+                    _xd['Fecha'] = _xd['Fecha'].dt.strftime('%d-%m-%Y')
+                    _xd.to_excel(_w, sheet_name='Diario', index=False)
+                st.download_button("⬇️ Descargar en Excel (puente, causas y datos diarios)", data=_buf_rca.getvalue(),
+                                   file_name=f"causa_raiz_consumo_{_anio_r}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_rca")
