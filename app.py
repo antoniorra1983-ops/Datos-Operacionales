@@ -652,6 +652,9 @@ def _st_df(_df, **kw):
             _cn = str(_c).strip().lower()
             if _cn in ('año', 'ano', 'year', 'hora', 'semana', 'año iso', 'ano iso', 'iw', 'iy', 'mes nº', 'n°', 'nº'):
                 continue  # índices: no llevan separador de miles
+            if '°C' in str(_c):  # temperaturas: un decimal
+                _d[_c] = _d[_c].map(lambda _v: _t_txt(_v, 1) if pd.notna(_v) else '')
+                continue
             if any(_k in str(_c) for _k in ['%', 'IDE', 'UMR', 'Ratio', 'ratio', 'prom', 'Prom', 'Z-Score', 'z-score', 'kWh/km']):
                 # magnitudes que siempre se muestran con 2 decimales
                 _d[_c] = _d[_c].map(lambda _v: _ncl(_v, 2) if pd.notna(_v) else '')
@@ -2311,6 +2314,349 @@ def _oit_archivo(f, start_date, end_date, h_ini=0, h_fin=7):
             'Trabajos': (str(_do.at[_i, _c_trab])[:150] if _c_trab else ''),
             'OT': (str(_do.at[_i, _c_ot]) if _c_ot else '')})
     return _rows, _diag
+
+
+# ===== Carga de pasajeros por viaje: tramos, bloques de 15 min y energía de cada viaje =====
+# Las usan la pestaña 🔗 BI (bloques de 15 min) y 👥 Pasajeros › Por servicio (pasajeros, ocupación y energía de cada viaje).
+# Capacidad de pasajeros de una unidad (2 coches) por tipo de tren. 367 es la capacidad informada del X'Trapolis Modular;
+# cámbiala aquí para dejarla fija (en la pestaña también se puede ajustar sin tocar el código).
+_CAP_UNIDAD = {'XT-100': 367, 'XT-M': 367, 'SFE': 367}
+_JORNADA_TXT = {'L': 'Laboral', 'S': 'Sábado', 'D/F': 'Domingo y festivo'}
+# Km de cada estación según el código de columna del export de Carga (PUE, BEL, ..., LIM)
+_KM_PAX = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
+
+def _integrar_15(_ini, _fin, _val, _n):
+    """Reparte un valor constante en [ini, fin) (minutos desde el inicio) en bloques de 15 min. Devuelve valor·minuto por bloque."""
+    _out = np.zeros(_n)
+    _ok = np.isfinite(_ini) & np.isfinite(_fin) & (_fin > _ini) & np.isfinite(_val) & (_val != 0)
+    _ini, _fin, _val = _ini[_ok], _fin[_ok], _val[_ok]
+    if not len(_ini):
+        return _out
+    _b0 = np.floor(_ini / 15).astype(int); _b1 = np.floor((_fin - 1e-9) / 15).astype(int)
+    for _j in range(int((_b1 - _b0).max()) + 1):
+        _b = _b0 + _j; _s = _b <= _b1
+        _w = np.clip(np.minimum(_fin[_s], (_b[_s] + 1) * 15.0) - np.maximum(_ini[_s], _b[_s] * 15.0), 0, None) * _val[_s]
+        _bb = _b[_s]; _in = (_bb >= 0) & (_bb < _n)
+        _out += np.bincount(_bb[_in], weights=_w[_in], minlength=_n)[:_n]
+    return _out
+
+def _viajes_y_tramos(_df, _t_ini, con_viaje=False):
+    """Por viaje: inicio, fin y unidades (doble = 2). Por tramo entre estaciones: inicio, fin, pasajeros a bordo y km.
+    La hora de paso por cada estación se interpola entre Hora Origen y Hora Fin según el km recorrido."""
+    _cods = [c for c in _df.columns if c in _KM_PAX]
+    _cho = next((c for c in _df.columns if 'HORA' in str(c).upper() and 'ORIG' in str(c).upper()), None)
+    _chf = next((c for c in _df.columns if 'HORA' in str(c).upper() and 'FIN' in str(c).upper()), None)
+    if len(_cods) < 2 or _cho is None or _chf is None:
+        return None
+    _cm2 = next((c for c in _df.columns if 'MOTRIZ' in str(c).upper() and '2' in str(c)), None)
+    _fe = pd.to_datetime(_df['Fecha'], errors='coerce').dt.normalize()
+    _t0 = ((_fe + pd.to_timedelta(_df[_cho].astype(str).str.strip(), errors='coerce')) - _t_ini).dt.total_seconds().to_numpy() / 60
+    _t1 = ((_fe + pd.to_timedelta(_df[_chf].astype(str).str.strip(), errors='coerce')) - _t_ini).dt.total_seconds().to_numpy() / 60
+    _t1 = np.where(_t1 < _t0, _t1 + 1440, _t1)  # viaje que cruza la medianoche
+    _uni = np.where(pd.to_numeric(_df[_cm2], errors='coerce').fillna(0).to_numpy() > 0, 2.0, 1.0) if _cm2 else np.ones(len(_df))
+    _K = np.array([_KM_PAX[c] for c in _cods], dtype=float); _S = len(_cods)
+    _L = _df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
+    # Recorrido según la carga: origen = 1ª estación con pasajeros; destino = la siguiente a la última con pasajeros
+    _pos = _L > 0; _hay = _pos.any(axis=1)
+    _o = np.where(_hay, _pos.argmax(axis=1), 0)
+    _d = np.where(_hay, np.minimum(_S - _pos[:, ::-1].argmax(axis=1), _S - 1), _S - 1)
+    _span = np.abs(_K[_d] - _K[_o]); _span = np.where(_span > 0, _span, np.nan)
+    _T = _t0[:, None] + (_t1 - _t0)[:, None] * (np.abs(_K[None, :] - _K[_o][:, None]) / _span[:, None])
+    _k = np.arange(_S - 1)[None, :]
+    _ok = (_k >= _o[:, None]) & (_k < _d[:, None]) & _hay[:, None]
+    _km = np.broadcast_to(np.abs(np.diff(_K))[None, :], _ok.shape)
+    _res = ((_t0, _t1, _uni), (_T[:, :-1][_ok], _T[:, 1:][_ok], _L[:, :-1][_ok], _km[_ok]))
+    if con_viaje:  # además: viaje de cada tramo, origen y destino de cada viaje y su carga máxima
+        return _res + ({'viaje': np.nonzero(_ok)[0], 'o': _o, 'd': _d, 'cods': _cods, 'carga_max': _L.max(axis=1)},)
+    return _res
+
+
+def _bloques_15(_c_list, _prmte):
+    """Bloques de 15 min de los días con Carga de pasajeros: trenes, unidades, pasajeros a bordo y pax-km en
+    circulación (de los viajes de Carga) y kWh del PRMTE del mismo bloque. Devuelve (bloques, inicio del primer día)."""
+    _fe_c = pd.to_datetime(pd.concat([d['Fecha'] for d in _c_list]), errors='coerce').dt.normalize().dropna()
+    _t_ini = _fe_c.min(); _n_b = int(((_fe_c.max() - _t_ini).days + 2) * 96)
+    _acc = np.zeros((4, _n_b))
+    for _dc in _c_list:
+        _r_vt = _viajes_y_tramos(_dc, _t_ini)
+        if _r_vt is None:
+            continue
+        (_t0, _t1, _un), (_si, _sf, _sl, _sk) = _r_vt
+        _dur = _sf - _si
+        _acc[0] += _integrar_15(_t0, _t1, np.ones_like(_t0), _n_b)
+        _acc[1] += _integrar_15(_t0, _t1, _un, _n_b)
+        _acc[2] += _integrar_15(_si, _sf, _sl, _n_b)
+        _acc[3] += _integrar_15(_si, _sf, np.divide(_sl * _sk, _dur, out=np.zeros_like(_dur), where=_dur > 0), _n_b)
+    _q = pd.DataFrame({'ts': _t_ini + pd.to_timedelta(np.arange(_n_b) * 15, unit='min'),
+                       'Trenes': _acc[0] / 15, 'Unidades': _acc[1] / 15, 'Pax a bordo': _acc[2] / 15, 'Pax-km': _acc[3]})
+    _pr = pd.DataFrame(_prmte)
+    _pr['ts'] = pd.to_datetime(_pr['Fecha'], errors='coerce').dt.normalize() + pd.to_timedelta(_pr['15min'].astype(str) + ':00', errors='coerce')
+    _e15 = _pr.dropna(subset=['ts']).groupby('ts', as_index=False)['Consumo'].sum().rename(columns={'Consumo': 'kWh'})
+    _bi = _q.merge(_e15, on='ts', how='inner')
+    _bi = _bi[_bi['ts'].dt.date.isin(set(_fe_c.dt.date))].sort_values('ts').reset_index(drop=True)
+    return _bi, _t_ini
+
+
+def _modelo_15(_bi):
+    """kWh de cada bloque = base sin trenes + extra con servicio + kWh por unidad × unidades en circulación. La base es la
+    mediana de los bloques sin trenes. Devuelve (base, extra con servicio, kWh por unidad)."""
+    _U = _bi['Unidades'].to_numpy(float); _y = _bi['kWh'].to_numpy(float); _srv = _U > 0.05
+    _base = float(np.median(_y[~_srv])) if (~_srv).any() else 0.0
+    _bs, _bu = np.linalg.lstsq(np.column_stack([np.ones(int(_srv.sum())), _U[_srv]]), _y[_srv] - _base, rcond=None)[0]
+    return _base, _bs, _bu
+
+
+def _integrar_tasa(_ini, _fin, _val, _tasa):
+    """Para cada intervalo [ini, fin) (minutos) con un valor por minuto, suma valor × minutos × tasa del bloque de 15 min."""
+    _n = len(_tasa)
+    _out = np.zeros(len(_ini))
+    _ok = np.isfinite(_ini) & np.isfinite(_fin) & (_fin > _ini) & np.isfinite(_val) & (_val != 0)
+    if not _ok.any():
+        return _out
+    _i0, _f0 = np.where(_ok, _ini, 0.0), np.where(_ok, _fin, 1.0)
+    _b0 = np.floor(_i0 / 15).astype(int); _b1 = np.floor((_f0 - 1e-9) / 15).astype(int)
+    for _j in range(int((_b1 - _b0)[_ok].max()) + 1):
+        _b = _b0 + _j
+        _s = _ok & (_b <= _b1) & (_b >= 0) & (_b < _n)
+        _w = np.clip(np.minimum(_f0, (_b + 1) * 15.0) - np.maximum(_i0, _b * 15.0), 0, None) * np.where(_ok, _val, 0.0)
+        _out[_s] += _w[_s] * _tasa[_b[_s]]
+    return _out
+
+
+def _energia_por_viaje(_cargas, _prmte, _thdrs=None):
+    """Cada viaje de Carga de pasajeros con su hora de salida programada (del THDR), pasajeros, carga máxima, pax-km,
+    unidades, tipo de tren, tipo de jornada y energía estimada. La energía de cada bloque de 15 min del PRMTE, sin la base
+    sin trenes ni el extra con servicio (estaciones, iluminación), se reparte entre los trenes que circulan en ese bloque
+    según unidades × km recorridos en él (doble = 2 unidades); la suma de los viajes calza con esa energía.
+    _cargas y _thdrs: {'Vía 1': df, 'Vía 2': df}. Devuelve (tabla de viajes, resumen del reparto)."""
+    _c_list = [d for d in _cargas.values() if d is not None and not getattr(d, 'empty', True) and 'Fecha' in d.columns]
+    if not _c_list or not _prmte:
+        return pd.DataFrame(), {}
+    _bi, _t_ini = _bloques_15(_c_list, _prmte)
+    if len(_bi) < 96 or not (_bi['Unidades'].std() > 0):
+        return pd.DataFrame(), {}
+    _base, _bs, _bu = _modelo_15(_bi)
+    _fe_max = pd.to_datetime(pd.concat([d['Fecha'] for d in _c_list]), errors='coerce').dt.normalize().max()
+    _n_b = int(((_fe_max - _t_ini).days + 2) * 96)
+    _ix = ((_bi['ts'] - _t_ini).dt.total_seconds() // 900).astype(int).to_numpy()
+    _en = (_ix >= 0) & (_ix < _n_b)
+    _es = np.zeros(_n_b)  # energía de los trenes en cada bloque: lo medido sin la base ni el extra con servicio
+    _es[_ix[_en]] = np.where(_bi['Unidades'].to_numpy(float) > 0.05, np.clip(_bi['kWh'].to_numpy(float) - _base - _bs, 0, None), 0.0)[_en]
+    _ukm, _det = np.zeros(_n_b), []
+    for _via, _dc in _cargas.items():
+        if _dc is None or getattr(_dc, 'empty', True) or 'Fecha' not in _dc.columns:
+            continue
+        _dc = _dc.reset_index(drop=True)
+        _r = _viajes_y_tramos(_dc, _t_ini, con_viaje=True)
+        if _r is None:
+            continue
+        (_t0, _t1, _un), (_si, _sf, _sl, _sk), _ex = _r
+        _dur = _sf - _si
+        _vel = np.divide(_sk * _un[_ex['viaje']], _dur, out=np.zeros_like(_dur), where=_dur > 0)  # unidad-km por minuto
+        _ukm += _integrar_15(_si, _sf, _vel, _n_b)
+        _det.append((_via, _dc, _t0, _un, _si, _sf, _sl, _sk, _ex, _vel))
+    _tasa = np.divide(_es, _ukm, out=np.zeros_like(_es), where=_ukm > 0)  # kWh por unidad-km de cada bloque
+    _partes = []
+    for _via, _dc, _t0, _un, _si, _sf, _sl, _sk, _ex, _vel in _det:
+        _nv, _vi = len(_t0), _ex['viaje']
+        _col = lambda *ks: next((c for c in _dc.columns if all(k in _norm(c) for k in ks)), None)
+        _c_tr, _c_tot, _c_cm, _c_em = _col('TREN'), _col('TOTAL'), _col('CARGA', 'MAX'), _col('ESTACION', 'MAX')
+        _c_m1, _c_ho, _c_nt = _col('MOTRIZ', '1'), _col('HORA', 'ORIG'), _col('THDR')
+        _fe = pd.to_datetime(_dc['Fecha'], errors='coerce').dt.normalize()
+        _ho = pd.to_timedelta(_dc[_c_ho].astype(str).str.strip(), errors='coerce') if _c_ho else pd.Series(pd.NaT, index=_dc.index)
+        # Hora de salida programada: del THDR de la misma vía, con el N° THDR del viaje (= N° de viaje del THDR de ese día)
+        _pg = pd.Series(np.nan, index=_dc.index, dtype=object)
+        _th = (_thdrs or {}).get(_via)
+        if _c_nt and _th is not None and not getattr(_th, 'empty', True) and {'Viaje', 'Hora Salida Programada', 'Fecha_Op'}.issubset(_th.columns):
+            _kt = (pd.to_datetime(_th['Fecha_Op'], errors='coerce').dt.strftime('%Y-%m-%d') + '|'
+                   + pd.to_numeric(_th['Viaje'], errors='coerce').astype('Int64').astype(str))
+            _prog = pd.Series(_th['Hora Salida Programada'].astype(str).str[:5].values, index=_kt.values)
+            _prog = _prog[~_prog.index.duplicated() & _prog.str.match(r'^\d{2}:\d{2}$')]
+            _kc = _fe.dt.strftime('%Y-%m-%d') + '|' + pd.to_numeric(_dc[_c_nt], errors='coerce').astype('Int64').astype(str)
+            _pg = _kc.map(_prog)
+        _cods = _ex['cods']
+        _cmax = pd.to_numeric(_dc[_c_cm], errors='coerce') if _c_cm else pd.Series(np.nan, index=_dc.index)
+        _cmax = _cmax.fillna(pd.Series(_ex['carga_max'], index=_dc.index))
+        _partes.append(pd.DataFrame({
+            'Fecha': _fe, 'Vía': _via,
+            'Tren': pd.to_numeric(_dc[_c_tr], errors='coerce') if _c_tr else np.nan,
+            'Programada': _pg,
+            'Sale_real_min': _ho.dt.total_seconds() / 60,
+            'Trayecto': [f"{_cods[o]} → {_cods[d]}" for o, d in zip(_ex['o'], _ex['d'])],
+            'Tipo de tren': (_dc[_c_m1].map(_tipo_tren) if _c_m1 else 'Sin asignar'),
+            'Unidades': _un,
+            'Pasajeros': pd.to_numeric(_dc[_c_tot], errors='coerce') if _c_tot else np.nan,
+            'Carga máxima': _cmax,
+            'Estación máxima': _dc[_c_em].astype(str) if _c_em else '',
+            'Pax-km': np.bincount(_vi, weights=_sl * _sk, minlength=_nv),
+            'Km': np.bincount(_vi, weights=_sk, minlength=_nv),
+            'kWh': np.bincount(_vi, weights=_integrar_tasa(_si, _sf, _vel, _tasa), minlength=_nv)}))
+    if not _partes:
+        return pd.DataFrame(), {}
+    _vj = pd.concat(_partes, ignore_index=True)
+    _vj = _vj[_vj['Fecha'].notna() & (_vj['Km'] > 0)].reset_index(drop=True)
+    _jor = {_f: _JORNADA_TXT.get(get_tipo_dia(_f.date()), 'Laboral') for _f in _vj['Fecha'].unique()}
+    _vj['Jornada'] = _vj['Fecha'].map(_jor)
+    # Salida del servicio: la programada; si no está en el THDR, la real redondeada a 5 min (marcada con ~)
+    _hm = lambda m: f"{int(m // 60) % 24:02d}:{int(m % 60):02d}"
+    _pmin = pd.to_timedelta(_vj['Programada'].where(_vj['Programada'].notna(), None).astype(str) + ':00', errors='coerce').dt.total_seconds() / 60
+    _rmin = (_vj['Sale_real_min'] / 5).round() * 5
+    _vj['Sale_min'] = _pmin.fillna(_rmin)
+    _vj['Sale'] = [(_hm(p) if pd.notna(p) else ('~' + _hm(r) if pd.notna(r) else '')) for p, r in zip(_pmin, _rmin)]
+    return _vj, {'base': float(_base), 'extra': float(_bs), 'por_unidad': float(_bu), 'e_trenes': float(_es.sum()), 'e_viajes': float(_vj['kWh'].sum())}
+
+
+# ===== Temperatura diaria de cada comuna de la línea (Open-Meteo: datos históricos de ECMWF, gratis y sin clave) =====
+# La usan la causa raíz y el Constructor de datos. Se guarda en disco (data/_cache) y se vuelve a pedir cada 6 horas como
+# máximo. Si el servicio no responde, los análisis siguen sin temperatura y se reintenta a los 15 minutos. Los últimos
+# días del año en curso aparecen con unos días de atraso.
+_COMUNAS_LINEA = {  # comuna: (latitud, longitud, estaciones de la comuna)
+    'Valparaíso': (-33.047, -71.613, ['Puerto', 'Bellavista', 'Francia', 'Baron', 'Portales']),
+    'Viña del Mar': (-33.025, -71.552, ['Recreo', 'Miramar', 'Viña del Mar', 'Hospital', 'Chorrillos', 'El Salto']),
+    'Quilpué': (-33.047, -71.443, ['Valencia', 'Quilpue', 'El Sol', 'El Belloto']),
+    'Villa Alemana': (-33.042, -71.373, ['Las Americas', 'La Concepcion', 'Villa Alemana', 'Sargento Aldea', 'Peñablanca']),
+    'Limache': (-32.985, -71.276, ['Limache']),
+}
+# Umbrales de la causa raíz: «Calor» = grados de máxima sobre _T_CALOR (aire acondicionado); «Frío» = grados de mínima
+# bajo _T_FRIO (calefacción). Ambos en °C y con la temperatura de la línea.
+_T_CALOR, _T_FRIO = 24.0, 12.0
+_CLIMA_COLS = ['Fecha', 'Comuna', 'T_max', 'T_min', 'T_media']
+
+
+def _t_txt(t, dec=0):
+    """Temperatura como texto en formato chileno (sin «-0»); «—» si no hay dato."""
+    return '—' if pd.isna(t) else _ncl(round(float(t), dec) + 0.0, dec)
+
+
+def _peso_comunas():
+    """Parte de la línea (km) en cada comuna: cada tramo entre estaciones se reparte mitad y mitad entre sus dos extremos."""
+    _est = [(e, _KM_ESTACION[_norm(e)]) for e in ESTACIONES if _norm(e) in _KM_ESTACION]
+    _com = {e: c for c, (_, _, es) in _COMUNAS_LINEA.items() for e in es}
+    _p = {c: 0.0 for c in _COMUNAS_LINEA}
+    for (e0, k0), (e1, k1) in zip(_est[:-1], _est[1:]):
+        _d = abs(k1 - k0) / 2
+        _p[_com.get(e0, 'Valparaíso')] += _d
+        _p[_com.get(e1, 'Limache')] += _d
+    _t = sum(_p.values()) or 1.0
+    return {c: v / _t for c, v in _p.items()}
+
+
+@st.cache_resource(show_spinner=False)
+def _clima_fallas():
+    """Momento del último intento fallido de bajar cada año (compartido por todas las sesiones, para no reintentar en cada clic)."""
+    return {}
+
+
+def _clima_pedir(anio, hasta, diarias):
+    import requests
+    return requests.get("https://archive-api.open-meteo.com/v1/archive", timeout=(6, 25), params={
+        'latitude': ",".join(str(v[0]) for v in _COMUNAS_LINEA.values()),
+        'longitude': ",".join(str(v[1]) for v in _COMUNAS_LINEA.values()),
+        'start_date': f"{anio}-01-01", 'end_date': hasta.strftime('%Y-%m-%d'),
+        'daily': ",".join(diarias), 'timezone': 'America/Santiago'})
+
+
+@st.cache_data(show_spinner=False, ttl=6 * 3600, max_entries=8)
+def _clima_anio(anio):
+    """Temperatura máxima, mínima y media de cada día del año en cada comuna [Fecha, Comuna, T_max, T_min, T_media].
+    Si el servicio no responde y no hay nada guardado, lanza un error (así no queda en caché un resultado vacío)."""
+    _hasta = min(pd.Timestamp(anio, 12, 31), pd.Timestamp.today().normalize() - pd.Timedelta(days=3))
+    if _hasta < pd.Timestamp(anio, 1, 1):
+        return pd.DataFrame(columns=_CLIMA_COLS)
+    _ruta = os.path.join(_CACHE_DIR, f"clima_comunas_{anio}.parquet")
+    _prev = pd.DataFrame(columns=_CLIMA_COLS)
+    try:
+        _prev = pd.read_parquet(_ruta)
+        if not _prev.empty and pd.to_datetime(_prev['Fecha']).max() >= _hasta and set(_prev['Comuna']) == set(_COMUNAS_LINEA):
+            return _prev
+    except Exception:
+        pass
+    try:
+        _diarias = ['temperature_2m_max', 'temperature_2m_min', 'temperature_2m_mean']
+        _r = _clima_pedir(anio, _hasta, _diarias)
+        if _r.status_code == 400:  # si no acepta la media diaria, se pide máxima y mínima (la media queda como su promedio)
+            _diarias = _diarias[:2]
+            _r = _clima_pedir(anio, _hasta, _diarias)
+        _r.raise_for_status()
+        _js = _r.json()
+    except Exception:
+        if not _prev.empty:
+            return _prev  # sin conexión: queda lo que ya estaba guardado
+        raise
+    _js = _js if isinstance(_js, list) else [_js]  # con varias coordenadas responde una lista, en el mismo orden
+    _partes = []
+    for _comuna, _j in zip(_COMUNAS_LINEA, _js):
+        _d = (_j or {}).get('daily') or {}
+        _n = len(_d.get('time') or [])
+        _num = lambda k: pd.to_numeric(pd.Series(_d.get(k) or [None] * _n, dtype=object), errors='coerce').to_numpy(float)
+        if _n:
+            _partes.append(pd.DataFrame({'Fecha': pd.to_datetime(pd.Series(_d['time'], dtype=object), errors='coerce'), 'Comuna': _comuna,
+                                         'T_max': _num('temperature_2m_max'), 'T_min': _num('temperature_2m_min'),
+                                         'T_media': _num('temperature_2m_mean')}))
+    _out = pd.concat(_partes, ignore_index=True) if _partes else pd.DataFrame(columns=_CLIMA_COLS)
+    _out = _out.dropna(subset=['Fecha'])
+    _out = _out[_out[['T_max', 'T_min']].notna().all(axis=1)].reset_index(drop=True)
+    if _out.empty:
+        if not _prev.empty:
+            return _prev
+        raise ValueError("Open-Meteo no devolvió temperaturas")
+    _out['T_media'] = _out['T_media'].fillna((_out['T_max'] + _out['T_min']) / 2)
+    _out['Fecha'] = pd.to_datetime(_out['Fecha']).dt.normalize().astype('datetime64[ns]')
+    try:
+        _out.to_parquet(_ruta, index=False)
+    except Exception:
+        pass
+    return _out
+
+
+def _clima_rango(desde, hasta):
+    """Temperatura de cada comuna entre dos fechas [Fecha, Comuna, T_max, T_min, T_media] y si se pudo bajar todo
+    (si el servicio no responde, vacío y False)."""
+    _partes, _ok = [], True
+    _fallas, _ahora = _clima_fallas(), pd.Timestamp.now()
+    for _a in range(pd.Timestamp(desde).year, pd.Timestamp(hasta).year + 1):
+        _t = _fallas.get(_a)
+        if _t is not None and (_ahora - _t).total_seconds() < 900:
+            _ok = False  # falló hace menos de 15 minutos: todavía no se reintenta
+            continue
+        try:
+            _partes.append(_clima_anio(_a))
+            _fallas.pop(_a, None)
+        except Exception:
+            _fallas[_a] = _ahora
+            _ok = False
+    _partes = [p for p in _partes if not p.empty]
+    if not _partes:
+        return pd.DataFrame({'Fecha': pd.Series(dtype='datetime64[ns]'), 'Comuna': pd.Series(dtype=object),
+                             'T_max': pd.Series(dtype=float), 'T_min': pd.Series(dtype=float), 'T_media': pd.Series(dtype=float)}), _ok
+    _c = pd.concat(_partes, ignore_index=True)
+    _c['Fecha'] = pd.to_datetime(_c['Fecha']).dt.normalize().astype('datetime64[ns]')
+    _c = _c[(_c['Fecha'] >= pd.Timestamp(desde).normalize()) & (_c['Fecha'] <= pd.Timestamp(hasta).normalize())]
+    return _c.reset_index(drop=True), _ok
+
+
+def _clima_linea(clima):
+    """Temperatura de la línea por día: promedio de las comunas ponderado por los km de línea en cada una."""
+    if clima is None or clima.empty:
+        return pd.DataFrame({'Fecha': pd.Series(dtype='datetime64[ns]'), 'T_max_linea': pd.Series(dtype=float),
+                             'T_min_linea': pd.Series(dtype=float), 'T_media_linea': pd.Series(dtype=float)})
+    _c = clima.assign(_w=clima['Comuna'].map(_peso_comunas()))
+    _f = lambda col: (_c[col] * _c['_w']).groupby(_c['Fecha']).sum() / _c['_w'].where(_c[col].notna()).groupby(_c['Fecha']).sum()
+    _out = pd.DataFrame({'T_max_linea': _f('T_max'), 'T_min_linea': _f('T_min'), 'T_media_linea': _f('T_media')}).round(1)
+    _out.index.name = 'Fecha'
+    return _out.reset_index()
+
+
+def _clima_ancho(clima, valores=('T_max', 'T_min', 'T_media'), unidad='[°C]'):
+    """Una columna por comuna y dato (T máx., T mín., T media) y una fila por fecha, en el orden de la línea."""
+    _nom = {'T_max': 'T máx.', 'T_min': 'T mín.', 'T_media': 'T media'}
+    if clima is None or clima.empty:
+        return pd.DataFrame({'Fecha': pd.Series(dtype='datetime64[ns]')})
+    _pv = clima.pivot_table(index='Fecha', columns='Comuna', values=list(valores), aggfunc='mean')
+    _ord = [(t, c) for c in _COMUNAS_LINEA for t in valores if (t, c) in _pv.columns]
+    _pv = _pv[_ord]
+    _pv.columns = [f"{_nom[t]} {c} {unidad}" for t, c in _ord]
+    return _pv.reset_index()
 
 
 # --- 6. INTERFAZ Y SIDEBAR ---
@@ -4601,70 +4947,249 @@ if _seccion == _SECCIONES[4]:
 
 if _seccion == _SECCIONES[5]:
     st.write("### Flujo y Carga de Pasajeros")
-    if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
-        _tot_vj = float(df_viajes['Total Viajes'].sum())
-        _dias_vj = int(df_viajes['Fecha'].nunique())
-        _prom_vj = (_tot_vj / _dias_vj) if _dias_vj > 0 else 0.0
-        st.markdown("#### 🎫 Viajes por Contrato (total del período)")
-        _vk1, _vk2, _vk3 = st.columns(3)
-        _vk1.metric("Total de viajes", f"{_ncl(_tot_vj, 0)}")
-        _vk2.metric("Días con dato", f"{_dias_vj}")
-        _vk3.metric("Promedio diario", f"{_ncl(_prom_vj, 0)} viajes/día")
-        _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
-        _fvj = px.bar(_vd, x='Fecha', y='Total Viajes', color_discrete_sequence=['#0a7c6e'])
-        _fvj.update_traces(hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
-        _fvj.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Viajes', xaxis_title='')
-        _pc(_no_huecos(_fvj), use_container_width=True, config={'locale': 'es'})
-        st.caption("Total de viajes vendidos por contrato/tarifa (fuente AFT), sumando todas las tarifas de cada día en el rango seleccionado.")
-        st.divider()
-    if not df_carga_v1.empty or not df_carga_v2.empty:
-        c_p1, c_p2 = st.columns(2)
-        with c_p1:
-            st.write("#### Total de Pasajeros por Día")
-            df_c1_agg = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index() if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
-            df_c2_agg = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index() if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
+    _vista_pax = st.radio("Vista", ["📊 Resumen", "🚆 Por servicio"], horizontal=True, key="_pax_vista", label_visibility="collapsed")
+    if _vista_pax == "📊 Resumen":
+        if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
+            _tot_vj = float(df_viajes['Total Viajes'].sum())
+            _dias_vj = int(df_viajes['Fecha'].nunique())
+            _prom_vj = (_tot_vj / _dias_vj) if _dias_vj > 0 else 0.0
+            st.markdown("#### 🎫 Viajes por Contrato (total del período)")
+            _vk1, _vk2, _vk3 = st.columns(3)
+            _vk1.metric("Total de viajes", f"{_ncl(_tot_vj, 0)}")
+            _vk2.metric("Días con dato", f"{_dias_vj}")
+            _vk3.metric("Promedio diario", f"{_ncl(_prom_vj, 0)} viajes/día")
+            _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
+            _fvj = px.bar(_vd, x='Fecha', y='Total Viajes', color_discrete_sequence=['#0a7c6e'])
+            _fvj.update_traces(hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
+            _fvj.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Viajes', xaxis_title='')
+            _pc(_no_huecos(_fvj), use_container_width=True, config={'locale': 'es'})
+            st.caption("Total de viajes vendidos por contrato/tarifa (fuente AFT), sumando todas las tarifas de cada día en el rango seleccionado.")
+            st.divider()
+        if not df_carga_v1.empty or not df_carga_v2.empty:
+            c_p1, c_p2 = st.columns(2)
+            with c_p1:
+                st.write("#### Total de Pasajeros por Día")
+                df_c1_agg = df_carga_v1.groupby('Fecha')['Total a Bordo'].sum().reset_index() if (not df_carga_v1.empty and 'Fecha' in df_carga_v1.columns) else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
+                df_c2_agg = df_carga_v2.groupby('Fecha')['Total a Bordo'].sum().reset_index() if (not df_carga_v2.empty and 'Fecha' in df_carga_v2.columns) else pd.DataFrame(columns=['Fecha', 'Total a Bordo'])
             
-            fig_pas = go.Figure()
-            if not df_c1_agg.empty:
-                fig_pas.add_trace(go.Bar(x=df_c1_agg['Fecha'], y=df_c1_agg['Total a Bordo'], name='Vía 1 (Puerto->Limache)', marker_color='#005195'))
-            if not df_c2_agg.empty:
-                fig_pas.add_trace(go.Bar(x=df_c2_agg['Fecha'], y=df_c2_agg['Total a Bordo'], name='Vía 2 (Limache->Puerto)', marker_color='#E85500'))
+                fig_pas = go.Figure()
+                if not df_c1_agg.empty:
+                    fig_pas.add_trace(go.Bar(x=df_c1_agg['Fecha'], y=df_c1_agg['Total a Bordo'], name='Vía 1 (Puerto->Limache)', marker_color='#005195'))
+                if not df_c2_agg.empty:
+                    fig_pas.add_trace(go.Bar(x=df_c2_agg['Fecha'], y=df_c2_agg['Total a Bordo'], name='Vía 2 (Limache->Puerto)', marker_color='#E85500'))
             
-            fig_pas.update_layout(barmode='group', xaxis_title="Fecha", yaxis_title="Total Pasajeros", margin=dict(t=30))
-            _pc(_no_huecos(fig_pas), use_container_width=True)
+                fig_pas.update_layout(barmode='group', xaxis_title="Fecha", yaxis_title="Total Pasajeros", margin=dict(t=30))
+                _pc(_no_huecos(fig_pas), use_container_width=True)
 
-        with c_p2:
-            st.write("#### Estaciones con Carga Máxima (Frecuencia)")
-            est_v1 = df_carga_v1['Estación Máxima'].value_counts().reset_index() if not df_carga_v1.empty else pd.DataFrame(columns=['Estación Máxima', 'count'])
-            est_v2 = df_carga_v2['Estación Máxima'].value_counts().reset_index() if not df_carga_v2.empty else pd.DataFrame(columns=['Estación Máxima', 'count'])
+            with c_p2:
+                st.write("#### Estaciones con Carga Máxima (Frecuencia)")
+                est_v1 = df_carga_v1['Estación Máxima'].value_counts().reset_index() if not df_carga_v1.empty else pd.DataFrame(columns=['Estación Máxima', 'count'])
+                est_v2 = df_carga_v2['Estación Máxima'].value_counts().reset_index() if not df_carga_v2.empty else pd.DataFrame(columns=['Estación Máxima', 'count'])
             
-            if not est_v1.empty: est_v1.columns = ['Estación', 'Frecuencia']; est_v1['Vía'] = 'Vía 1'
-            if not est_v2.empty: est_v2.columns = ['Estación', 'Frecuencia']; est_v2['Vía'] = 'Vía 2'
+                if not est_v1.empty: est_v1.columns = ['Estación', 'Frecuencia']; est_v1['Vía'] = 'Vía 1'
+                if not est_v2.empty: est_v2.columns = ['Estación', 'Frecuencia']; est_v2['Vía'] = 'Vía 2'
             
-            df_est = pd.concat([est_v1, est_v2]).sort_values('Frecuencia', ascending=True).tail(15)
+                df_est = pd.concat([est_v1, est_v2]).sort_values('Frecuencia', ascending=True).tail(15)
             
-            if not df_est.empty:
-                fig_est = px.bar(df_est, x='Frecuencia', y='Estación', color='Vía', orientation='h', color_discrete_map={'Vía 1': '#005195', 'Vía 2': '#E85500'})
-                fig_est.update_layout(xaxis_title="Frecuencia (N° de Viajes)", yaxis_title="Estación", margin=dict(t=30))
-                _pc(fig_est, use_container_width=True)
+                if not df_est.empty:
+                    fig_est = px.bar(df_est, x='Frecuencia', y='Estación', color='Vía', orientation='h', color_discrete_map={'Vía 1': '#005195', 'Vía 2': '#E85500'})
+                    fig_est.update_layout(xaxis_title="Frecuencia (N° de Viajes)", yaxis_title="Estación", margin=dict(t=30))
+                    _pc(fig_est, use_container_width=True)
 
-        st.write("#### Detalle de Viajes (Muestra)")
-        if not df_carga_v1.empty:
-            st.caption("Vía 1 (Puerto -> Limache)")
-            dv_c1 = df_carga_v1.copy()
-            dv_c1['Fecha'] = dv_c1['Fecha'].dt.strftime('%Y-%m-%d')
-            _st_df(make_columns_unique(dv_c1.head(100)), use_container_width=True)
+            st.write("#### Detalle de Viajes (Muestra)")
+            if not df_carga_v1.empty:
+                st.caption("Vía 1 (Puerto -> Limache)")
+                dv_c1 = df_carga_v1.copy()
+                dv_c1['Fecha'] = dv_c1['Fecha'].dt.strftime('%Y-%m-%d')
+                _st_df(make_columns_unique(dv_c1.head(100)), use_container_width=True)
             
-        if not df_carga_v2.empty:
-            st.caption("Vía 2 (Limache -> Puerto)")
-            dv_c2 = df_carga_v2.copy()
-            dv_c2['Fecha'] = dv_c2['Fecha'].dt.strftime('%Y-%m-%d')
-            _st_df(make_columns_unique(dv_c2.head(100)), use_container_width=True)
+            if not df_carga_v2.empty:
+                st.caption("Vía 2 (Limache -> Puerto)")
+                dv_c2 = df_carga_v2.copy()
+                dv_c2['Fecha'] = dv_c2['Fecha'].dt.strftime('%Y-%m-%d')
+                _st_df(make_columns_unique(dv_c2.head(100)), use_container_width=True)
             
-    elif df_viajes.empty:
-        st.info("No se han procesado datos de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
+        elif df_viajes.empty:
+            st.info("No se han procesado datos de pasajeros. Verifica los archivos subidos o tu Rango de Fechas.")
+        else:
+            st.info("Arriba está el total de **Viajes por Contrato**. Para ver también la **carga a bordo por estación** (Vía 1 / Vía 2), cargá los archivos **Carga Pasajeros V1 / V2** (uploaders 6 y 7).")
     else:
-        st.info("Arriba está el total de **Viajes por Contrato**. Para ver también la **carga a bordo por estación** (Vía 1 / Vía 2), cargá los archivos **Carga Pasajeros V1 / V2** (uploaders 6 y 7).")
+        # ===== Pasajeros por servicio: pasajeros, ocupación y energía de cada servicio, por tipo de jornada =====
+        st.caption("Pasajeros, ocupación y energía de cada servicio, siempre por tipo de jornada. Usa la Carga de pasajeros de cada "
+                   "viaje (V1 y V2) y la energía del PRMTE cada 15 min del rango cargado en la barra lateral.")
+        _cargas_ps = {'Vía 1': df_carga_v1, 'Vía 2': df_carga_v2}
+        _hay_c = any(d is not None and not d.empty and 'Fecha' in d.columns for d in _cargas_ps.values())
+        if not _hay_c or not all_prmte_full:
+            _falta_ps = [n for n, ok in [("Carga de pasajeros V1/V2", _hay_c), ("PRMTE (archivos de facturación)", bool(all_prmte_full))] if not ok]
+            st.info("Para este análisis falta **" + "** y **".join(_falta_ps) + "**. Cárgalo en la barra lateral y aprieta "
+                    "**🔄 Cargar / actualizar datos**.")
+        else:
+            # El cálculo de cada viaje se guarda en la sesión: solo se rehace cuando cambian los datos cargados
+            _thdrs_ps = {'Vía 1': df_thdr_v1, 'Vía 2': df_thdr_v2}
+            _fps = (tuple((k, len(d), str(pd.to_datetime(d['Fecha']).min()), str(pd.to_datetime(d['Fecha']).max()))
+                          for k, d in _cargas_ps.items() if d is not None and not d.empty and 'Fecha' in d.columns)
+                    + (len(all_prmte_full),) + tuple(len(d) if d is not None else 0 for d in _thdrs_ps.values()))
+            if st.session_state.get('_ps_firma') != _fps:
+                with st.spinner("Calculando pasajeros y energía de cada viaje…"):
+                    st.session_state['_ps_datos'] = _energia_por_viaje(_cargas_ps, all_prmte_full, _thdrs_ps)
+                st.session_state['_ps_firma'] = _fps
+            _vjs, _mps = st.session_state['_ps_datos']
+            if _vjs.empty:
+                st.warning("No hay suficientes bloques de 15 min con Carga de pasajeros y PRMTE a la vez en el rango cargado.")
+            else:
+                _q1, _q2 = st.columns([3, 2])
+                _jp = _q1.radio("Tipo de jornada", ['Laboral', 'Sábado', 'Domingo y festivo'], horizontal=True, key='_ps_jornada')
+                with _q2.expander("⚙️ Capacidad y criterios"):
+                    _cap = {_t: st.number_input(f"Pasajeros por unidad {_t}", min_value=50, max_value=2000, value=int(_CAP_UNIDAD[_t]), step=10,
+                                                key=f'_ps_cap_{_t}') for _t in ('XT-100', 'XT-M', 'SFE')}
+                    _umb = st.number_input("Un doble podría ir en simple si su carga máxima no pasa de (% de 1 unidad)", min_value=50,
+                                           max_value=150, value=100, step=5, key='_ps_umbral')
+                    _min_pax = st.number_input("Servicio con pocos pasajeros: menos de (pasajeros por viaje)", min_value=0, max_value=1000,
+                                               value=50, step=10, key='_ps_minpax')
+                _v = _vjs[_vjs['Jornada'] == _jp].copy()
+                if _v.empty:
+                    st.info(f"No hay viajes de tipo {_jp.lower()} con Carga de pasajeros en el rango cargado.")
+                else:
+                    _v['Cap. 1 unidad'] = _v['Tipo de tren'].map(_cap).fillna(_cap['XT-100'])
+                    _v['Ocupación'] = _v['Carga máxima'] / (_v['Cap. 1 unidad'] * _v['Unidades']) * 100
+                    _nd = _v['Fecha'].nunique()
+                    _E_v, _P_v = float(_v['kWh'].sum()), float(_v['Pasajeros'].sum())
+                    _kp = st.columns(4)
+                    _kp[0].metric("Viajes", _ncl(len(_v), 0), help=f"{_ncl(_nd, 0)} días de tipo {_jp.lower()} con Carga de pasajeros.")
+                    _kp[1].metric("Pasajeros/viaje", _ncl(_v['Pasajeros'].mean(), 0), help="Pasajeros transportados en cada viaje (Total a bordo del export de Carga).")
+                    _kp[2].metric("Ocupación", f"{_ncl(_v['Ocupación'].mean(), 0)} %",
+                                  help="Promedio de los viajes: pasajeros en el tramo más cargado dividido por la capacidad del tren (un doble = 2 unidades).")
+                    _kp[3].metric("kWh/pasajero", _ncl(_E_v / _P_v, 2) if _P_v > 0 else "—",
+                                  help="Energía estimada de los viajes dividida por los pasajeros transportados.")
+
+                    # --- Resumen por servicio ---
+                    _moda = lambda s: s.mode().iat[0] if len(s.mode()) else ''
+                    # Servicio = vía + hora de salida programada (el trayecto que se muestra es el más frecuente)
+                    _g = _v.groupby(['Vía', 'Sale'])
+                    _srv = pd.DataFrame({'Sale_min': _g['Sale_min'].median(), 'Trayecto': _g['Trayecto'].agg(_moda), 'Tren': _g['Tren'].agg(_moda),
+                                         'Días': _g['Fecha'].nunique(), 'Viajes': _g.size(),
+                                         'Pasajeros por viaje': _g['Pasajeros'].mean(), 'Carga máxima': _g['Carga máxima'].mean(),
+                                         'Dónde': _g['Estación máxima'].agg(_moda), 'En doble': _g['Unidades'].apply(lambda s: (s > 1).mean() * 100),
+                                         'Ocupación': _g['Ocupación'].mean(), 'kWh por viaje': _g['kWh'].mean(),
+                                         'kWh por pasajero': _g['kWh'].sum() / _g['Pasajeros'].sum()}).reset_index()
+                    # Servicios regulares: los que corren al menos uno de cada cuatro días (los demás son viajes especiales)
+                    _reg = _srv['Días'] >= max(1, 0.25 * _nd)
+                    _n_esp = int(_srv.loc[~_reg, 'Viajes'].sum())
+                    _srv = _srv[_reg].reset_index(drop=True)
+                    _c1u = float(_cap['XT-100'])
+                    _fps1 = go.Figure()
+                    for _via_p, _col_p in (('Vía 1', '#005195'), ('Vía 2', '#E85500')):
+                        _s = _srv[_srv['Vía'] == _via_p]
+                        if _s.empty:
+                            continue
+                        _dob_s = _s['En doble'] >= 50
+                        _fps1.add_trace(go.Scatter(
+                            x=_s['Sale_min'] / 60, y=_s['Carga máxima'], mode='markers',
+                            name=f"{_via_p} ({'Puerto → Limache' if _via_p == 'Vía 1' else 'Limache → Puerto'})",
+                            marker=dict(color=_col_p, size=np.where(_dob_s, 12, 8), symbol=np.where(_dob_s, 'diamond', 'circle')),
+                            customdata=np.stack([_s['Sale'], _s['Trayecto'], _s['Tren'].astype('Int64').astype(str),
+                                                 _s['Pasajeros por viaje'].map(lambda x: _ncl(x, 0)), _s['En doble'].map(lambda x: _ncl(x, 0))], axis=-1),
+                            hovertemplate='Sale %{customdata[0]} · %{customdata[1]} · tren %{customdata[2]}<br>Carga máxima: %{y:.0f} · '
+                                          'pasajeros por viaje: %{customdata[3]}<br>En doble: %{customdata[4]} % de los días<extra></extra>'))
+                    _xr = [max(0.0, float(_srv['Sale_min'].min()) / 60 - 0.5), min(24.5, float(_srv['Sale_min'].max()) / 60 + 0.5)]
+                    for _nu, _dash in ((1, 'dash'), (2, 'dot')):
+                        _fps1.add_trace(go.Scatter(x=_xr, y=[_c1u * _nu] * 2, mode='lines', line=dict(color='#94a3b8', width=1.5, dash=_dash),
+                                                   name=f"Capacidad de {_nu} unidad{'es' if _nu > 1 else ''} ({_ncl(_c1u * _nu, 0)})", hoverinfo='skip'))
+                    _hrs = list(range(int(np.floor(_xr[0])), int(np.ceil(_xr[1])) + 1, 2))
+                    _fps1.update_layout(height=400, margin=dict(t=10, b=0, l=0, r=0), legend=dict(orientation='h'),
+                                        xaxis=dict(title='Hora de salida', tickvals=_hrs, ticktext=[f"{_h % 24:02d}:00" for _h in _hrs], range=_xr),
+                                        yaxis=dict(title='Pasajeros en el tramo más cargado'),
+                                        title=f"Carga máxima de cada servicio ({_jp.lower()}) según su hora de salida")
+                    _pc(_fps1, use_container_width=True, config={'locale': 'es'})
+                    st.caption("Cada punto es un servicio (promedio de los días). Rombo: el servicio va en doble la mayoría de los días. Las líneas grises "
+                               "son la capacidad de una y de dos unidades XT-100 (se cambia en «Capacidad y criterios»).")
+
+                    st.markdown(f"#### Servicios de {_jp.lower()}")
+                    _srv = _srv.sort_values(['Vía', 'Sale_min']).reset_index(drop=True)
+                    _f0 = lambda s: s.map(lambda x: _ncl(x, 0) if pd.notna(x) else '—')
+                    _tab_s = pd.DataFrame({'Vía': _srv['Vía'], 'Sale': _srv['Sale'], 'Trayecto': _srv['Trayecto'], 'Días': _f0(_srv['Días']),
+                                           'Pasajeros': _f0(_srv['Pasajeros por viaje']), 'Carga máx.': _f0(_srv['Carga máxima']),
+                                           'Dónde': _srv['Dónde'], 'Doble (%)': _f0(_srv['En doble']), 'Ocupación (%)': _f0(_srv['Ocupación']),
+                                           'kWh/viaje': _f0(_srv['kWh por viaje']),
+                                           'kWh/pasajero': _srv['kWh por pasajero'].map(lambda x: _ncl(x, 2) if pd.notna(x) else '—')})
+                    _st_df(_tab_s, use_container_width=True, hide_index=True, height=420)
+                    st.caption(("Cada fila es un servicio del itinerario (vía y hora de salida programada), con el promedio de sus días; el trayecto es "
+                                "el más frecuente. " + (f"Quedan fuera {_ncl(_n_esp, 0)} viajes especiales (servicios que corren menos de uno de cada cuatro días). "
+                                                       if _n_esp else ""))
+                               + "Pasajeros: por viaje. Carga máx.: pasajeros en el tramo más cargado; Dónde: estación donde se alcanza más seguido. "
+                               "Doble: % de los días que va en doble. Ocupación: carga máxima sobre la capacidad del tren. kWh/viaje: energía estimada "
+                               "(ver abajo); los primeros servicios de la mañana también cargan la energía de los trenes que salen de cochera.")
+
+                    # --- Oportunidades de ahorro ---
+                    st.markdown("#### Oportunidades de ahorro")
+                    _anio_ps = int(_v['Fecha'].dt.year.mode().iat[0])
+                    _dias_anio = sum(1 for _x in pd.date_range(f'{_anio_ps}-01-01', f'{_anio_ps}-12-31')
+                                     if _JORNADA_TXT.get(get_tipo_dia(_x.date())) == _jp)
+                    _fac = _dias_anio / _nd if _nd else 0.0
+                    _dob = _v[_v['Unidades'] > 1]
+                    _cabe = _dob[_dob['Carga máxima'] <= _dob['Cap. 1 unidad'] * _umb / 100]
+                    if not _dob.empty:
+                        _go = _dob.groupby(['Vía', 'Sale'])
+                        _op = pd.DataFrame({'Sale_min': _go['Sale_min'].median(), 'Trayecto': _go['Trayecto'].agg(_moda), 'Viajes en doble': _go.size(),
+                                            'P90': _go['Carga máxima'].quantile(0.9), 'Cap1': _go['Cap. 1 unidad'].median(),
+                                            'kWh2': _go['kWh'].sum() / 2}).reset_index()
+                        _op = _op[_op['P90'] <= _op['Cap1'] * _umb / 100].sort_values('kWh2', ascending=False)
+                    else:
+                        _op = pd.DataFrame(columns=['kWh2'])
+                    _ko = st.columns(3)
+                    _ko[0].metric("Dobles que cabían", f"{_ncl(len(_cabe), 0)} de {_ncl(len(_dob), 0)}",
+                                  help=f"Viajes en doble cuya carga máxima no pasó del {_umb} % de la capacidad de una unidad (de todos los viajes en doble).")
+                    _ko[1].metric("Ahorro máximo al año", f"{_ncl(_cabe['kWh'].sum() / 2 / 1000 * _fac, 0)} MWh",
+                                  help=("Si todos esos viajes hubieran ido en simple: la energía de su segunda unidad (la mitad de la del viaje), "
+                                        f"llevada a los {_dias_anio} días de tipo {_jp.lower()} de {_anio_ps} ({_nd} analizados). Es un techo: "
+                                        "supone saber de antemano qué días un servicio va a ir con poca gente."))
+                    _ko[2].metric("Ahorro realista al año", f"{_ncl(_op['kWh2'].sum() / 1000 * _fac, 0)} MWh",
+                                  help="Servicios que casi siempre caben en una unidad (90 % de sus viajes en doble): se pueden programar en simple.")
+                    if _op.empty:
+                        st.caption("Ningún servicio en doble cabe normalmente en una unidad con el criterio actual.")
+                    else:
+                        _tab_o = pd.DataFrame({'Vía': _op['Vía'], 'Sale': _op['Sale'], 'Trayecto': _op['Trayecto'],
+                                               'Viajes en doble': _op['Viajes en doble'].map(lambda x: _ncl(x, 0)),
+                                               'Carga máx. (p90)': _op['P90'].map(lambda x: _ncl(x, 0)),
+                                               '% de 1 unidad': (_op['P90'] / _op['Cap1'] * 100).map(lambda x: _ncl(x, 0)),
+                                               'Ahorro período (MWh)': (_op['kWh2'] / 1000).map(lambda x: _ncl(x, 1)),
+                                               'Ahorro año (MWh)': (_op['kWh2'] / 1000 * _fac).map(lambda x: _ncl(x, 1))})
+                        st.markdown(f"**Servicios en doble que caben en una unidad ({len(_tab_o)})**: el 90 % de sus viajes en doble no pasa del "
+                                    f"{_umb} % de la capacidad de una unidad. Si fueran en simple, se ahorraría la energía de la segunda unidad: "
+                                    f"{_ncl(_op['kWh2'].sum() / 1000 * _fac, 0)} MWh al año.")
+                        _st_df(_tab_o, use_container_width=True, hide_index=True)
+                    _pocos = _srv[_srv['Pasajeros por viaje'] < _min_pax]
+                    if _pocos.empty:
+                        st.caption(f"Ningún servicio de {_jp.lower()} lleva en promedio menos de {_min_pax} pasajeros por viaje.")
+                    else:
+                        st.markdown(f"**Servicios con menos de {_min_pax} pasajeros por viaje ({len(_pocos)})**")
+                        _st_df(_tab_s[(_srv['Pasajeros por viaje'] < _min_pax).to_numpy()][['Vía', 'Sale', 'Trayecto', 'Días', 'Pasajeros',
+                                                                                            'kWh/viaje', 'kWh/pasajero']],
+                               use_container_width=True, hide_index=True)
+
+                    with st.expander("Cómo se calcula la energía de cada viaje", expanded=False):
+                        st.markdown(f"No hay un medidor por tren, así que la energía de cada viaje se estima con el PRMTE cada 15 min: a la energía de "
+                                    f"cada bloque se le resta la base sin trenes ({_ncl(_mps['base'], 0)} kWh) y el extra con servicio "
+                                    f"({_ncl(_mps['extra'], 0)} kWh: estaciones, iluminación y equipos), y lo que queda se reparte entre los trenes que "
+                                    "circulan en ese bloque según unidades × km recorridos en él (un doble cuenta 2 unidades). La hora de paso por cada "
+                                    "estación se interpola entre la hora de origen y la de fin del viaje. Así, la suma de todos los viajes "
+                                    f"({_ncl(_mps['e_viajes'] / 1000, 1)} MWh en el rango cargado) calza con la energía medida de los trenes. Los "
+                                    "movimientos sin pasajeros (vacíos, maniobras, pruebas SFE) no están en Carga, así que su energía queda en los "
+                                    "viajes del mismo bloque.")
+
+                    _buf_ps = BytesIO()
+                    with pd.ExcelWriter(_buf_ps, engine='openpyxl') as _w:
+                        _xv = _v[['Fecha', 'Vía', 'Sale', 'Trayecto', 'Tren', 'Tipo de tren', 'Unidades', 'Pasajeros', 'Carga máxima',
+                                  'Estación máxima', 'Ocupación', 'Pax-km', 'Km', 'kWh']].copy()
+                        _xv['Fecha'] = _xv['Fecha'].dt.strftime('%d-%m-%Y')
+                        _xv['Ocupación'] = _xv['Ocupación'].round(1); _xv['kWh'] = _xv['kWh'].round(1); _xv['Pax-km'] = _xv['Pax-km'].round(0)
+                        _xv.rename(columns={'Ocupación': 'Ocupación (%)'}).to_excel(_w, sheet_name='Viajes', index=False)
+                        _tab_s.to_excel(_w, sheet_name='Por servicio', index=False)
+                        if not _op.empty:
+                            _tab_o.to_excel(_w, sheet_name='Dobles que caben en 1', index=False)
+                    st.download_button("⬇️ Descargar en Excel (viajes, servicios y oportunidades)", data=_buf_ps.getvalue(),
+                                       file_name=f"pasajeros_por_servicio_{_jp.split()[0].lower()}.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_ps")
 
 if _seccion == _SECCIONES[6]:
     # ===== UMR: Servicios programados vs realizados, por día y tipo =====
@@ -5403,6 +5928,19 @@ if _seccion == _SECCIONES[8]:
                     _cols_trenes = list(_ptr.columns)
                     _master = _master.merge(_ptr.reset_index(), on='Fecha', how='left')
 
+        # --- Temperatura diaria de cada comuna (Open-Meteo) y de la línea (promedio ponderado por km) ---
+        _cols_clima, _ok_clima = [], True
+        _fe_m = _master['Fecha'].dropna()
+        if not _fe_m.empty:
+            with st.spinner("Bajando la temperatura de cada comuna…"):
+                _clc, _ok_clima = _clima_rango(_fe_m.min(), _fe_m.max())
+            if not _clc.empty:
+                _cla = _clima_ancho(_clc).merge(_clima_linea(_clc).rename(columns={
+                    'T_max_linea': 'T máx. línea [°C]', 'T_min_linea': 'T mín. línea [°C]', 'T_media_linea': 'T media línea [°C]'}), on='Fecha', how='left')
+                _cla['Fecha'] = _cla['Fecha'].astype(_master['Fecha'].dtype)
+                _cols_clima = [c for c in _cla.columns if c != 'Fecha']
+                _master = _master.merge(_cla, on='Fecha', how='left')
+
         # --- grupos de columnas disponibles ---
         # --- catálogo de cada dato por separado: nombre legible -> columna real ---
         _CATALOGO = {}
@@ -5441,6 +5979,8 @@ if _seccion == _SECCIONES[8]:
             _CATALOGO[f"📉 {_c}"] = _c
         for _c in _cols_trenes:
             _CATALOGO[f"🚆 {_c}"] = _c
+        for _c in _cols_clima:
+            _CATALOGO[f"🌡️ {_c}"] = _c
         _add_c("📅 Tipo de día", "Tipo Día")
         _add_c("📅 Feriado", "Nombre Feriado")
         # Barrido final: cualquier otro dato del período que no haya entrado arriba
@@ -5459,13 +5999,15 @@ if _seccion == _SECCIONES[8]:
         _opts_cat = list(_CATALOGO.keys())
         _GRUPOS = {'📊 Operación': '📊', '⚡ Energía': '⚡', '⚖️ Fuentes': '⚖️', '📈 Servicios (UMR)': '📈',
                    '📋 THDR': '📋', '📏 Km-Servicio (UMR)': '📏', '🚨 Incidentes': '🚨', '📉 Línea Base': '📉',
-                   '🚆 Trenes': '🚆', '👥 Pasajeros': '👥', '📅 Calendario': '📅', '➕ Otros': '➕'}
+                   '🚆 Trenes': '🚆', '👥 Pasajeros': '👥', '🌡️ Clima': '🌡️', '📅 Calendario': '📅', '➕ Otros': '➕'}
         _gsel = st.multiselect("Filtrar por tipo de dato (opcional)", list(_GRUPOS.keys()), default=[],
                                help="Deja vacío para ver todos los datos disponibles.")
         if _gsel:
             _pref = tuple(_GRUPOS[_g] for _g in _gsel)
             _opts_cat = [o for o in _opts_cat if o.startswith(_pref)]
         st.caption(f"{len(_CATALOGO)} datos disponibles en el período" + (f" · {len(_opts_cat)} en el filtro" if _gsel else ""))
+        if not _ok_clima:
+            st.caption("🌡️ La temperatura de cada comuna (Open-Meteo) no está disponible ahora; se vuelve a intentar en unos minutos.")
         if '_cb_cols' not in st.session_state:
             st.session_state['_cb_cols'] = _opts_cat[:4]
         else:
@@ -5920,72 +6462,7 @@ if _seccion == _SECCIONES[11]:
         st.info("Para este análisis falta **" + "** y **".join(_falta_bi) + "**. Cárgalo en la barra lateral y aprieta **🔄 Cargar / actualizar datos**.")
     else:
         from plotly.subplots import make_subplots
-        # Km de cada estación según el código de columna del export de Carga (PUE, BEL, ..., LIM)
-        _KM_PAX = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
-
-        def _integrar_15(_ini, _fin, _val, _n):
-            """Reparte un valor constante en [ini, fin) (minutos desde el inicio) en bloques de 15 min. Devuelve valor·minuto por bloque."""
-            _out = np.zeros(_n)
-            _ok = np.isfinite(_ini) & np.isfinite(_fin) & (_fin > _ini) & np.isfinite(_val) & (_val != 0)
-            _ini, _fin, _val = _ini[_ok], _fin[_ok], _val[_ok]
-            if not len(_ini):
-                return _out
-            _b0 = np.floor(_ini / 15).astype(int); _b1 = np.floor((_fin - 1e-9) / 15).astype(int)
-            for _j in range(int((_b1 - _b0).max()) + 1):
-                _b = _b0 + _j; _s = _b <= _b1
-                _w = np.clip(np.minimum(_fin[_s], (_b[_s] + 1) * 15.0) - np.maximum(_ini[_s], _b[_s] * 15.0), 0, None) * _val[_s]
-                _bb = _b[_s]; _in = (_bb >= 0) & (_bb < _n)
-                _out += np.bincount(_bb[_in], weights=_w[_in], minlength=_n)[:_n]
-            return _out
-
-        def _viajes_y_tramos(_df, _t_ini):
-            """Por viaje: inicio, fin y unidades (doble = 2). Por tramo entre estaciones: inicio, fin, pasajeros a bordo y km.
-            La hora de paso por cada estación se interpola entre Hora Origen y Hora Fin según el km recorrido."""
-            _cods = [c for c in _df.columns if c in _KM_PAX]
-            _cho = next((c for c in _df.columns if 'HORA' in str(c).upper() and 'ORIG' in str(c).upper()), None)
-            _chf = next((c for c in _df.columns if 'HORA' in str(c).upper() and 'FIN' in str(c).upper()), None)
-            if len(_cods) < 2 or _cho is None or _chf is None:
-                return None
-            _cm2 = next((c for c in _df.columns if 'MOTRIZ' in str(c).upper() and '2' in str(c)), None)
-            _fe = pd.to_datetime(_df['Fecha'], errors='coerce').dt.normalize()
-            _t0 = ((_fe + pd.to_timedelta(_df[_cho].astype(str).str.strip(), errors='coerce')) - _t_ini).dt.total_seconds().to_numpy() / 60
-            _t1 = ((_fe + pd.to_timedelta(_df[_chf].astype(str).str.strip(), errors='coerce')) - _t_ini).dt.total_seconds().to_numpy() / 60
-            _t1 = np.where(_t1 < _t0, _t1 + 1440, _t1)  # viaje que cruza la medianoche
-            _uni = np.where(pd.to_numeric(_df[_cm2], errors='coerce').fillna(0).to_numpy() > 0, 2.0, 1.0) if _cm2 else np.ones(len(_df))
-            _K = np.array([_KM_PAX[c] for c in _cods], dtype=float); _S = len(_cods)
-            _L = _df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
-            # Recorrido según la carga: origen = 1ª estación con pasajeros; destino = la siguiente a la última con pasajeros
-            _pos = _L > 0; _hay = _pos.any(axis=1)
-            _o = np.where(_hay, _pos.argmax(axis=1), 0)
-            _d = np.where(_hay, np.minimum(_S - _pos[:, ::-1].argmax(axis=1), _S - 1), _S - 1)
-            _span = np.abs(_K[_d] - _K[_o]); _span = np.where(_span > 0, _span, np.nan)
-            _T = _t0[:, None] + (_t1 - _t0)[:, None] * (np.abs(_K[None, :] - _K[_o][:, None]) / _span[:, None])
-            _k = np.arange(_S - 1)[None, :]
-            _ok = (_k >= _o[:, None]) & (_k < _d[:, None]) & _hay[:, None]
-            _km = np.broadcast_to(np.abs(np.diff(_K))[None, :], _ok.shape)
-            return (_t0, _t1, _uni), (_T[:, :-1][_ok], _T[:, 1:][_ok], _L[:, :-1][_ok], _km[_ok])
-
-        # --- Variables por bloque de 15 min ---
-        _fe_c = pd.to_datetime(pd.concat([d['Fecha'] for d in _c_bi]), errors='coerce').dt.normalize().dropna()
-        _t_ini = _fe_c.min(); _n_b = int(((_fe_c.max() - _t_ini).days + 2) * 96)
-        _acc = np.zeros((4, _n_b))
-        for _dc in _c_bi:
-            _r_vt = _viajes_y_tramos(_dc, _t_ini)
-            if _r_vt is None:
-                continue
-            (_t0, _t1, _un), (_si, _sf, _sl, _sk) = _r_vt
-            _dur = _sf - _si
-            _acc[0] += _integrar_15(_t0, _t1, np.ones_like(_t0), _n_b)
-            _acc[1] += _integrar_15(_t0, _t1, _un, _n_b)
-            _acc[2] += _integrar_15(_si, _sf, _sl, _n_b)
-            _acc[3] += _integrar_15(_si, _sf, np.divide(_sl * _sk, _dur, out=np.zeros_like(_dur), where=_dur > 0), _n_b)
-        _q = pd.DataFrame({'ts': _t_ini + pd.to_timedelta(np.arange(_n_b) * 15, unit='min'),
-                           'Trenes': _acc[0] / 15, 'Unidades': _acc[1] / 15, 'Pax a bordo': _acc[2] / 15, 'Pax-km': _acc[3]})
-        _pr = pd.DataFrame(all_prmte_full)
-        _pr['ts'] = pd.to_datetime(_pr['Fecha'], errors='coerce').dt.normalize() + pd.to_timedelta(_pr['15min'].astype(str) + ':00', errors='coerce')
-        _e15 = _pr.dropna(subset=['ts']).groupby('ts', as_index=False)['Consumo'].sum().rename(columns={'Consumo': 'kWh'})
-        _bi = _q.merge(_e15, on='ts', how='inner')
-        _bi = _bi[_bi['ts'].dt.date.isin(set(_fe_c.dt.date))].sort_values('ts').reset_index(drop=True)
+        _bi, _ = _bloques_15(_c_bi, all_prmte_full)
 
         if len(_bi) < 96 or not (_bi['Unidades'].std() > 0):
             st.warning("No hay suficientes bloques de 15 min con Carga de pasajeros y PRMTE a la vez para el filtro actual.")
@@ -6000,8 +6477,7 @@ if _seccion == _SECCIONES[11]:
             # --- Modelo por bloque: base sin trenes + extra en horario de servicio + kWh por unidad en circulación ---
             # La base es la mediana de los bloques sin trenes: así las noches con consumo extra (SFE, maniobras) quedan como diferencia.
             _U = _bi['Unidades'].to_numpy(float); _y = _bi['kWh'].to_numpy(float); _srv = _U > 0.05
-            _base = float(np.median(_y[~_srv])) if (~_srv).any() else 0.0
-            _bs, _bu = np.linalg.lstsq(np.column_stack([np.ones(int(_srv.sum())), _U[_srv]]), _y[_srv] - _base, rcond=None)[0]
+            _base, _bs, _bu = _modelo_15(_bi)
             _bi['kWh esperado'] = _base + np.where(_srv, _bs + _bu * _U, 0.0)
             _bi['Diferencia'] = _bi['kWh'] - _bi['kWh esperado']
             _sst = float(((_y - _y.mean()) ** 2).sum())
@@ -6658,7 +7134,7 @@ def _rca_sg(x, dec=1):
 
 def _firma_rca(anio):
     """Archivos (carpeta, nombre, tamaño) del año en las carpetas que usa el análisis."""
-    return tuple(sorted((_k, os.path.basename(_p), os.path.getsize(_p)) for _k in ('umr', 'seat', 'bill', 'viajes', 'oit', 'incid')
+    return tuple(sorted((_k, os.path.basename(_p), os.path.getsize(_p)) for _k in ('umr', 'seat', 'bill', 'viajes', 'oit', 'incid', 'carga_v1', 'carga_v2')
                         for _p in listar_archivos(DATA_DIRS[_k]) if _anio_de_nombre(os.path.basename(_p)) == anio))
 
 
@@ -6738,6 +7214,12 @@ def _datos_rca_anual(anio, firma):
             _v['_p'] = pd.to_numeric(_v[_cv], errors='coerce')
             _v = _v.dropna(subset=['Fecha']).drop_duplicates(subset=['Fecha'])
             d = d.drop(columns=['Pasajeros']).merge(_v[['Fecha', '_p']].rename(columns={'_p': 'Pasajeros'}), on='Fecha', how='left')
+    # Pasajeros-km por día de los export de Carga de pasajeros (pasajeros a bordo de cada tramo × km del tramo)
+    try:
+        _pkm = _paxkm_anual_lb(anio, _firma_carga_lb(anio))
+    except Exception:
+        _pkm = pd.Series(dtype=float)
+    d['PaxKm'] = d['Fecha'].map(_pkm) if len(_pkm) else np.nan
     # Incidentes PCC que afectan la operación: cantidad y minutos de impacto (solo meses con archivo; el resto, sin dato)
     _dinc = pd.DataFrame(_inc)
     if not _dinc.empty:
@@ -6827,11 +7309,13 @@ def _km_sfe_pruebas(all_tr):
 _RCA_JORNADAS = ['Laboral', 'Sábado', 'Domingo y festivo']
 _RCA_JOR_TXT = {'Laboral': ('día laboral', 'días laborales'), 'Sábado': ('sábado', 'sábados'),
                 'Domingo y festivo': ('domingo o festivo', 'domingos y festivos')}
-_RCA_PARTES = {'dia': ['km', 'km_sfe', 'pax', 'dob', 'inc', 'fer', 's1', 'c1'],
-               'noche': ['sfe_n', 'km_sfe', 'fer', 's1', 'c1']}
+_RCA_PARTES = {'dia': ['km', 'km_sfe', 'pax', 'pkm', 'dob', 'inc', 'calor', 'frio', 'fer', 's1', 'c1'],
+               'noche': ['sfe_n', 'km_sfe', 'frio', 'fer', 's1', 'c1']}
 _RCA_GRUPOS = [('Km recorridos', ('km',)), ('Km de trenes SFE en pruebas', ('km_sfe',)),
-               ('Pruebas nocturnas de trenes SFE', ('sfe_n',)), ('Pasajeros', ('pax',)), ('Trenes dobles', ('dob',)),
-               ('Incidentes', ('inc',)), ('Feriado', ('fer',)), ('Época del año', ('s1', 'c1'))]
+               ('Pruebas nocturnas de trenes SFE', ('sfe_n',)), ('Pasajeros', ('pax',)),
+               ('Pasajeros-km', ('pkm',)), ('Trenes dobles', ('dob',)),
+               ('Incidentes', ('inc',)), ('Calor', ('calor',)), ('Frío', ('frio',)), ('Feriado', ('fer',)),
+               ('Época del año', ('s1', 'c1'))]
 _RCA_DIAS = ['lun', 'mar', 'mié', 'jue', 'vie', 'sáb', 'dom']
 _RCA_MESES_L = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre',
                 'noviembre', 'diciembre']
@@ -6856,6 +7340,7 @@ def _rca_x(d):
     x['km'] = pd.to_numeric(d['Odómetro [km]'], errors='coerce')
     x['km_sfe'] = pd.to_numeric(d['Km_SFE'], errors='coerce')
     x['pax'] = pd.to_numeric(d['Pasajeros'], errors='coerce')
+    x['pkm'] = pd.to_numeric(d['PaxKm'], errors='coerce') if 'PaxKm' in d.columns else np.nan
     _sim, _dob = pd.to_numeric(d['Serv_simples'], errors='coerce'), pd.to_numeric(d['Serv_dobles'], errors='coerce')
     _ts = _sim + _dob
     x['dob'] = _dob / _ts.where(_ts > 0) * 100
@@ -6864,7 +7349,25 @@ def _rca_x(d):
     _ang = 2 * np.pi * d['Fecha'].dt.dayofyear / 365.25
     x['s1'] = np.sin(_ang); x['c1'] = np.cos(_ang)
     x['sfe_n'] = pd.to_numeric(d['Pruebas_SFE_n'], errors='coerce').where(d['SFE_dato'].astype(bool))
+    # Temperatura de la línea (Open-Meteo): grados de máxima sobre _T_CALOR y grados de mínima bajo _T_FRIO
+    _tx = pd.to_numeric(d['T_max_linea'], errors='coerce') if 'T_max_linea' in d.columns else pd.Series(np.nan, index=d.index)
+    _tn = pd.to_numeric(d['T_min_linea'], errors='coerce') if 'T_min_linea' in d.columns else pd.Series(np.nan, index=d.index)
+    x['calor'] = (_tx - _T_CALOR).clip(lower=0)
+    x['frio'] = (_T_FRIO - _tn).clip(lower=0)
     return x
+
+
+def _rca_con_clima(d, cl):
+    """Agrega a la tabla diaria la temperatura de la línea (máxima, mínima y media; NaN los días sin dato)."""
+    if d is None or d.empty or 'Fecha' not in d.columns:
+        return d
+    _tc = ['T_max_linea', 'T_min_linea', 'T_media_linea']
+    d = d.drop(columns=[c for c in _tc if c in d.columns])
+    if cl is None or cl.empty:
+        return d.assign(**{c: np.nan for c in _tc})
+    _cl = cl.assign(Fecha=pd.to_datetime(cl['Fecha']).dt.normalize().astype('datetime64[ns]')).drop_duplicates('Fecha').set_index('Fecha')
+    _k = pd.to_datetime(d['Fecha']).dt.normalize().astype('datetime64[ns]')
+    return d.assign(**{c: (_k.map(_cl[c]).astype(float) if c in _cl.columns else np.nan) for c in _tc})
 
 
 def _rca_ols(y, X):
@@ -6879,7 +7382,7 @@ def _rca_ols(y, X):
 
 # Variables que físicamente solo pueden subir el consumo: si la regresión les da efecto negativo, es un cruce con otra
 # variable (no un efecto real) y quedan fuera como «sin efecto medible».
-_RCA_SIGNO = {'km': 1, 'km_sfe': 1, 'sfe_n': 1, 'pax': 1, 'dob': 1}
+_RCA_SIGNO = {'km': 1, 'km_sfe': 1, 'sfe_n': 1, 'pax': 1, 'pkm': 1, 'dob': 1, 'calor': 1, 'frio': 1}
 
 
 def _rca_ajuste(y, X, candidatas, fijas=()):
@@ -6985,19 +7488,20 @@ def _rca_explicar(d):
 
 
 @st.cache_data(show_spinner=False, max_entries=4)
-def _rca_modelo(anio, firma, firma_ant):
+def _rca_modelo(anio, firma, firma_ant, clima_lin=None):
     """Modelo diario del año elegido, uno por tipo de jornada. Si un tipo todavía tiene pocos días con datos completos
-    en el año (menos de 40), ese tipo se completa con sus días del año anterior hasta juntar 12 meses."""
+    en el año (menos de 40), ese tipo se completa con sus días del año anterior hasta juntar 12 meses. clima_lin es la
+    temperatura de la línea por día (_clima_linea), o None si no hay."""
     _D = _datos_rca_anual(anio, firma)
     d = _D.get('dias', pd.DataFrame())
     if d.empty:
         return None
-    d = d.assign(Jornada=_rca_jornada(d['Tipo Día']))
+    d = _rca_con_clima(d.assign(Jornada=_rca_jornada(d['Tipo Día'])), clima_lin)
     _val = _rca_validos(d)
     _fin = _val['Fecha'].max() if len(_val) else d['Fecha'].max()
     da = _datos_rca_anual(anio - 1, firma_ant).get('dias', pd.DataFrame()) if firma_ant else pd.DataFrame()
     if not da.empty:
-        da = da.assign(Jornada=_rca_jornada(da['Tipo Día']))
+        da = _rca_con_clima(da.assign(Jornada=_rca_jornada(da['Tipo Día'])), clima_lin)
         da = da[da['Fecha'] > _fin - pd.Timedelta(days=365)]
     out = {}
     for j in _RCA_JORNADAS:
@@ -7037,10 +7541,16 @@ def _rca_efecto_unitario(R, g):
         return f"{_rca_sg(b['sfe_n'] / 1000, 2)} MWh por cada tren SFE en prueba esa noche"
     if g == 'Pasajeros' and 'pax' in b:
         return f"{_rca_sg(b['pax'] * 1000, 0)} kWh por cada 1.000 pasajeros"
+    if g == 'Pasajeros-km' and 'pkm' in b:
+        return f"{_rca_sg(b['pkm'] * 1000, 1)} kWh por cada 1.000 pasajeros-km"
     if g == 'Trenes dobles' and 'dob' in b:
         return f"{_rca_sg(b['dob'], 0)} kWh por punto % de servicios en doble"
     if g == 'Incidentes' and 'inc' in b:
         return f"{_rca_sg(b['inc'], 2)} kWh por minuto de impacto"
+    if g == 'Calor' and 'calor' in b:
+        return f"{_rca_sg(b['calor'], 0)} kWh por cada grado de máxima sobre {_t_txt(_T_CALOR)}\u00a0°C"
+    if g == 'Frío' and 'frio' in b:
+        return f"{_rca_sg(b['frio'], 0)} kWh por cada grado de mínima bajo {_t_txt(_T_FRIO)}\u00a0°C"
     if g == 'Feriado' and 'fer' in b:
         return f"{_rca_sg(b['fer'] / 1000, 2)} MWh en un feriado (frente a un domingo)"
     if g == 'Época del año' and 's1' in b:
@@ -7073,11 +7583,19 @@ def _rca_valor_txt(R, g, i):
         return _hoy, _n(_rca_tipico(R, 'sfe_n'), 1, ' trenes por noche', '—')
     if g == 'Pasajeros':
         return _n(x.at[i, 'pax']), _n(_rca_tipico(R, 'pax'), 0, '', '—')
+    if g == 'Pasajeros-km':
+        return _n(x.at[i, 'pkm']), _n(_rca_tipico(R, 'pkm'), 0, '', '—')
     if g == 'Trenes dobles':
         return _n(x.at[i, 'dob'], 0, ' % de servicios'), _n(_rca_tipico(R, 'dob'), 0, ' %', '—')
     if g == 'Incidentes':
         _hoy = 'sin dato' if pd.isna(x.at[i, 'inc']) else f"{_ncl(v.at[i, 'Incid_n'], 0)} ({_ncl(x.at[i, 'inc'], 0)} min de impacto)"
         return _hoy, _n(_rca_tipico(R, 'inc'), 0, ' min', '—')
+    if g in ('Calor', 'Frío'):
+        _ct, _et = ('T_max_linea', 'máx.') if g == 'Calor' else ('T_min_linea', 'mín.')
+        if _ct not in v.columns:
+            return 'sin dato', '—'
+        _t, _tt = v.at[i, _ct], v[_ct].mean()
+        return (f"{_et} {_t_txt(_t, 1)}\u00a0°C" if pd.notna(_t) else 'sin dato'), (f"{_et} {_t_txt(_tt, 1)}\u00a0°C" if pd.notna(_tt) else '—')
     if g == 'Feriado':
         _fer = str(v.at[i, 'Nombre Feriado'] or '').strip()
         _hoy = f"Sí ({_fer})" if bool(_rca_es_feriado([_fer]).iloc[0]) else 'No'
@@ -7090,7 +7608,8 @@ def _rca_valor_txt(R, g, i):
 
 # Efecto por unidad en corto, para comparar los tipos de jornada (la unidad va en el nombre de la fila)
 _RCA_UNIDAD = {'Km recorridos': 'kWh por km', 'Km de trenes SFE en pruebas': 'kWh por km', 'Pruebas nocturnas de trenes SFE': 'MWh por tren',
-               'Pasajeros': 'kWh por cada 1.000', 'Trenes dobles': 'kWh por punto %', 'Incidentes': 'kWh por minuto de impacto',
+               'Pasajeros': 'kWh por cada 1.000', 'Pasajeros-km': 'kWh por cada 1.000', 'Trenes dobles': 'kWh por punto %', 'Incidentes': 'kWh por minuto de impacto',
+               'Calor': f'kWh por grado sobre {_t_txt(_T_CALOR)}\u00a0°C', 'Frío': f'kWh por grado bajo {_t_txt(_T_FRIO)}\u00a0°C',
                'Feriado': 'MWh frente a un domingo', 'Época del año': 'MWh de variación en el año'}
 
 
@@ -7107,8 +7626,8 @@ def _rca_coef_corto(R, g, cs):
         _f = b.get('s1', 0.0) * np.sin(_a) + b.get('c1', 0.0) * np.cos(_a)
         return _ncl((_f.max() - _f.min()) / 1000, 2)
     _c = cs[0]
-    _k = {'pax': 1000, 'sfe_n': 0.001, 'fer': 0.001}.get(_c, 1)
-    return _rca_sg(b[_c] * _k, 0 if _c in ('pax', 'dob') else 2)
+    _k = {'pax': 1000, 'pkm': 1000, 'sfe_n': 0.001, 'fer': 0.001}.get(_c, 1)
+    return _rca_sg(b[_c] * _k, 0 if _c in ('pax', 'dob', 'calor', 'frio') else (1 if _c == 'pkm' else 2))
 
 
 def _rca_pasos(P, PR, hay_oit, anio):
@@ -7138,7 +7657,8 @@ if _seccion == _SECCIONES[13]:
     st.markdown("### 🧭 Causa raíz del consumo de energía")
     st.caption("Explica por qué cada día consume lo que consume y qué cambió entre dos períodos, siempre por tipo de jornada (laboral, "
                "sábado, domingo y festivo), con todas las variables que hay en data/ de GitHub: UMR (km, trenes dobles y trenes SFE), SEAT, "
-               "Facturación/PRMTE, Pasajeros por contrato, Consulta OIT e Incidentes PCC. No depende del rango cargado ni de los filtros "
+               "Facturación/PRMTE, Pasajeros por contrato, Carga de pasajeros, Consulta OIT e Incidentes PCC, más la temperatura de cada "
+               "comuna (Open-Meteo). No depende del rango cargado ni de los filtros "
                "de arriba. La primera vez tarda 1 a 2 minutos.")
     _anios_u = {_anio_de_nombre(os.path.basename(_p)) for _p in listar_archivos(DATA_DIRS['umr'])}
     _anios_b = {_anio_de_nombre(os.path.basename(_p)) for _p in listar_archivos(DATA_DIRS['bill'])}
@@ -7154,10 +7674,13 @@ if _seccion == _SECCIONES[13]:
         with st.spinner("Calculando con los archivos del año…"):
             _D = _datos_rca_anual(_anio_r, _firma_rca(_anio_r))
         _dias = _D.get('dias', pd.DataFrame())
+        _fa = _firma_rca(_anio_r - 1) if (_anio_r - 1) in _anios_rca else ()
+        with st.spinner("Bajando la temperatura de cada comuna…"):
+            _clima_c, _clima_ok = _clima_rango(pd.Timestamp(_anio_r - 1, 1, 1), pd.Timestamp(_anio_r, 12, 31))
+        _clima_l = _clima_linea(_clima_c)
         if _vista == "📅 Por día":
-            _fa = _firma_rca(_anio_r - 1) if (_anio_r - 1) in _anios_rca else ()
             with st.spinner("Armando el modelo del año…"):
-                _M = _rca_modelo(_anio_r, _firma_rca(_anio_r), _fa) if not _dias.empty else None
+                _M = _rca_modelo(_anio_r, _firma_rca(_anio_r), _fa, _clima_l) if not _dias.empty else None
             _RJ = _M['jornadas'].get(_jor) if _M else None
             if _RJ is None:
                 st.info(f"No hay suficientes {_jn} con energía, km del UMR y PRMTE completo (se necesitan al menos 30) para explicar "
@@ -7264,6 +7787,15 @@ if _seccion == _SECCIONES[13]:
                             f"pico de potencia {_ncl(_v.at[_i, 'Pico_kW'], 0)} kW."]
                     if pd.notna(_v.at[_i, 'Serv_simples']):
                         _ctx.append(f"Servicios realizados (UMR): {_ncl(_v.at[_i, 'Serv_simples'], 0)} simples y {_ncl(_v.at[_i, 'Serv_dobles'], 0)} dobles.")
+                    _cd = _clima_c[_clima_c['Fecha'] == _fs].set_index('Comuna') if not _clima_c.empty else _clima_c
+                    if _cd.empty:
+                        _ctx.append("Temperatura: " + ("sin dato de Open-Meteo para ese día." if _clima_ok else
+                                                       "Open-Meteo no respondió; se vuelve a intentar en unos minutos."))
+                    else:
+                        _ctx.append("Temperatura mínima–máxima (Open-Meteo): " + " · ".join(
+                            f"{c} {_t_txt(_cd.at[c, 'T_min'])}–{_t_txt(_cd.at[c, 'T_max'])}\u00a0°C" for c in _COMUNAS_LINEA if c in _cd.index)
+                            + (f"; línea, ponderada por km: {_t_txt(_v.at[_i, 'T_min_linea'], 1)}–{_t_txt(_v.at[_i, 'T_max_linea'], 1)}\u00a0°C."
+                               if pd.notna(_v.at[_i, 'T_max_linea']) else "."))
                     if _v.at[_i, 'Km_SFE'] > 0:
                         _ctx.append(f"Trenes SFE en pruebas: {_ncl(_v.at[_i, 'Km_SFE'], 0)} km.")
                     _oi = _D.get('oit', pd.DataFrame())
@@ -7312,6 +7844,7 @@ if _seccion == _SECCIONES[13]:
                         st.caption(f"Ningún {_j1} de {_anio_r} queda fuera de lo normal (±{_ncl(_lim / 1000, 1)} MWh sin explicar).")
                     else:
                         _ta = []
+                        _tx95, _tn05 = _v['T_max_linea'].quantile(0.95), _v['T_min_linea'].quantile(0.05)
                         for _j in _an.reindex(_an['Sin_explicar'].abs().sort_values(ascending=False).index).index[:20]:
                             _pis = []
                             if pd.notna(_v.at[_j, 'Incid_min']) and _v.at[_j, 'Incid_min'] > 0:
@@ -7324,6 +7857,10 @@ if _seccion == _SECCIONES[13]:
                                 _pis.append(f"energía del {_v.at[_j, 'Fuente']}")
                             if bool(_rca_es_feriado([_v.at[_j, 'Nombre Feriado']]).iloc[0]):
                                 _pis.append(str(_v.at[_j, 'Nombre Feriado']))
+                            if pd.notna(_v.at[_j, 'T_max_linea']) and _v.at[_j, 'T_max_linea'] >= _tx95:
+                                _pis.append(f"mucho calor (máx. {_t_txt(_v.at[_j, 'T_max_linea'])}\u00a0°C)")
+                            if pd.notna(_v.at[_j, 'T_min_linea']) and _v.at[_j, 'T_min_linea'] <= _tn05:
+                                _pis.append(f"mucho frío (mín. {_t_txt(_v.at[_j, 'T_min_linea'])}\u00a0°C)")
                             _ta.append({'Día': _rca_fecha_txt(_v.at[_j, 'Fecha'], anio=False), 'Consumo (MWh)': _ncl(_v.at[_j, 'E_Total'] / 1000, 1),
                                         'Esperado (MWh)': _ncl(_v.at[_j, 'Esperado'] / 1000, 1), 'Sin explicar (MWh)': _rca_sg(_v.at[_j, 'Sin_explicar'] / 1000, 2),
                                         'Sobre todo': 'de noche' if abs(_v.at[_j, 'Resto_noche']) > abs(_v.at[_j, 'Resto_dia']) else 'de día',
@@ -7372,7 +7909,10 @@ if _seccion == _SECCIONES[13]:
                                 "el resultado. El aporte de cada variable es su efecto por unidad × (valor del día − valor típico del mismo tipo de "
                                 "jornada); si ese día falta el dato, se toma el típico. Lo sin explicar es la diferencia entre el consumo real y el "
                                 "esperado. Los feriados van con los domingos (como en el resto de la app); la variable «Feriado» separa un feriado "
-                                "de un domingo.")
+                                "de un domingo. La temperatura es la de cada comuna (Open-Meteo), promediada según los km de línea en cada una ("
+                                + ", ".join(f"{c} {_ncl(p * 100, 0)} %" for c, p in _peso_comunas().items())
+                                + f"); entra como grados de máxima sobre {_t_txt(_T_CALOR)}\u00a0°C («Calor»: aire acondicionado) y grados de "
+                                f"mínima bajo {_t_txt(_T_FRIO)}\u00a0°C («Frío»: calefacción).")
 
                 # --- Descarga ---
                 _buf_dia = BytesIO()
@@ -7390,10 +7930,12 @@ if _seccion == _SECCIONES[13]:
                                             'Sin explicar de día (kWh)': _vx['Resto_dia'].round(0), 'Sin explicar de noche (kWh)': _vx['Resto_noche'].round(0)})
                         for g, _ in _RCA_GRUPOS:
                             _xd[f'Aporte {g} (kWh)'] = _Rx['C'].loc[_vx.index, g].round(0)
-                        _partes_x.append(pd.concat([_xd, _vx[['Odómetro [km]', 'Km_SFE', 'Pasajeros', 'Serv_simples', 'Serv_dobles', 'Incid_n',
-                                                              'Incid_min', 'Pruebas_SFE_n', 'Nombre Feriado', 'Fuente', 'Noche_kWh', 'Pico_kW']]], axis=1))
+                        _partes_x.append(pd.concat([_xd, _vx[['Odómetro [km]', 'Km_SFE', 'Pasajeros', 'PaxKm', 'Serv_simples', 'Serv_dobles', 'Incid_n',
+                                                              'Incid_min', 'Pruebas_SFE_n', 'Nombre Feriado', 'Fuente', 'Noche_kWh', 'Pico_kW',
+                                                              'T_max_linea', 'T_min_linea']]], axis=1))
                     if _partes_x:
-                        _xall = pd.concat(_partes_x).sort_values('Fecha')
+                        _xall = pd.concat(_partes_x).sort_values('Fecha').rename(columns={'T_max_linea': 'T máx. línea (°C)', 'T_min_linea': 'T mín. línea (°C)'})
+                        _xall = _xall.merge(_clima_ancho(_clima_c, ('T_max', 'T_min'), '(°C)'), on='Fecha', how='left')
                         _xall['Fecha'] = _xall['Fecha'].dt.strftime('%d-%m-%Y')
                         _xall.to_excel(_w, sheet_name='Diario', index=False)
                     _tres.to_excel(_w, sheet_name='Por tipo de jornada', index=False)
@@ -7409,7 +7951,7 @@ if _seccion == _SECCIONES[13]:
             _cp2, _cp3 = st.columns(2)
             with st.spinner("Calculando con los archivos del año anterior…"):
                 _R = _datos_rca_anual(_anio_r - 1, _firma_rca(_anio_r - 1)) if (_anio_r - 1) in _anios_rca else {}
-            _dias = _D.get('dias', pd.DataFrame())
+            _dias = _rca_con_clima(_D.get('dias', pd.DataFrame()), _clima_l)
             _val = _rca_validos(_dias) if not _dias.empty else _dias
             _meses_ok = sorted(_val['Fecha'].dt.month.unique().tolist()) if not _val.empty else []
             if len(_meses_ok) < 2:
@@ -7424,7 +7966,7 @@ if _seccion == _SECCIONES[13]:
                 _txt_b = _sel_b[0] if _sel_b[0] == _sel_b[1] else f"{_sel_b[0]}–{_sel_b[1]}"
                 _txt_a = _sel_a[0] if _sel_a[0] == _sel_a[1] else f"{_sel_a[0]}–{_sel_a[1]}"
                 _hay_oit = bool(_D.get('oit_meses'))
-                _dR0 = _R.get('dias', pd.DataFrame()) if _R else pd.DataFrame()
+                _dR0 = _rca_con_clima(_R.get('dias', pd.DataFrame()), _clima_l) if _R else pd.DataFrame()
                 _jsel = lambda df, j: df[_rca_jornada(df['Tipo Día']) == j] if not df.empty else df
                 _dias_j, _dR_j = _jsel(_dias, _jor), _jsel(_dR0, _jor)
                 if not set(_mb) & set(_ma):
@@ -7573,6 +8115,28 @@ if _seccion == _SECCIONES[13]:
                             _txt_r = f"; {_ncl(abs(_p1 / _pr1 - 1) * 100, 0)} % {'más' if _p1 >= _pr1 else 'menos'} que en {_ra} ({_meses_p})"
                         _fil.append({'Causa': 'Pasajeros', 'Qué muestran los datos': f"{_ncl(_p0, 0)} → {_ncl(_p1, 0)} pasajeros por día{_txt_r}.",
                                      'Aporte (MWh/día)': 'Dentro de km', 'Conclusión': ('Sube la demanda' if _p1 > _p0 else 'Baja la demanda') if abs(_p1 / _p0 - 1) >= 0.05 else 'Sin cambio relevante'})
+                    if _b['T_max_linea'].notna().mean() >= 0.6 and _a['T_max_linea'].notna().mean() >= 0.6:
+                        _ev_t = (f"Máxima promedio de la línea: {_t_txt(_b['T_max_linea'].mean(), 1)} → {_t_txt(_a['T_max_linea'].mean(), 1)}\u00a0°C; "
+                                 f"mínima: {_t_txt(_b['T_min_linea'].mean(), 1)} → {_t_txt(_a['T_min_linea'].mean(), 1)}\u00a0°C")
+                        if _PR is not None and _PR['a']['T_max_linea'].notna().any():
+                            _ev_t += (f"; en {_txt_a} {_ra}: máxima {_t_txt(_PR['a']['T_max_linea'].mean(), 1)} y mínima "
+                                      f"{_t_txt(_PR['a']['T_min_linea'].mean(), 1)}\u00a0°C")
+                        # Efecto estimado con el modelo diario de este tipo de jornada (grados de calor y de frío de cada período)
+                        _Mt = _rca_modelo(_anio_r, _firma_rca(_anio_r), _fa, _clima_l)
+                        _Rt = _Mt['jornadas'].get(_jor) if _Mt else None
+                        _bt = _rca_coefs(_Rt) if _Rt is not None else {}
+                        _grad = lambda df: {'calor': (df['T_max_linea'] - _T_CALOR).clip(lower=0).mean(),
+                                            'frio': (_T_FRIO - df['T_min_linea']).clip(lower=0).mean()}
+                        _g0, _g1 = _grad(_b), _grad(_a)
+                        _efs = [_bt[c] * (_g1[c] - _g0[c]) for c in ('calor', 'frio') if c in _bt]
+                        if _efs:
+                            _et = float(sum(_efs))
+                            _ap_t = f"{_rca_sg(_et / 1000, 2)}, dentro de kWh por km y noches"
+                            _con_t = 'Sin efecto' if abs(_et) < 50 else ('Explica parte del cambio' if _et * _dE > 0 else 'Compensa en parte')
+                            _ev_t += f". Según el modelo diario de los {_jn}, la temperatura explica {_rca_sg(_et / 1000, 2)} MWh/día del cambio"
+                        else:
+                            _ap_t, _con_t = ('≈ 0', 'Sin efecto medible') if _Rt is not None else ('—', 'Sin modelo diario')
+                        _fil.append({'Causa': 'Temperatura', 'Qué muestran los datos': _ev_t + ".", 'Aporte (MWh/día)': _ap_t, 'Conclusión': _con_t})
                     _e12b, _e12a = _b['E_12'].mean(), _a['E_12'].mean()
                     _txt_r = (f"; en {_txt_a} {_ra}: {_ncl(_PR['a']['E_12'].mean() / 1000, 2)}" if _PR is not None else "")
                     _fil.append({'Causa': 'Auxiliares 12 kV', 'Qué muestran los datos': f"{_ncl(_e12b / 1000, 2)} → {_ncl(_e12a / 1000, 2)} MWh/día{_txt_r}.",
@@ -7618,6 +8182,8 @@ if _seccion == _SECCIONES[13]:
                         _avisos.append(f"Sin Consulta OIT de {_anio_r}: no se pueden separar las pruebas SFE.")
                     if _PR is None:
                         _avisos.append(f"Sin datos de {_ra} para comparar con lo normal de la estación.")
+                    if not _clima_ok:
+                        _avisos.append("Sin temperatura: Open-Meteo no respondió (se vuelve a intentar en unos minutos).")
                     with st.expander(f"Datos que faltan o se excluyeron ({len(_avisos)})" if _avisos else "Datos: todo completo", expanded=False):
                         for _x in _avisos:
                             st.markdown(f"- {_x}")
