@@ -2659,21 +2659,6 @@ def _clima_ancho(clima, valores=('T_max', 'T_min', 'T_media'), unidad='[°C]'):
     return _pv.reset_index()
 
 
-# Pasajeros-km por día de la Carga de pasajeros (la usan 📊 Resumen, 📏 Línea base y la causa raíz)
-def _paxkm_por_dia(df):
-    """Pax-km por día de un export de Carga: en cada viaje, pasajeros a bordo de cada tramo × km del tramo."""
-    if df is None or getattr(df, 'empty', True) or 'Fecha' not in df.columns:
-        return pd.Series(dtype=float)
-    _kmc = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
-    _cods = [c for c in df.columns if c in _kmc]
-    if len(_cods) < 2:
-        return pd.Series(dtype=float)
-    _L = df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
-    _km = np.abs(np.diff(np.array([_kmc[c] for c in _cods], dtype=float)))
-    _f = pd.to_datetime(df['Fecha'], errors='coerce').dt.normalize()
-    return pd.Series((_L[:, :-1] * _km[None, :]).sum(axis=1), index=_f.values).groupby(level=0).sum()
-
-
 # --- 6. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
     st.header("📅 Filtro Global")
@@ -3523,11 +3508,11 @@ if _seccion == _SECCIONES[0]:
                     _pax_d = df_resumen[['Fecha', 'PAX']].rename(columns={'PAX': 'Pasajeros'})
                 _pax_d = _pax_d.assign(Fecha=pd.to_datetime(_pax_d['Fecha']).dt.normalize(), Pasajeros=pd.to_numeric(_pax_d['Pasajeros'], errors='coerce')).groupby('Fecha', as_index=False)['Pasajeros'].sum()
                 # E_Total y E_Tr ya vienen con la jerarquía por día (Factura si hay; si no PRMTE; si no SEAT) y 'Fuente' dice cuál se usó.
-                _en_px = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(),
+                _de_px = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(),
                                             E_Total=pd.to_numeric(df_resumen['E_Total'], errors='coerce'), E_Tr=pd.to_numeric(df_resumen['E_Tr'], errors='coerce'))
                           .groupby('Fecha', as_index=False).agg({'E_Total': 'sum', 'E_Tr': 'sum', 'Fuente': 'first'})
                           .rename(columns={'E_Total': 'Total E', 'E_Tr': 'Tracción'}))
-                _de_px = _en_px.merge(_pax_d, on='Fecha', how='inner')
+                _de_px = _de_px.merge(_pax_d, on='Fecha', how='inner')
                 # Solo días con pasajeros Y energía: si falta uno de los dos, el cociente queda distorsionado.
                 _de_px = _de_px[(_de_px['Pasajeros'] > 0) & (_de_px['Total E'] > 0)].sort_values('Fecha')
                 if _de_px.empty:
@@ -3535,8 +3520,8 @@ if _seccion == _SECCIONES[0]:
                 else:
                     _pax_t = float(_de_px['Pasajeros'].sum()); _e_px_t = float(_de_px['Total E'].sum()); _tr_px_t = float(_de_px['Tracción'].sum())
                     _mc = st.columns(4)
-                    _mc[0].metric("Con energía total", _ncl(_pax_t / _e_px_t, 2))
-                    _mc[1].metric("Con tracción", _ncl(_pax_t / _tr_px_t, 2) if _tr_px_t > 0 else "—")
+                    _mc[0].metric("Pax/kWh total", _ncl(_pax_t / _e_px_t, 2))
+                    _mc[1].metric("Pax/kWh tracción", _ncl(_pax_t / _tr_px_t, 2) if _tr_px_t > 0 else "—")
                     _mc[2].metric("Pasajeros", _fmt_int(_pax_t))
                     _mc[3].metric("Energía total (kWh)", _fmt_int(_e_px_t))
                     _de_px['Pax/kWh'] = _de_px['Pasajeros'] / _de_px['Total E']
@@ -3555,47 +3540,62 @@ if _seccion == _SECCIONES[0]:
                                + ("Solo cuenta 1 día con pasajeros y energía" if _n_px == 1 else f"Solo cuentan los {_n_px} días con pasajeros y energía")
                                + "; el valor global divide los totales del período (no promedia días).")
 
-                # --- 9. Pasajeros-km por kWh (Pax-km/kWh). Pax-km de la Carga de pasajeros: pasajeros a bordo de cada tramo × km del tramo ---
-                st.markdown("**Pasajeros-km por kWh (Pax-km/kWh)**")
-                _pk_r = pd.Series(dtype=float)
-                for _dc in [d for d in [df_carga_v1, df_carga_v2] if d is not None and not d.empty and 'Fecha' in d.columns]:
-                    _s_pk = _paxkm_por_dia(_dc)
-                    _pk_r = _pk_r.add(_s_pk, fill_value=0) if len(_pk_r) else _s_pk
-                _de_pk = _en_px.merge(_pk_r.rename('Pax-km').rename_axis('Fecha').reset_index(), on='Fecha', how='inner') if len(_pk_r) else pd.DataFrame()
-                if not _de_pk.empty:
-                    _pax_c = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(), PAX=pd.to_numeric(df_resumen['PAX'], errors='coerce'))
-                              .groupby('Fecha')['PAX'].sum()) if 'PAX' in df_resumen.columns else pd.Series(dtype=float)
-                    _de_pk['Pasajeros'] = pd.to_numeric(_de_pk['Fecha'].map(_pax_c), errors='coerce')
-                    # Solo días con pasajeros-km Y energía (si falta uno de los dos, el cociente queda distorsionado)
-                    _de_pk = _de_pk[(_de_pk['Pax-km'] > 0) & (_de_pk['Total E'] > 0)].sort_values('Fecha')
-                if not len(_pk_r):
-                    st.info("Sin pasajeros-km: carga **Carga de pasajeros** (V1 y V2) en la barra lateral.")
-                elif _de_pk.empty:
-                    st.info("No hay días con pasajeros-km y energía a la vez para el filtro actual.")
+                # --- 9. Pasajeros por km (IPK) y energía por km: km total con energía total; tren-km con energía de tracción ---
+                st.markdown("**Pasajeros por km (IPK) y energía por km**")
+                _km_d = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(),
+                                           Odo=pd.to_numeric(df_resumen['Odómetro [km]'], errors='coerce'),
+                                           TK=pd.to_numeric(df_resumen['Tren-Km [km]'], errors='coerce'),
+                                           Tipo=df_resumen['Tipo Día'] if 'Tipo Día' in df_resumen.columns else 'L')
+                         .groupby('Fecha', as_index=False).agg({'Odo': 'sum', 'TK': 'sum', 'Tipo': 'first'}))
+                _de_ipk = _de_px.merge(_km_d, on='Fecha', how='inner') if not _de_px.empty else pd.DataFrame()
+                if not _de_ipk.empty:
+                    # Solo días con pasajeros, km del UMR y energía (los km negativos son lecturas erróneas)
+                    _de_ipk = _de_ipk[(_de_ipk['Odo'] > 0) & (_de_ipk['TK'] > 0) & (_de_ipk['Tracción'] > 0)].sort_values('Fecha')
+                if _de_ipk.empty:
+                    st.info(f"No hay días con pasajeros ({_fuente_p}), km del UMR y energía a la vez para el filtro actual.")
                 else:
-                    _pk_t, _e_pk_t, _tr_pk_t = float(_de_pk['Pax-km'].sum()), float(_de_pk['Total E'].sum()), float(_de_pk['Tracción'].sum())
-                    _px_pk_t = float(_de_pk['Pasajeros'].sum())
-                    # Etiquetas cortas (el indicador va en el título de arriba) para que no se corten en el iPad horizontal
+                    _ipk = lambda d: {'Pax/km total': d['Pasajeros'].sum() / d['Odo'].sum(), 'kWh/km total': d['Total E'].sum() / d['Odo'].sum(),
+                                      'Pax/tren-km': d['Pasajeros'].sum() / d['TK'].sum(), 'kWh/tren-km': d['Tracción'].sum() / d['TK'].sum()}
+                    _it = _ipk(_de_ipk)
                     _mk = st.columns(4)
-                    _mk[0].metric("Con energía total", _ncl(_pk_t / _e_pk_t, 2))
-                    _mk[1].metric("Con tracción", _ncl(_pk_t / _tr_pk_t, 2) if _tr_pk_t > 0 else "—")
-                    _mk[2].metric("Pax-km (millones)", _ncl(_pk_t / 1e6, 2))
-                    _mk[3].metric("Km por pasajero", f"{_ncl(_pk_t / _px_pk_t, 1)} km" if _px_pk_t > 0 else "—",
-                                  help="Viaje promedio de cada pasajero: pasajeros-km ÷ pasajeros a bordo de la Carga de pasajeros, en los mismos días.")
-                    _de_pk['Pax-km/kWh'] = _de_pk['Pax-km'] / _de_pk['Total E']
-                    _de_pk_g = _agr_mes(_de_pk, ['Pax-km', 'Total E'], _ratios={'Pax-km/kWh': ('Pax-km', 'Total E', 1)})
-                    fig_pk_kwh = px.bar(_de_pk_g, x='Fecha', y='Pax-km/kWh', custom_data=['Pax-km', 'Total E'],
-                                        color_discrete_sequence=['#005195'], title="Pasajeros-km por kWh — Carga de pasajeros")
-                    fig_pk_kwh.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11),
-                                             hovertemplate='%{x}<br>%{y:.2f} pax-km/kWh<br>Pasajeros-km: %{customdata[0]:,.0f}<br>Energía: %{customdata[1]:,.0f} kWh<extra></extra>')
-                    fig_pk_kwh.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                             bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                    _eje_mes(fig_pk_kwh)
-                    _pc(_no_huecos(fig_pk_kwh), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_paxkm_kwh")
-                    _n_pk = len(_de_pk)
-                    st.caption("Pasajeros-km = pasajeros a bordo de cada tramo × km del tramo (Carga de pasajeros V1 y V2); la energía, con la misma jerarquía de arriba. "
-                               + ("Solo cuenta 1 día con pasajeros-km y energía" if _n_pk == 1 else f"Solo cuentan los {_n_pk} días con pasajeros-km y energía")
-                               + "; el valor global divide los totales del período (no promedia días).")
+                    _mk[0].metric("Pax/km total", _ncl(_it['Pax/km total'], 2), help="Pasajeros ÷ km total (odómetro).")
+                    _mk[1].metric("kWh/km total", _ncl(_it['kWh/km total'], 2), help="Energía total ÷ km total (odómetro).")
+                    _mk[2].metric("Pax/tren-km", _ncl(_it['Pax/tren-km'], 2), help="Pasajeros ÷ tren-km (recorrido comercial).")
+                    _mk[3].metric("kWh/tren-km", _ncl(_it['kWh/tren-km'], 2), help="Energía de tracción ÷ tren-km.")
+                    # Por tipo de jornada
+                    _jor_ipk = _de_ipk['Tipo'].map(_JORNADA_TXT).fillna('Laboral')
+                    _fil_ipk = [{'Tipo de jornada': _j, 'Días': int((_jor_ipk == _j).sum()), **{k: _ncl(v, 2) for k, v in _ipk(_de_ipk[_jor_ipk == _j]).items()}}
+                                for _j in ['Laboral', 'Sábado', 'Domingo y festivo'] if (_jor_ipk == _j).any()]
+                    _fil_ipk.append({'Tipo de jornada': 'Todos', 'Días': len(_de_ipk), **{k: _ncl(v, 2) for k, v in _it.items()}})
+                    try:
+                        st.table(pd.DataFrame(_fil_ipk), hide_index=True)
+                    except TypeError:  # versiones de Streamlit sin hide_index en st.table
+                        st.table(pd.DataFrame(_fil_ipk).set_index('Tipo de jornada'))
+                    # Gráficos por mes (o por día si el rango es de un mes): pasajeros por km y energía por km
+                    _de_ipk = _de_ipk.assign(**{'Pax/km total': _de_ipk['Pasajeros'] / _de_ipk['Odo'], 'Pax/tren-km': _de_ipk['Pasajeros'] / _de_ipk['TK'],
+                                                'kWh/km total': _de_ipk['Total E'] / _de_ipk['Odo'], 'kWh/tren-km': _de_ipk['Tracción'] / _de_ipk['TK']})
+                    _g_ipk = _agr_mes(_de_ipk, ['Pasajeros', 'Odo', 'TK', 'Total E', 'Tracción'],
+                                      _ratios={'Pax/km total': ('Pasajeros', 'Odo', 1), 'Pax/tren-km': ('Pasajeros', 'TK', 1),
+                                               'kWh/km total': ('Total E', 'Odo', 1), 'kWh/tren-km': ('Tracción', 'TK', 1)})
+                    for _cols_g, _nom_g, _tit_g, _ytit_g, _key_g in (
+                            (['Pax/km total', 'Pax/tren-km'], ['Pasajeros ÷ km total', 'Pasajeros ÷ tren-km'], f"Pasajeros por km — {_fuente_p}", 'Pasajeros por km', "chart_ipk"),
+                            (['kWh/km total', 'kWh/tren-km'], ['Energía total ÷ km total', 'Tracción ÷ tren-km'], "Energía por km", 'kWh por km', "chart_kwh_km")):
+                        _mlt = _g_ipk.melt(id_vars='Fecha', value_vars=_cols_g, var_name='Indicador', value_name='Valor')
+                        _mlt['Indicador'] = _mlt['Indicador'].map(dict(zip(_cols_g, _nom_g)))
+                        _fg = px.bar(_mlt, x='Fecha', y='Valor', color='Indicador', barmode='group',
+                                     color_discrete_map={_nom_g[0]: '#005195', _nom_g[1]: '#0a7d3e'}, title=_tit_g)
+                        _fg.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=9),
+                                          hovertemplate='%{x}<br>%{fullData.name}: %{y:.2f}<extra></extra>')
+                        _fg.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True), yaxis_title=_ytit_g,
+                                          bargap=0.25, bargroupgap=0.05, uniformtext=dict(minsize=7, mode='hide'),
+                                          legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                        _eje_mes(_fg)
+                        _pc(_no_huecos(_fg), use_container_width=True, config={'locale': 'es'}, key=_key_g)
+                    _n_ipk = len(_de_ipk)
+                    st.caption("IPK = pasajeros ÷ km. El km total (odómetro) va con la energía total y el tren-km (recorrido comercial) con la energía de "
+                               f"tracción. Pasajeros según la fuente elegida arriba ({_fuente_p}); energía con la jerarquía de siempre. "
+                               + ("Solo cuenta 1 día con pasajeros, km del UMR y energía" if _n_ipk == 1 else f"Solo cuentan los {_n_ipk} días con pasajeros, km del UMR y energía")
+                               + "; los valores globales dividen los totales del período (no promedian días).")
     else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
 
 if _seccion == _SECCIONES[1]:
@@ -6873,6 +6873,19 @@ def _tabla_anual_lb(anio, firma):
     if not _ops:
         return pd.DataFrame()
     return _armar_df_ops(_ops, _tr, _unir_por_fecha(_fact), _unir_por_fecha(_prm), _seat)[0]
+
+def _paxkm_por_dia(df):
+    """Pax-km por día de un export de Carga: en cada viaje, pasajeros a bordo de cada tramo × km del tramo."""
+    if df is None or getattr(df, 'empty', True) or 'Fecha' not in df.columns:
+        return pd.Series(dtype=float)
+    _kmc = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
+    _cods = [c for c in df.columns if c in _kmc]
+    if len(_cods) < 2:
+        return pd.Series(dtype=float)
+    _L = df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
+    _km = np.abs(np.diff(np.array([_kmc[c] for c in _cods], dtype=float)))
+    _f = pd.to_datetime(df['Fecha'], errors='coerce').dt.normalize()
+    return pd.Series((_L[:, :-1] * _km[None, :]).sum(axis=1), index=_f.values).groupby(level=0).sum()
 
 @st.cache_data(show_spinner=False, max_entries=6)
 def _paxkm_anual_lb(anio, firma):
