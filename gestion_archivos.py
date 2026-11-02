@@ -116,7 +116,13 @@ def firma_fuentes(archivos, carpeta: str) -> tuple:
     """
     firma = []
     for archivo in archivos:
-        nombre = _nombre_valido(archivo.name)
+        try:
+            nombre = _nombre_valido(archivo.name)
+        except ValueError:
+            # Una carga rechazada en la interfaz no debe tumbar el dashboard
+            # cuando Streamlit reconstruye las firmas de sus archivos.
+            firma.append(('ARCHIVO_RECHAZADO', str(getattr(archivo, 'name', '')), getattr(archivo, 'size', None)))
+            continue
         ruta = Path(carpeta) / nombre
         try:
             info = ruta.stat()
