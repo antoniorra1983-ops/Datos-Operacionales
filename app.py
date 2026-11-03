@@ -253,24 +253,10 @@ DATA_DIRS = {
 }
 for _d in DATA_DIRS.values(): os.makedirs(_d, exist_ok=True)
 
-def guardar_archivo(uf, carpeta):
-    with open(os.path.join(carpeta, uf.name), "wb") as out: out.write(uf.getbuffer())
-
-def listar_archivos(carpeta):
-    exts = ('.xls','.xlsx','.xlsm', '.csv')
-    try: return sorted([os.path.join(carpeta,f) for f in os.listdir(carpeta) if f.lower().endswith(exts)])
-    except Exception: return []
-
-class _ArchivoEnDisco:
-    def __init__(self, path):
-        self.name = os.path.basename(path)
-        with open(path,'rb') as f: self._bio = BytesIO(f.read())
-    def read(self,*a,**kw):  return self._bio.read(*a,**kw)
-    def seek(self,*a,**kw):  return self._bio.seek(*a,**kw)
-    def tell(self,*a,**kw):  return self._bio.tell(*a,**kw)
-    def seekable(self): return True
-    def readable(self): return True
-    def getbuffer(self): return self._bio.getvalue()
+from gestion_archivos import (
+    guardar_archivo, listar_archivos,
+    ArchivoEnDisco as _ArchivoEnDisco, firma_fuentes,
+)
 
 def combinar_fuentes(ul, carpeta):
     nombres = {uf.name for uf in (ul or [])}
@@ -2674,6 +2660,19 @@ def _paxkm_por_dia(df):
     return pd.Series((_L[:, :-1] * _km[None, :]).sum(axis=1), index=_f.values).groupby(level=0).sum()
 
 
+def _cargar_archivos_sin_interrumpir(_archivos, _lector, _tipo, _inicio, _fin, _errores):
+    """Continúa procesando los demás archivos aunque uno falle."""
+    _procesados = []
+    for _f in _archivos:
+        try:
+            _dato = _lector(_f, _inicio, _fin)
+            if _dato is not None:
+                _procesados.append(_dato)
+        except Exception as _exc:
+            _errores[getattr(_f, 'name', 'archivo sin nombre')] = f"{_tipo}: {_exc}"
+    return _procesados
+
+
 # --- 6. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
     st.header("📅 Filtro Global")
@@ -2691,28 +2690,30 @@ with st.sidebar:
     st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
     st.divider()
     
+    _upload_revision = st.session_state.get("_upload_revision", 0)
     def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
     
-    f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True)
-    f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True)
-    f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True)
-    f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True)
-    f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True)
-    f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True)
-    f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True)
-    f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True)
-    f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True)
-    f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True)
-    f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True)
-    
+    f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v1_{_upload_revision}")
+    f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v2_{_upload_revision}")
+    f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_umr_{_upload_revision}")
+    f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_seat_files_{_upload_revision}")
+    f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_bill_files_{_upload_revision}")
+    f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v1_{_upload_revision}")
+    f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v2_{_upload_revision}")
+    f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_viajes_{_upload_revision}")
+    f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_ide_{_upload_revision}")
+    f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_incid_{_upload_revision}")
+    f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_oit_{_upload_revision}")
     for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
                     (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
                     (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
                     (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"]),
                     (f_oit,DATA_DIRS["oit"])]:
         for uf in (_ul or []):
-            dest=os.path.join(_ca,uf.name)
-            if not os.path.exists(dest): guardar_archivo(uf,_ca)
+            try:
+                guardar_archivo(uf, _ca)
+            except (ValueError, OSError) as _error_archivo:
+                st.error(f"No se pudo guardar {uf.name}: {_error_archivo}")
             
     st.divider()
     with st.expander("🗂️ Archivos guardados"):
@@ -2724,7 +2725,13 @@ with st.sidebar:
                 st.markdown(f"**{_nom_k}** — {len(_arch)} archivo(s)")
                 for _a in _arch:
                     ca2,cb2=st.columns([5,1]); ca2.caption(os.path.basename(_a))
-                    if cb2.button("🗑️",key=f"del_{_a}"): os.remove(_a); st.rerun()
+                    if cb2.button("🗑️", key=f"del_{_a}"):
+                        try:
+                            os.remove(_a)
+                        except FileNotFoundError:
+                            pass
+                        st.session_state["_upload_revision"] = _upload_revision + 1
+                        st.rerun()
             else: st.caption(f"{_nom_k}: sin archivos")
 
 # Combinar uploads
@@ -2746,17 +2753,20 @@ f_incid_all = combinar_fuentes_rango(f_incid, DATA_DIRS["incid"], start_date, en
 f_oit_all = combinar_fuentes_rango(f_oit, DATA_DIRS["oit"], start_date, end_date, 'mes')
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v21_oit_sfe"
+_CACHE_VERSION = "v23_estabilidad_navegacion"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
-              tuple(sorted(f.name for f in f_v1_all)), tuple(sorted(f.name for f in f_v2_all)),
-              tuple(sorted(f.name for f in f_umr_all)), tuple(sorted(f.name for f in f_seat_all)),
-              tuple(sorted(f.name for f in f_bill_all)),
-              tuple(sorted(f.name for f in f_carga_v1_all)), tuple(sorted(f.name for f in f_carga_v2_all)),
-              tuple(sorted(f.name for f in f_viajes_all)),
-              tuple(sorted(f.name for f in f_ide_all)),
-              tuple(sorted(f.name for f in f_incid_all)),
-              tuple(sorted(f.name for f in f_oit_all)))
-              
+              firma_fuentes(f_v1_all, DATA_DIRS["v1"]),
+              firma_fuentes(f_v2_all, DATA_DIRS["v2"]),
+              firma_fuentes(f_umr_all, DATA_DIRS["umr"]),
+              firma_fuentes(f_seat_all, DATA_DIRS["seat"]),
+              firma_fuentes(f_bill_all, DATA_DIRS["bill"]),
+              firma_fuentes(f_carga_v1_all, DATA_DIRS["carga_v1"]),
+              firma_fuentes(f_carga_v2_all, DATA_DIRS["carga_v2"]),
+              firma_fuentes(f_viajes_all, DATA_DIRS["viajes"]),
+              firma_fuentes(f_ide_all, DATA_DIRS["ide_lb"]),
+              firma_fuentes(f_incid_all, DATA_DIRS["incid"]),
+              firma_fuentes(f_oit_all, DATA_DIRS["oit"]))
+
 _hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all,f_viajes_all,f_ide_all,f_incid_all,f_oit_all])
 _recalcular   = st.session_state.get('_cache_key') != _cache_key
 
@@ -2770,7 +2780,7 @@ all_kmserv=[]
 all_saf_li=[]
 _errores_proc={}
 
-if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('_do_load'):
+if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('_do_load') and not _recalcular:
     df_ops=st.session_state['df_ops']
     df_thdr_v1=st.session_state['df_thdr_v1']
     df_thdr_v2=st.session_state['df_thdr_v2']
@@ -2795,6 +2805,7 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
 elif _hay_archivos and st.session_state.get('_do_load'):
+    st.session_state['_fichas_energia'] = []
     if f_umr_all:
         for f in f_umr_all:
             try:
@@ -2835,36 +2846,36 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         all_prmte_2025.extend(_unir_por_fecha(_l25))
         st.session_state['_fichas_energia'] = _fichas
             
-    if _errores_proc: st.session_state['_errores_proc']=_errores_proc
+    st.session_state['_errores_proc'] = _errores_proc
 
     if all_ops:
         df_ops, _seat_dups = _armar_df_ops(all_ops, all_tr, all_fact_full, all_prmte_full, all_seat)
 
     diag_thdr=[]
     if f_v1_all:
-        r1=[procesar_thdr_cacheado(f,start_date,end_date) for f in f_v1_all]
+        r1=_cargar_archivos_sin_interrumpir(f_v1_all, procesar_thdr_cacheado, "THDR V1", start_date, end_date, _errores_proc)
         diag_thdr+=[r[1] for r in r1]
         p1=[r[0] for r in r1 if not r[0].empty]
         df_thdr_v1=pd.concat(p1,ignore_index=True) if p1 else pd.DataFrame()
     if f_v2_all:
-        r2=[procesar_thdr_cacheado(f,start_date,end_date) for f in f_v2_all]
+        r2=_cargar_archivos_sin_interrumpir(f_v2_all, procesar_thdr_cacheado, "THDR V2", start_date, end_date, _errores_proc)
         diag_thdr+=[r[1] for r in r2]
         p2=[r[0] for r in r2 if not r[0].empty]
         df_thdr_v2=pd.concat(p2,ignore_index=True) if p2 else pd.DataFrame()
-    if diag_thdr: st.session_state['diag_thdr']=diag_thdr
+    st.session_state['diag_thdr'] = diag_thdr
     
     if f_carga_v1_all:
-        p_cv1 = [_carga_cacheado(f, start_date, end_date) for f in f_carga_v1_all]
+        p_cv1 = _cargar_archivos_sin_interrumpir(f_carga_v1_all, _carga_cacheado, "Carga V1", start_date, end_date, _errores_proc)
         p_cv1 = [d for d in p_cv1 if not d.empty]
         df_carga_v1 = pd.concat(p_cv1, ignore_index=True) if p_cv1 else pd.DataFrame()
 
     if f_carga_v2_all:
-        p_cv2 = [_carga_cacheado(f, start_date, end_date) for f in f_carga_v2_all]
+        p_cv2 = _cargar_archivos_sin_interrumpir(f_carga_v2_all, _carga_cacheado, "Carga V2", start_date, end_date, _errores_proc)
         p_cv2 = [d for d in p_cv2 if not d.empty]
         df_carga_v2 = pd.concat(p_cv2, ignore_index=True) if p_cv2 else pd.DataFrame()
 
     if f_viajes_all:
-        p_vj = [_viajes_cacheado(f, start_date, end_date) for f in f_viajes_all]
+        p_vj = _cargar_archivos_sin_interrumpir(f_viajes_all, _viajes_cacheado, "Viajes", start_date, end_date, _errores_proc)
         p_vj = [d for d in p_vj if not d.empty]
         df_viajes = pd.concat(p_vj, ignore_index=True) if p_vj else pd.DataFrame()
 
@@ -3036,6 +3047,7 @@ elif _hay_archivos and st.session_state.get('_do_load'):
         else:
             df_ops['PAX'] = 0
 
+    st.session_state['_errores_proc'] = _errores_proc
     st.session_state.update({'df_ops':df_ops,'df_thdr_v1':df_thdr_v1,'df_thdr_v2':df_thdr_v2,
                               'all_tr':all_tr,'all_seat':all_seat,'all_fact_full':all_fact_full,
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
@@ -3081,10 +3093,12 @@ st.session_state['_pcf_used'] = set()
 # Avisos de estado de carga
 if not _hay_archivos:
     st.info("Sube archivos en la barra lateral para comenzar.")
-elif df_ops.empty and not st.session_state.get('_do_load'):
-    st.info("Configura el rango y los archivos en la barra lateral y aprieta **🔄 Cargar / actualizar datos** para procesar.")
-elif ('df_ops' in st.session_state) and (st.session_state.get('_cache_key') != _cache_key):
-    st.warning("Cambiaron archivos o fechas desde la última carga. Aprieta **🔄 Cargar / actualizar datos** para refrescar.")
+elif "_cache_key" not in st.session_state:
+    st.info("Configura el rango y presiona **🔄 Cargar / actualizar datos** para procesar los archivos guardados.")
+elif _recalcular:
+    st.warning("Hay archivos modificados o cambió el rango desde la última carga. Presiona **🔄 Cargar / actualizar datos** para actualizar los indicadores.")
+elif df_ops.empty:
+    st.info("No hay registros UMR para el rango cargado; puede haber datos de otras fuentes.")
 
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
