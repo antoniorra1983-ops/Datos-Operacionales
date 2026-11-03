@@ -2987,7 +2987,7 @@ def _v28_guardar_snapshot(_firma, _cantidad):
 # por streaming y se reconstruye UN ZIP local. Es caché temporal, no fuente de verdad.
 # Se reconocen exclusivamente los snapshots generados por v28 mientras se migra a v29.
 _V29_CODIGOS_COMPATIBLES = {
-    # v28, v29 y v30 publicados. La v31 sólo ajusta análisis por jornada,
+    # v28-v31 publicados. La v32 añade cruce BI con OIT sin alterar parseo,
     # sin alterar el parseo histórico. Se permite usarlos durante precálculo.
     "aeb1a712743d0bf2094572dbaf0e52c5fe3d55729a290a4dce3140220383acdf",  # v30 real publicada
     "21112a1e75bb36180c8dd11e0f6f5b18950f292882ba1fd76343c955431549e2",
@@ -3012,7 +3012,8 @@ _V29_DATOS_POR_SECCION = (
     ('df_carga_v1', 'df_carga_v2', 'all_prmte_full'),
     ('df_carga_v1', 'df_carga_v2'),
     (),  # Causa raíz: esta vista tiene su propia carga anual por caché.
-    ("df_serv_tipo", "df_pax_tipo", "df_incid", "_errores_proc", "_seat_dups"),  # BI ejecutivo: fuentes livianas.
+    ("df_serv_tipo", "df_pax_tipo", "df_incid", "df_oit", "_oit_diag",
+     "_errores_proc", "_seat_dups"),  # BI: incluye OIT nocturna, sin traer todo PRMTE/THDR.
 )
 
 def _v29_necesarios():
@@ -3943,6 +3944,124 @@ def _bi_resumen_por_jornada(visible):
     return pd.DataFrame(_r)
 
 
+
+# ===== v32 · Unión por fecha entre BI diario y OIT de madrugada =====
+# IMPORTANTE: OIT registra ORDENES SFE CON CIERRE entre 00:00 y 06:59.
+# La fecha es la del CIERRE (madrugada) y no necesariamente el instante del
+# movimiento real. No se transforma una orden en un viaje/servicio realizado.
+def _bi_unicos_noche(valores, limite=12):
+    """Conserva valores distintos de una noche en orden de aparición."""
+    _vistos = set()
+    _texto = []
+    for _valor in valores:
+        if pd.isna(_valor):
+            continue
+        _t = str(_valor).strip()
+        if not _t or _t.casefold() in ('nan', 'none', 'nat', 'sin dato'):
+            continue
+        if _t not in _vistos:
+            _vistos.add(_t)
+            _texto.append(_t)
+        if len(_texto) >= limite:
+            break
+    return ' · '.join(_texto)
+
+
+def _bi_cruzar_nocturnos(diario, oit, hay_fuente_oit):
+    """Una fila por día. Las OIT nunca duplican los kWh o los servicios.
+
+    'Sin orden detectada' no significa 'sin movimiento': hay fechas sin OIT o
+    fuera de la cobertura de los exportes y el parser sólo detecta cierres SFE.
+    """
+    if diario is None or diario.empty:
+        return pd.DataFrame()
+    _base = diario.copy()
+    _base['Fecha'] = pd.to_datetime(_base['Fecha'], errors='coerce').dt.normalize()
+    _base = _base.dropna(subset=['Fecha'])
+    _base['Órdenes OIT madrugada'] = 0
+    _base['Unidades SFE OIT'] = ''
+    _base['Horas cierre OIT'] = ''
+    _base['OT nocturnas'] = ''
+    _base['Trabajos OIT'] = ''
+    if oit is not None and not oit.empty and 'Fecha' in oit.columns:
+        _e = oit.copy()
+        _e['Fecha'] = pd.to_datetime(_e['Fecha'], errors='coerce').dt.normalize()
+        _e = _e.dropna(subset=['Fecha']).drop_duplicates()
+        for _c in ('SFE','Hora cierre','OT','Trabajos'):
+            if _c not in _e.columns:
+                _e[_c] = ''
+        if not _e.empty:
+            _g = _e.groupby('Fecha',as_index=False).agg(**{
+                '_ordenes': ('Fecha','size'),
+                '_sfe': ('SFE',_bi_unicos_noche),
+                '_horas': ('Hora cierre',_bi_unicos_noche),
+                '_ots': ('OT',_bi_unicos_noche),
+                '_trabajos': ('Trabajos',_bi_unicos_noche),
+            })
+            _base = _base.merge(_g,on='Fecha',how='left',validate='many_to_one',sort=False)
+            _base['Órdenes OIT madrugada'] = _base['_ordenes'].fillna(0).astype(int)
+            for _column,_src in [('Unidades SFE OIT','_sfe'),('Horas cierre OIT','_horas'),
+                                 ('OT nocturnas','_ots'),('Trabajos OIT','_trabajos')]:
+                _base[_column] = _base[_src].fillna('')
+            _base = _base.drop(columns=['_ordenes','_sfe','_horas','_ots','_trabajos'])
+    _base['Registro OIT nocturno'] = np.where(
+        _base['Órdenes OIT madrugada'].gt(0), 'Con orden SFE de madrugada',
+        'Sin orden SFE detectada' if hay_fuente_oit else 'Sin archivos OIT')
+    return _base
+
+
+def _bi_resumen_nocturno_por_jornada(diario):
+    """Resumen descriptivo, separado por jornada y presencia de OIT.
+    Los promedios nunca cuentan dos veces un día con varias órdenes.
+    """
+    _cols=['Tipo de jornada','Registro OIT nocturno','Días','Órdenes OIT',
+           'Energía media diaria (kWh)','Tracción media diaria (kWh)',
+           'Kilómetros medios diarios','IDE ponderado (kWh/km)']
+    if diario is None or diario.empty:
+        return pd.DataFrame(columns=_cols)
+    _datos=[]
+    for (_j,_s),_v in diario.groupby(['Tipo de jornada','Registro OIT nocturno'],dropna=False,observed=True):
+        _n = int(_v['Fecha'].nunique())
+        _en = pd.to_numeric(_v['E_Total'],errors='coerce')
+        _tr = pd.to_numeric(_v['E_Tr'],errors='coerce')
+        _km = pd.to_numeric(_v['Odómetro [km]'],errors='coerce')
+        _t = float(_tr.sum(min_count=1)) if _tr.notna().any() else np.nan
+        _k = float(_km.sum(min_count=1)) if _km.notna().any() else np.nan
+        _datos.append({'Tipo de jornada':_j, 'Registro OIT nocturno':_s,'Días':_n,
+                       'Órdenes OIT':int(_v['Órdenes OIT madrugada'].sum()),
+                       'Energía media diaria (kWh)':float(_en.mean()) if _en.notna().any() else np.nan,
+                       'Tracción media diaria (kWh)':float(_tr.mean()) if _tr.notna().any() else np.nan,
+                       'Kilómetros medios diarios':float(_km.mean()) if _km.notna().any() else np.nan,
+                       'IDE ponderado (kWh/km)':_t/_k if pd.notna(_k) and _k>0 and pd.notna(_t) else np.nan})
+    _ord={'Laboral':0,'Sábado':1,'Domingo y festivo':2}
+    _salida=pd.DataFrame(_datos,columns=_cols)
+    return _salida.sort_values('Tipo de jornada',key=lambda x:x.map(_ord)).reset_index(drop=True)
+
+
+def _bi_comparar_con_sin_oit(diario, minimo=3):
+    """Diferencia exploratoria de MEDIANAS diarias entre grupos de una MISMA jornada.
+    Nunca se interpreta como consumo atribuible a la circulación SFE.
+    """
+    _cols=['Tipo de jornada','Días con orden OIT','Días sin orden detectada',
+           'Mediana con orden (kWh/día)','Mediana sin orden (kWh/día)','Diferencia (kWh/día)']
+    if diario is None or diario.empty or 'Órdenes OIT madrugada' not in diario:
+        return pd.DataFrame(columns=_cols)
+    _rs=[]
+    for _j in ('Laboral','Sábado','Domingo y festivo'):
+        _d=diario[diario['Tipo de jornada']==_j]
+        _con=pd.to_numeric(_d.loc[_d['Órdenes OIT madrugada'].gt(0),'E_Total'],errors='coerce').dropna()
+        _sin=pd.to_numeric(_d.loc[_d['Órdenes OIT madrugada'].eq(0),'E_Total'],errors='coerce').dropna()
+        if len(_con) < minimo or len(_sin) < minimo:
+            continue
+        _mc=float(_con.median());_ms=float(_sin.median())
+        _rs.append({'Tipo de jornada':_j,'Días con orden OIT':len(_con),
+                    'Días sin orden detectada':len(_sin),
+                    'Mediana con orden (kWh/día)':_mc,
+                    'Mediana sin orden (kWh/día)':_ms,
+                    'Diferencia (kWh/día)':_mc-_ms})
+    return pd.DataFrame(_rs,columns=_cols)
+
+
 def _bi_valor_kpi(tabla, campo):
     if campo == 'IDE (kWh/km)':
         # El IDE de periodo es consumo tracción / kilometraje real.
@@ -4094,13 +4213,18 @@ if _seccion == '🎯 BI Ejecutivo':
     st.caption('BI OPERACIONAL · EFE Valparaíso · La información respeta los filtros generales de arriba.')
     _bi_hist = _bi_base_liviana(st.session_state.get('df_ops',pd.DataFrame()))
     _bi_filtro = _bi_base_liviana(df_ops)
+    _bi_oit_disponible = bool(listar_archivos(DATA_DIRS['oit']))
+    _bi_diario_historico = _bi_cruzar_nocturnos(_bi_hist, df_oit, _bi_oit_disponible)
+    _bi_diario = (_bi_diario_historico[
+        _bi_diario_historico['Fecha'].isin(set(_bi_filtro['Fecha']))
+    ].copy() if not _bi_diario_historico.empty else pd.DataFrame())
     if _bi_hist.empty:
         st.warning('No hay registros diarios del historial para construir el BI ejecutivo.')
     elif _bi_filtro.empty:
         st.info('No existen datos para los filtros seleccionados. Cambia el período en la barra superior.')
     else:
-        _bt_res,_bt_alert,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
-            '📊 Resumen ejecutivo','🚦 Alertas','🔮 Proyecciones',
+        _bt_res,_bt_diario,_bt_alert,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
+            '📊 Resumen ejecutivo','🌙 Día a día · trenes nocturnos','🚦 Alertas','🔮 Proyecciones',
             '🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
         with _bt_res:
             _ini=_bi_filtro['Fecha'].min(); _fin=_bi_filtro['Fecha'].max()
@@ -4128,6 +4252,12 @@ if _seccion == '🎯 BI Ejecutivo':
                        f'{len(_bi_filtro):,} registros diarios · '
                        f'Referencia de igual jornada: {len(_prev)} días anteriores '
                        f'({"comparable" if _tiene_comparable else "insuficiente"})')
+            if not _bi_diario.empty:
+                _dias_oit = int(_bi_diario['Órdenes OIT madrugada'].gt(0).sum())
+                _ordenes_oit = int(_bi_diario['Órdenes OIT madrugada'].sum())
+                st.caption(f'🌙 Cruce diario con OIT: {_dias_oit} día(s) con órdenes SFE cerradas '
+                           f'de madrugada · {_ordenes_oit} orden(es) detectadas en el período. '
+                           'Ver pestaña «Día a día · trenes nocturnos» para fechas y detalles.')
             st.markdown('**Resultados separados por tipo de jornada**')
             _tabla_jornadas = _bi_resumen_por_jornada(_bi_filtro)
             if not _tabla_jornadas.empty:
@@ -4149,16 +4279,114 @@ if _seccion == '🎯 BI Ejecutivo':
                 st.markdown('**Procedencia de la energía por día**')
                 st.dataframe(_suma_fuentes,hide_index=True,width='stretch')
 
+
+        with _bt_diario:
+            st.markdown('#### Indicadores por fecha y registros OIT de trenes SFE de madrugada')
+            st.caption('Cada fecha aparece una sola vez, conservando su clase: Laboral, Sábado o Domingo y festivo. '
+                       'Las órdenes OIT se relacionan por la FECHA DE CIERRE entre 00:00 y 06:59; '
+                       'una orden no demuestra por sí sola que un tren circuló esa noche.')
+            if not _bi_oit_disponible:
+                st.warning('No hay archivos OIT en data/oit. No es posible determinar qué días tienen '
+                           'órdenes de SFE nocturnas. Los días sin OIT no deben leerse como días sin movimiento.')
+            else:
+                st.info('«Sin orden SFE detectada» significa solamente que no se encontró una orden '
+                        'que cumpla los filtros en los archivos OIT disponibles. No asegura que no hubo trenes '
+                        'nocturnos y la cobertura histórica de las OIT no está verificada.')
+            if _bi_diario.empty:
+                st.info('No hay datos diarios en el rango seleccionado.')
+            else:
+                _df1,_df2=st.columns([1,1])
+                _elegir_oit=_df1.selectbox('Filtrar días según registro nocturno',
+                    ['Todos los días','Con orden SFE de madrugada','Sin orden SFE detectada'],
+                    key='_bi_filtro_nocturnos')
+                _tipo_dia_d=_df2.selectbox('Tipo de jornada en esta vista',
+                    ['Todas las jornadas','Laboral','Sábado','Domingo y festivo'],
+                    key='_bi_filtro_jornada_diaria')
+                _d=_bi_diario.copy()
+                if _elegir_oit!='Todos los días':
+                    _d=_d[_d['Registro OIT nocturno']==_elegir_oit]
+                if _tipo_dia_d!='Todas las jornadas':
+                    _d=_d[_d['Tipo de jornada']==_tipo_dia_d]
+                _c1,_c2,_c3,_c4=st.columns(4)
+                _c1.metric('Días visualizados',_ncl(_d['Fecha'].nunique()))
+                _c2.metric('Días con orden OIT SFE',_ncl(int(_d['Órdenes OIT madrugada'].gt(0).sum())))
+                _c3.metric('Órdenes OIT de madrugada',_ncl(int(_d['Órdenes OIT madrugada'].sum())))
+                _c4.metric('Energía total de los días visibles',f'{_ncl(_bi_valor_kpi(_d,"E_Total"),0)} kWh')
+                _ver_cols=['Fecha','Tipo de jornada','Registro OIT nocturno',
+                           'Órdenes OIT madrugada','Unidades SFE OIT','Horas cierre OIT',
+                           'E_Total','E_Tr','Odómetro [km]','IDE (kWh/km)',
+                           'PAX','Servicios','OT nocturnas']
+                _vis=_d[[c for c in _ver_cols if c in _d]].sort_values('Fecha',ascending=False).copy()
+                if not _vis.empty:
+                    _vis['Fecha']=_vis['Fecha'].dt.strftime('%d-%m-%Y')
+                    st.markdown('**Vista diaria: indicadores y registro de trenes nocturnos**')
+                    st.dataframe(_vis,hide_index=True,width='stretch')
+                else:
+                    st.info('Sin fechas que cumplan estos filtros.')
+                st.download_button('⬇️ Exportar cruce diario OIT y BI',
+                    data=_vis.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                    file_name='bi_dias_y_oit_nocturnos.csv',mime='text/csv',key='_bi_csv_dias_oit')
+                if not _d.empty and _d['E_Total'].notna().any():
+                    _fig=px.scatter(_d,x='Fecha',y='E_Total',color='Registro OIT nocturno',
+                        hover_data=['Tipo de jornada','Órdenes OIT madrugada','Unidades SFE OIT'],
+                        title='Energía total diaria y fechas con órdenes SFE nocturnas')
+                    _fig.update_layout(xaxis_title='Fecha',yaxis_title='Energía diaria (kWh)',
+                                       margin=dict(t=60,b=15))
+                    st.plotly_chart(_fig,width='stretch',key='_bi_energia_oit_diario')
+                if _bi_oit_disponible:
+                    _res_n=_bi_resumen_nocturno_por_jornada(_d)
+                    if not _res_n.empty:
+                        st.markdown('**Resumen por jornada y condición OIT**')
+                        st.dataframe(_res_n,hide_index=True,width='stretch')
+                    _comp=_bi_comparar_con_sin_oit(_d)
+                    if not _comp.empty:
+                        st.markdown('**Diferencia descriptiva dentro de la misma jornada**')
+                        st.dataframe(_comp,hide_index=True,width='stretch')
+                        st.caption('Medianas de energía TOTAL DIARIA, no consumo exclusivo de la madrugada. '
+                                   'Cada grupo necesita al menos tres días con energía; diferencias no establecen '
+                                   'causalidad ni prueban que las órdenes causaron mayor consumo.')
+                    else:
+                        st.caption('No hay al menos tres días válidos en ambos grupos de una misma jornada '
+                                   'para comparar consumo de días con y sin orden OIT detectada.')
+                # Selección por día exacto: listado de órdenes enlazadas, sin multiplicar KPI.
+                _posibles=sorted(_bi_diario['Fecha'].dropna().dt.date.unique(),reverse=True)
+                if _posibles:
+                    _f_elegida=st.selectbox('Inspeccionar fecha exacta',_posibles,
+                        format_func=lambda x:x.strftime('%d-%m-%Y'),key='_bi_fecha_oit')
+                    _dia_reg=_bi_diario[_bi_diario['Fecha'].dt.date==_f_elegida]
+                    if not _dia_reg.empty:
+                        _noche_reg=_dia_reg.iloc[0]
+                        st.caption('Clase: '+str(_noche_reg['Tipo de jornada'])+' · '+
+                                   str(_noche_reg['Registro OIT nocturno'])+' · Fecha de cierre OIT: '+
+                                   _f_elegida.strftime('%d-%m-%Y'))
+                    if df_oit is not None and not df_oit.empty and 'Fecha' in df_oit.columns:
+                        _f_oit=pd.to_datetime(df_oit['Fecha'],errors='coerce').dt.normalize()
+                        _eventos_d=df_oit.loc[_f_oit.eq(pd.Timestamp(_f_elegida))].copy()
+                        if not _eventos_d.empty:
+                            st.markdown('**Órdenes OIT cerradas esa madrugada**')
+                            _cols=[x for x in ('SFE','Hora cierre','OT','Área','Sistema','Trabajos') if x in _eventos_d]
+                            st.dataframe(_eventos_d[_cols],hide_index=True,width='stretch')
+                        else:
+                            st.caption('Sin órdenes SFE cerradas de madrugada registradas para esa fecha.')
+                st.caption('Para saber las horas reales de circulación, se requiere una fuente de movimientos '
+                           'con hora de inicio y término, además del registro de cierre OIT.')
+
         with _bt_alert:
             st.markdown('#### Alertas calculadas automáticamente')
             _umbral=st.slider('Desviación mínima respecto de la mediana anterior (%)',
                               min_value=15,max_value=100,value=30,step=5,key='_bi_umbral_alertas')
             _alertas=_bi_alertas_historicas(_bi_hist,_bi_filtro,_umbral)
+            if not _alertas.empty and not _bi_diario.empty:
+                _alertas=_alertas.merge(_bi_diario[['Fecha','Registro OIT nocturno',
+                    'Órdenes OIT madrugada','Unidades SFE OIT']].drop_duplicates('Fecha'),
+                    on='Fecha',how='left',validate='many_to_one')
             _col_a,_col_b,_col_c=st.columns(3)
             _col_a.metric('Hallazgos en período',_ncl(len(_alertas)))
             _col_b.metric('Días con hallazgos',_ncl(_alertas['Fecha'].nunique() if not _alertas.empty else 0))
             _col_c.metric('Archivos con error',_ncl(len(st.session_state.get('_errores_proc',{}))))
-            st.caption('Método: mediana de hasta 45 antecedentes anteriores de la MISMA jornada (L/S/D-F), '
+            st.caption('Las alertas muestran si hubo órdenes OIT SFE de madrugada cerradas ese día, '
+                       'sin atribuirles automáticamente la desviación. Método: mediana de hasta 45 '
+                       'antecedentes anteriores de la MISMA jornada (L/S/D-F), '
                        'con al menos 10 datos válidos por jornada. Un festivo sábado se compara con domingo/festivo. '
                        'Los avisos no son fallas confirmadas ni notificaciones externas.')
             if _alertas.empty:
@@ -4213,7 +4441,7 @@ if _seccion == '🎯 BI Ejecutivo':
                 st.caption('Estimación exploratoria: mediana de hasta 35 observaciones recientes de la misma '
                            'jornada (laboral, sábado o domingo/festivo), con tendencia por jornada limitada a ±15 %. '
                            'Sí clasifica festivos futuros nacionales de Chile. No contempla cambios de programación, '
-                           'clima ni intervalos estadísticos de confianza.')
+                           'clima, circulación nocturna no programada ni intervalos estadísticos de confianza.')
 
         with _bt_causa:
             st.markdown('#### Explorar un día y sus factores observados')
@@ -4232,6 +4460,20 @@ if _seccion == '🎯 BI Ejecutivo':
                                           (_mc4,'IDE (kWh/km)','IDE',2)]:
                     _v=_r.get(_key,np.nan)
                     _mc.metric(_nom,_ncl(_v,_dec) if pd.notna(_v) else 'Sin dato')
+                _dato_noche=_bi_diario[_bi_diario['Fecha'].eq(pd.Timestamp(_fecha_sel))]
+                if not _dato_noche.empty:
+                    _cierre=_dato_noche.iloc[0]
+                    st.markdown('**Cruce con trenes nocturnos (órdenes OIT)**')
+                    st.caption(str(_cierre['Registro OIT nocturno'])+' · '+
+                               str(int(_cierre['Órdenes OIT madrugada']))+' orden(es) de SFE '+
+                               'cerrada(s) entre 00:00 y 06:59 · '+
+                               ('Unidades: '+str(_cierre['Unidades SFE OIT']) if _cierre['Unidades SFE OIT'] else 'Sin unidad identificada'))
+                    if _cierre['Órdenes OIT madrugada']:
+                        _tr=pd.to_datetime(df_oit['Fecha'],errors='coerce').dt.normalize()
+                        _o=df_oit[_tr.eq(pd.Timestamp(_fecha_sel))]
+                        _columnas=[c for c in ['SFE','Hora cierre','OT','Trabajos'] if c in _o]
+                        if _columnas:
+                            st.dataframe(_o[_columnas],hide_index=True,width='stretch')
                 _tipo=get_tipo_dia(_r['Fecha'].date())
                 _pares=_bi_hist[_bi_hist['Tipo Día']==_tipo].copy()
                 _pares=_pares[_pares['Fecha']<_r['Fecha']].tail(52)
