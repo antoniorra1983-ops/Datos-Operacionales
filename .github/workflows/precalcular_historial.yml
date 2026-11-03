@@ -1,0 +1,88 @@
+name: Precalcular historial de Datos Operacionales
+
+# El historial se prepara al cambiar el programa o los archivos fuente.
+# Los commits del propio GITHUB_TOKEN no disparan un ciclo infinito.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - 'gestion_archivos.py'
+      - 'requirements.txt'
+      - 'data/**'
+      - '.github/workflows/precalcular_historial.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: datos-operacionales-historial-main
+  cancel-in-progress: true
+
+jobs:
+  precalcular:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      OP_CACHE_BUILD: '1'
+      STREAMLIT_LOGGER_LEVEL: error
+    steps:
+      - name: Obtener código y archivos históricos
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt
+
+      # Acelera la siguiente actualización: los archivos ya procesados se
+      # recuperan desde la caché de Actions y los modificados tienen otro hash.
+      - name: Recuperar caché incremental por archivo
+        uses: actions/cache@v4
+        with:
+          path: data/_cache
+          key: datos-operacionales-parquet-v28-${{ hashFiles('app.py', 'gestion_archivos.py', 'data/**') }}
+          restore-keys: |
+            datos-operacionales-parquet-v28-
+
+      - name: Construir base histórica completa
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from streamlit.testing.v1 import AppTest
+
+          app = AppTest.from_file('app.py', default_timeout=5400)
+          app.run(timeout=5400)
+          if app.exception:
+              detalle = '\n'.join(str(x.message) for x in app.exception)
+              raise RuntimeError('La aplicación tuvo errores al procesar los datos:\n' + detalle)
+          archivo = Path('data/_historial_v28/manifest.json')
+          if not archivo.is_file():
+              raise RuntimeError('No se generó la base persistente; comprueba los archivos en data/.')
+          import json
+          datos = json.loads(archivo.read_text(encoding='utf-8'))
+          print('Archivos fuente:', datos['source_files'])
+          print('Fragmentos guardados:', len(datos['parts']))
+          print('Fecha:', datos['created_utc'])
+          PY
+
+      - name: Publicar historial persistente en GitHub
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data/_historial_v28
+          if git diff --cached --quiet; then
+            echo "La base procesada está actualizada."
+          else
+            git commit -m "Actualizar base procesada operacional v28 [skip ci]"
+            git push origin HEAD:main
+          fi
