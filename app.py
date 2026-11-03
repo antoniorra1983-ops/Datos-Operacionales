@@ -2987,6 +2987,10 @@ def _v28_guardar_snapshot(_firma, _cantidad):
 # por streaming y se reconstruye UN ZIP local. Es caché temporal, no fuente de verdad.
 # Se reconocen exclusivamente los snapshots generados por v28 mientras se migra a v29.
 _V29_CODIGOS_COMPATIBLES = {
+    # v28, v29 y v30 publicados. La v31 sólo ajusta análisis por jornada,
+    # sin alterar el parseo histórico. Se permite usarlos durante precálculo.
+    "aeb1a712743d0bf2094572dbaf0e52c5fe3d55729a290a4dce3140220383acdf",  # v30 real publicada
+    "21112a1e75bb36180c8dd11e0f6f5b18950f292882ba1fd76343c955431549e2",
     # v28 y v29 publicados. Permiten mostrar el BI mientras GitHub Actions
     # materializa el snapshot para la nueva versión del código.
     "92b92bc8d9664a2757bec73108fea1f8ffbf4088d162af87dfd926b5ebd8b0b4",
@@ -3731,7 +3735,7 @@ elif df_ops.empty:
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
-_J_COD = {"Laboral": "L", "Sábado": "S", "Domingo/Festivo": "D/F"}
+_J_COD = {"Laboral": "L", "Sábado": "S", "Domingo y festivo": "D/F"}
 if not df_ops.empty and _seccion != _SECCIONES[4]:
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _dts_all = sorted(set(_ff.dropna().dt.date))
@@ -3888,7 +3892,55 @@ def _bi_base_liviana(tabla):
         _out[_col] = _bi_serie(tabla, _col)
     if 'Fuente' in tabla.columns:
         _out['Fuente'] = tabla['Fuente'].astype(str).to_numpy()
-    return _out.dropna(subset=['Fecha']).sort_values('Fecha').reset_index(drop=True)
+    # Una única clasificación chilena para filtros, KPI, alertas, pronósticos y detalle.
+    # Un festivo en sábado o en día hábil SIEMPRE es D/F, no S ni L.
+    _out = _out.dropna(subset=['Fecha']).sort_values('Fecha').reset_index(drop=True)
+    _out['Tipo Día'] = _out['Fecha'].dt.date.map(get_tipo_dia)
+    _out['Tipo de jornada'] = _out['Tipo Día'].map(_JORNADA_TXT)
+    return _out
+
+
+# ===== v31 · Comparaciones homogéneas por jornada (Chile) =====
+def _bi_referencia_comparable(historico, visible):
+    """Devuelve N días anteriores de la MISMA jornada por cada clase presente.
+
+    Si no hay suficientes días anteriores equivalentes para CADA tipo visible,
+    se omite el delta. Nunca sustituimos sábados por domingos/festivos, ni viceversa.
+    """
+    if historico is None or visible is None or historico.empty or visible.empty:
+        return pd.DataFrame(), False
+    _inicio = visible['Fecha'].min()
+    _previos = historico[historico['Fecha'] < _inicio].sort_values('Fecha')
+    _trozos = []
+    for _jornada, _grupo in visible.groupby('Tipo Día', observed=True):
+        _cantidad = int(_grupo['Fecha'].nunique())
+        _mismos = _previos[_previos['Tipo Día'] == _jornada].drop_duplicates('Fecha', keep='last')
+        if len(_mismos) < _cantidad:
+            return pd.DataFrame(columns=historico.columns), False
+        _trozos.append(_mismos.tail(_cantidad))
+    if not _trozos:
+        return pd.DataFrame(columns=historico.columns), False
+    return pd.concat(_trozos, ignore_index=True).sort_values('Fecha'), True
+
+
+def _bi_resumen_por_jornada(visible):
+    """Totales por jornada sin mezclar tipos en promedios ni IDE ponderado."""
+    _r=[]
+    for _tipo, _nombre in [('L','Laboral'),('S','Sábado'),('D/F','Domingo y festivo')]:
+        _m = visible[visible['Tipo Día'] == _tipo]
+        if _m.empty:
+            continue
+        _dias = int(_m['Fecha'].nunique())
+        _energia = _bi_valor_kpi(_m, 'E_Total')
+        _km = _bi_valor_kpi(_m, 'Odómetro [km]')
+        _pax = _bi_valor_kpi(_m, 'PAX')
+        _serv = _bi_valor_kpi(_m, 'Servicios')
+        _ide = _bi_valor_kpi(_m, 'IDE (kWh/km)')
+        _r.append({'Tipo de jornada': _nombre, 'Días':_dias,
+                   'Energía (kWh)':_energia, 'Energía por día (kWh)':_energia/_dias if np.isfinite(_energia) else np.nan,
+                   'Kilómetros':_km, 'Pasajeros':_pax, 'Servicios':_serv,
+                   'IDE (kWh/km)':_ide})
+    return pd.DataFrame(_r)
 
 
 def _bi_valor_kpi(tabla, campo):
@@ -3910,77 +3962,94 @@ def _bi_var_pct(actual, previo):
 
 
 def _bi_alertas_historicas(historico, visible, umbral_pct=30):
-    """Desviaciones históricas con referencia sólo a fechas anteriores.
+    """Alertas comparadas EXCLUSIVAMENTE con jornadas de la misma categoría.
 
-    Ventana 45 observaciones diarias, mínimo 15. No es detección de falla
-    certificada: identifica señales para revisión operacional.
+    Mediana de hasta 45 antecedentes anteriores de igual tipo, con al menos 10
+    observaciones positivas. La falta de energía con km se informa por separado.
     """
-    if historico.empty or visible.empty:
-        return pd.DataFrame(columns=['Fecha','Indicador','Hallazgo','Valor','Referencia','Variación %'])
+    _vacias=['Fecha','Tipo de jornada','Indicador','Hallazgo','Valor','Referencia','Variación %']
+    if historico is None or visible is None or historico.empty or visible.empty:
+        return pd.DataFrame(columns=_vacias)
     _cols = [c for c in ['E_Total','E_Tr','IDE (kWh/km)','Odómetro [km]', 'PAX','Servicios'] if c in historico]
-    _hist = historico[['Fecha']+_cols].drop_duplicates('Fecha',keep='last').sort_values('Fecha').copy()
+    _hist = historico[['Fecha','Tipo Día','Tipo de jornada']+_cols].drop_duplicates('Fecha',keep='last').sort_values('Fecha').copy()
     _hist['_visible'] = _hist['Fecha'].isin(set(visible['Fecha'].dropna()))
     _registros=[]
     for _campo in ['E_Total', 'IDE (kWh/km)', 'Odómetro [km]', 'PAX', 'Servicios']:
         if _campo not in _hist:
             continue
-        _v = pd.to_numeric(_hist[_campo],errors='coerce')
-        # No tratar 0 como evidencia de operación para una línea base (puede ser dato faltante).
-        _ref = _v.where(_v>0).shift(1).rolling(45,min_periods=15).median()
+        _v = pd.to_numeric(_hist[_campo], errors='coerce')
+        # .shift() ANTES del rolling, agrupado por L, S o D/F. No filtra a futuro.
+        _ref = _v.where(_v>0).groupby(_hist['Tipo Día']).transform(
+            lambda _serie: _serie.shift(1).rolling(45, min_periods=10).median())
         _desviacion=(_v/_ref-1)*100
         _ok = (_hist['_visible'] & _ref.gt(0) & _v.notna() &
                _desviacion.abs().ge(umbral_pct))
         for _i in np.flatnonzero(_ok.to_numpy()):
             _diff=float(_desviacion.iloc[_i])
-            # Una baja de consumo sola NO implica una falla; se reporta como cambio.
             _registros.append({'Fecha':_hist['Fecha'].iloc[_i],
+                               'Tipo de jornada':_hist['Tipo de jornada'].iloc[_i],
                                'Indicador':_campo,
                                'Hallazgo': 'Superior a referencia' if _diff>0 else 'Inferior a referencia',
                                'Valor':round(float(_v.iloc[_i]),2),
                                'Referencia':round(float(_ref.iloc[_i]),2),
                                'Variación %':round(_diff,1)})
-    # Ausencia de energía con operación registrada: revisar fuentes.
-    if 'E_Total' in _hist.columns and 'Odómetro [km]' in _hist.columns:
+    if 'E_Total' in _hist and 'Odómetro [km]' in _hist:
         _faltan=(_hist['_visible'] & _hist['Odómetro [km]'].gt(0) &
                  (_hist['E_Total'].isna() | _hist['E_Total'].le(0)))
         for _i in np.flatnonzero(_faltan.to_numpy()):
             _registros.append({'Fecha':_hist['Fecha'].iloc[_i],
+                               'Tipo de jornada':_hist['Tipo de jornada'].iloc[_i],
                                'Indicador':'E_Total', 'Hallazgo':'Posible ausencia de dato de energía',
                                'Valor':float(_hist['E_Total'].iloc[_i]) if pd.notna(_hist['E_Total'].iloc[_i]) else np.nan,
                                'Referencia':np.nan,'Variación %':np.nan})
     if not _registros:
-        return pd.DataFrame(columns=['Fecha','Indicador','Hallazgo','Valor','Referencia','Variación %'])
+        return pd.DataFrame(columns=_vacias)
     return pd.DataFrame(_registros).sort_values(['Fecha','Indicador'],ascending=[False,True]).reset_index(drop=True)
 
 
 def _bi_pronosticar(historico, indicador, dias=14):
-    """Proyección orientativa por día de semana + tendencia acotada (±15%).
+    """Proyección por clases de jornada, incluyendo futuros festivos de Chile.
 
-    Muestra insuficiente: no inventar valores. Sin intervalos de confianza porque
-    no se ha calibrado un modelo estadístico formal.
+    Para una clase sin 10 antecedentes positivos se deja NaN (sin inventar datos
+    ni sustituirlos por otra clase). La tendencia se calcula dentro de cada clase.
     """
+    _vacias = ['Fecha', 'Tipo de jornada', 'Proyección', 'Indicador', 'Muestra de referencia']
     if historico is None or historico.empty or indicador not in historico.columns:
-        return pd.DataFrame()
-    _z=historico[['Fecha',indicador]].copy()
+        return pd.DataFrame(columns=_vacias)
+    _z=historico[['Fecha', indicador]].copy()
     _z['Fecha']=pd.to_datetime(_z['Fecha'],errors='coerce').dt.normalize()
     _z[indicador]=pd.to_numeric(_z[indicador],errors='coerce')
-    _z=_z.dropna(subset=['Fecha',indicador]).sort_values('Fecha')
-    _z=_z[_z[indicador]>0].drop_duplicates('Fecha',keep='last').tail(90)
-    if len(_z)<28:
-        return pd.DataFrame()
-    _z['_dia']=_z['Fecha'].dt.dayofweek
-    _reciente=_z.tail(56)
-    _referencia=_reciente.groupby('_dia')[indicador].median()
-    _global=float(_reciente[indicador].median())
-    # Control de tendencia: 21 observaciones actuales frente a 21 previas.
-    _a=float(_z[indicador].iloc[-21:].median())
-    _b=float(_z[indicador].iloc[-42:-21].median())
-    _factor=float(np.clip(_a/_b,0.85,1.15)) if _b>0 else 1.0
-    _inicio=_z['Fecha'].max()+pd.Timedelta(days=1)
-    _fechas=pd.date_range(_inicio,periods=dias,freq='D')
-    _pred=[max(0.,float(_referencia.get(_d.dayofweek,_global))*_factor)
-           for _d in _fechas]
-    return pd.DataFrame({'Fecha':_fechas, 'Proyección':_pred, 'Indicador':indicador})
+    _z=_z.dropna(subset=['Fecha']).sort_values('Fecha').drop_duplicates('Fecha',keep='last')
+    if _z.empty:
+        return pd.DataFrame(columns=_vacias)
+    _ultima_fecha=_z['Fecha'].max()
+    _z = _z[_z[indicador].gt(0)].copy()
+    _z['Tipo Día'] = _z['Fecha'].dt.date.map(get_tipo_dia)
+    _bases={}
+    for _j in ('L','S','D/F'):
+        _h=_z[_z['Tipo Día']==_j].tail(90)
+        _reciente=_h.tail(35)
+        _n=len(_reciente)
+        if _n<10:
+            _bases[_j]=(np.nan,_n)
+            continue
+        _referencia=float(_reciente[indicador].median())
+        # Tendencia por la misma jornada, nunca por promedio mezclado.
+        if _n>=20:
+            _a=float(_reciente[indicador].tail(10).median())
+            _b=float(_reciente[indicador].iloc[-20:-10].median())
+            _factor=float(np.clip(_a/_b,0.85,1.15)) if _b>0 else 1.0
+        else:
+            _factor=1.0
+        _bases[_j]=(max(0.0,_referencia*_factor),_n)
+    _fechas=pd.date_range(_ultima_fecha+pd.Timedelta(days=1),periods=int(dias),freq='D')
+    _registros=[]
+    for _f in _fechas:
+        _tipo=get_tipo_dia(_f.date())
+        _v,_n=_bases.get(_tipo,(np.nan,0))
+        _registros.append({'Fecha':_f, 'Tipo de jornada':_JORNADA_TXT.get(_tipo,'No determinado'),
+                           'Proyección':_v,'Indicador':indicador,'Muestra de referencia':_n})
+    return pd.DataFrame(_registros, columns=_vacias)
 
 
 def _bi_calidad(historico, errores=None, duplicados_seat=None):
@@ -4003,6 +4072,11 @@ def _bi_calidad(historico, errores=None, duplicados_seat=None):
         _negativos=int((_serie<0).sum())
         _incidencias.append({'Control':_col,'Hallazgos':_vacios+_negativos,
                               'Detalle':f'{_vacios} sin valor; {_negativos} negativos'})
+    _jornadas=historico['Fecha'].dt.date.map(get_tipo_dia)
+    _no_clasificados=int((~_jornadas.isin(('L','S','D/F'))).sum())
+    _incidencias.append({'Control':'Clasificación jornada (calendario Chile)',
+                          'Hallazgos':_no_clasificados,
+                          'Detalle':'L=laboral; S=sábado no festivo; D/F=domingo o festivo. Festivo prevalece.'})
     if 'Fuente' in historico.columns:
         _ausente=int(historico['Fuente'].astype(str).str.strip().str.upper().isin(['N/A','NONE','NAN','']).sum())
         _incidencias.append({'Control':'Fuente energética no disponible','Hallazgos':_ausente,
@@ -4030,13 +4104,11 @@ if _seccion == '🎯 BI Ejecutivo':
             '🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
         with _bt_res:
             _ini=_bi_filtro['Fecha'].min(); _fin=_bi_filtro['Fecha'].max()
-            _dias_periodo=int((_fin-_ini).days)+1
-            _desde=_ini-pd.Timedelta(days=_dias_periodo)
-            _hasta=_ini-pd.Timedelta(days=1)
-            _prev=_bi_hist[_bi_hist['Fecha'].between(_desde,_hasta)]
+            _prev,_tiene_comparable = _bi_referencia_comparable(_bi_hist,_bi_filtro)
             st.markdown('#### Indicadores de desempeño')
-            st.caption('Variación frente a un período calendario anterior de igual duración. '
-                       'Sin período comparable se muestra sin variación.')
+            st.caption('Los totales incluyen únicamente las jornadas seleccionadas. La referencia usa '
+                       'el mismo número de días anteriores por tipo (laboral, sábado y domingo/festivo); '
+                       'si faltan jornadas equivalentes no se calcula variación.')
             _kpis=[('E_Total','Energía total','kWh',0),
                    ('E_Tr','Energía tracción','kWh',0),
                    ('Odómetro [km]','Kilometraje','km',0),
@@ -4046,7 +4118,7 @@ if _seccion == '🎯 BI Ejecutivo':
             _kcols=st.columns(3)
             for _ki,(_campo,_titulo,_unidad,_dec) in enumerate(_kpis):
                 _actual=_bi_valor_kpi(_bi_filtro,_campo)
-                _anterior=_bi_valor_kpi(_prev,_campo)
+                _anterior=_bi_valor_kpi(_prev,_campo) if _tiene_comparable else np.nan
                 _variacion=_bi_var_pct(_actual,_anterior)
                 _val='Sin datos' if not np.isfinite(_actual) else f'{_ncl(_actual,_dec)} {_unidad}'
                 _delta=f'{_variacion:+.1f}% vs anterior' if _variacion is not None else None
@@ -4054,7 +4126,15 @@ if _seccion == '🎯 BI Ejecutivo':
                                      help='El cambio no indica por sí solo mejoría o deterioro.')
             st.caption(f'Período visible: {_ini:%d/%m/%Y} — {_fin:%d/%m/%Y} · '
                        f'{len(_bi_filtro):,} registros diarios · '
-                       f'Período comparado: {_desde:%d/%m/%Y} — {_hasta:%d/%m/%Y} ({len(_prev)} registros)')
+                       f'Referencia de igual jornada: {len(_prev)} días anteriores '
+                       f'({"comparable" if _tiene_comparable else "insuficiente"})')
+            st.markdown('**Resultados separados por tipo de jornada**')
+            _tabla_jornadas = _bi_resumen_por_jornada(_bi_filtro)
+            if not _tabla_jornadas.empty:
+                st.dataframe(_tabla_jornadas,hide_index=True,width='stretch')
+                _exp_j = _tabla_jornadas.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig')
+                st.download_button('⬇️ Exportar indicadores por jornada',data=_exp_j,
+                                   file_name='kpi_por_jornada_bi.csv',mime='text/csv',key='_bi_csv_jornadas')
             _c1,_c2=st.columns(2)
             for _cont,_campo,_titulo in [(_c1,'E_Total','Energía diaria'),
                                           (_c2,'IDE (kWh/km)','IDE por día')]:
@@ -4078,8 +4158,9 @@ if _seccion == '🎯 BI Ejecutivo':
             _col_a.metric('Hallazgos en período',_ncl(len(_alertas)))
             _col_b.metric('Días con hallazgos',_ncl(_alertas['Fecha'].nunique() if not _alertas.empty else 0))
             _col_c.metric('Archivos con error',_ncl(len(st.session_state.get('_errores_proc',{}))))
-            st.caption('Método: mediana de hasta 45 observaciones anteriores, con al menos 15 datos válidos. '
-                       'Los avisos son señales de análisis, no fallas confirmadas ni notificaciones externas.')
+            st.caption('Método: mediana de hasta 45 antecedentes anteriores de la MISMA jornada (L/S/D-F), '
+                       'con al menos 10 datos válidos por jornada. Un festivo sábado se compara con domingo/festivo. '
+                       'Los avisos no son fallas confirmadas ni notificaciones externas.')
             if _alertas.empty:
                 st.success('No se detectan desviaciones que cumplan el umbral elegido.')
             else:
@@ -4103,8 +4184,9 @@ if _seccion == '🎯 BI Ejecutivo':
             _dias=_c2.selectbox('Horizonte de proyección (días)',[7,14,30],index=1,key='_bi_modelo_dias')
             # Forecast del historial total, no cambia al filtrar un mes remoto.
             _proy=_bi_pronosticar(_bi_hist,_campo,_dias)
-            if _proy.empty:
-                st.warning('Datos históricos insuficientes (mínimo 28 observaciones positivas) para este indicador.')
+            if _proy.empty or _proy['Proyección'].notna().sum()==0:
+                st.warning('Sin antecedentes suficientes de las jornadas necesarias '
+                           '(mínimo 10 días positivos por cada tipo de jornada).')
             else:
                 _ult=_bi_hist[['Fecha',_campo]].dropna().tail(30)
                 _fig=go.Figure()
@@ -4114,17 +4196,24 @@ if _seccion == '🎯 BI Ejecutivo':
                 _fig.update_layout(title=f'Historial reciente y próximos {_dias} días',
                                    xaxis_title='Fecha',yaxis_title=_campo,margin=dict(t=65,b=20))
                 st.plotly_chart(_fig,width='stretch',key='_bi_grafico_proyeccion')
-                _total=_proy['Proyección'].sum()
-                st.metric('Total proyectado del horizonte',f'{_ncl(_total,1)}')
+                _total=_proy['Proyección'].sum(min_count=1)
+                _pendientes=int(_proy['Proyección'].isna().sum())
+                if _pendientes:
+                    st.warning(f'{_pendientes} día(s) sin proyección por falta de antecedentes de su propia jornada. '
+                               'El total mostrado es parcial y no debe tratarse como proyección completa.')
+                st.metric('Total proyectado del horizonte' if not _pendientes else 'Total parcial proyectado',
+                          f'{_ncl(_total,1)}' if pd.notna(_total) else 'Sin dato')
                 _det=_proy.rename(columns={'Proyección':'Valor proyectado'}).copy()
                 _det['Fecha']=_det['Fecha'].dt.strftime('%d-%m-%Y')
-                st.dataframe(_det[['Fecha','Valor proyectado']],hide_index=True,width='stretch')
+                st.dataframe(_det[['Fecha','Tipo de jornada','Valor proyectado','Muestra de referencia']],
+                             hide_index=True,width='stretch')
                 st.download_button('⬇️ Exportar proyección CSV',
                                    data=_det.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
                                    file_name='proyeccion_bi_operacional.csv',mime='text/csv',key='_bi_csv_proyeccion')
-                st.caption('Estimación exploratoria: medianas por día de semana de hasta 56 observaciones recientes, '
-                           'más un ajuste de tendencia limitado a ±15 %. No incluye clima, feriados futuros, '
-                           'cambios de programación ni intervalos estadísticos de confianza.')
+                st.caption('Estimación exploratoria: mediana de hasta 35 observaciones recientes de la misma '
+                           'jornada (laboral, sábado o domingo/festivo), con tendencia por jornada limitada a ±15 %. '
+                           'Sí clasifica festivos futuros nacionales de Chile. No contempla cambios de programación, '
+                           'clima ni intervalos estadísticos de confianza.')
 
         with _bt_causa:
             st.markdown('#### Explorar un día y sus factores observados')
@@ -4143,9 +4232,11 @@ if _seccion == '🎯 BI Ejecutivo':
                                           (_mc4,'IDE (kWh/km)','IDE',2)]:
                     _v=_r.get(_key,np.nan)
                     _mc.metric(_nom,_ncl(_v,_dec) if pd.notna(_v) else 'Sin dato')
-                _tipo=_r['Fecha'].dayofweek
-                _pares=_bi_hist[_bi_hist['Fecha'].dt.dayofweek==_tipo].copy()
+                _tipo=get_tipo_dia(_r['Fecha'].date())
+                _pares=_bi_hist[_bi_hist['Tipo Día']==_tipo].copy()
                 _pares=_pares[_pares['Fecha']<_r['Fecha']].tail(52)
+                st.caption('Jornada seleccionada: '+_JORNADA_TXT.get(_tipo, 'No determinada')+
+                           ' · Referencias únicamente de la misma jornada (hasta 52 días previos).')
                 _comparacion=[]
                 for _k,_n in [('E_Total','Energía total'),('E_Tr','Tracción'),
                                ('Odómetro [km]','Kilometraje'),('IDE (kWh/km)','IDE')]:
@@ -4153,9 +4244,9 @@ if _seccion == '🎯 BI Ejecutivo':
                     _ref=pd.to_numeric(_pares.get(_k,pd.Series(dtype=float)),errors='coerce').replace(0,np.nan).median()
                     _p=_bi_var_pct(_act,float(_ref) if pd.notna(_ref) else np.nan)
                     _comparacion.append({'Indicador':_n,'Día seleccionado':round(_act,2) if pd.notna(_act) else np.nan,
-                                          'Mediana mismo día de semana':round(_ref,2) if pd.notna(_ref) else np.nan,
+                                          'Mediana misma jornada':round(_ref,2) if pd.notna(_ref) else np.nan,
                                           'Diferencia %':round(_p,1) if _p is not None else np.nan})
-                st.markdown('**Comparación con días equivalentes anteriores**')
+                st.markdown('**Comparación con jornadas equivalentes anteriores**')
                 st.dataframe(pd.DataFrame(_comparacion),hide_index=True,width='stretch')
                 if 'Fuente' in _r:
                     st.caption('Fuente de energía priorizada para ese día: '+str(_r['Fuente'])+
