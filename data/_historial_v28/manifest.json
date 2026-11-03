@@ -1,9 +1,9 @@
 {
   "schema": 2,
   "source_sha256": "8b2f90a206465932849269d9cd1c83278c05146bc4d5d0b249fbe0194ac839a3",
-  "code_sha256": "1b866ad6530b26b8063f6cf1b53fa23dbe8bb0929346bd31ae022715c0960043",
+  "code_sha256": "3c1a92a75e7fac5fe7ea46f84f1eeb307bf924fb611046dce72d2e205ed28918",
   "source_files": 1215,
-  "created_utc": "2026-11-03T18:11:39.530721+00:00",
+  "created_utc": "2026-11-03T18:40:31.102514+00:00",
   "types": {
     "df_ops": "frame",
     "df_thdr_v1": "frame_json",
@@ -35,12 +35,12 @@
     {
       "name": "historial_000.part",
       "bytes": 16777216,
-      "sha256": "9880b90ca5a987f6a865652cefc5d136b23c4ce8f64fc604d957b378f49586b0"
+      "sha256": "d337139c4a5745e582dec629ccbc6d7753c1748922030845bb56deb3b29ff965"
     },
     {
       "name": "historial_001.part",
       "bytes": 16777216,
-      "sha256": "2c5a2d85c907af1be56ee11f92e16aa71e610e83a671a60d32f4b6ae2ff1541d"
+      "sha256": "635db54d539b7378a0ae6cae61a7c53b3a31d954493e85f368bd452ae99c4c53"
     },
     {
       "name": "historial_002.part",
@@ -50,7 +50,7 @@
     {
       "name": "historial_003.part",
       "bytes": 14637871,
-      "sha256": "ae4173f63483d26ce71bed42b38622dac00d76f19af3491ac099d73e3787232c"
+      "sha256": "19059d950bee01cf6e297b828137e04dc70c6bd6fadee5455f43f2f6eaafdf9c"
     }
   ]
 }
