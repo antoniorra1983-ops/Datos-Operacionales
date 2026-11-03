@@ -2793,6 +2793,237 @@ def _mostrar_archivos_guardados(_directorios, _revision):
                 st.session_state["_upload_revision"] = _revision + 1
                 st.rerun()
 
+# ===== v28 · HISTORIAL PERSISTENTE Y SEGURO =====
+# La aplicación utiliza un snapshot materializado en GitHub por el workflow adjunto.
+# Streamlit Cloud no conserva el disco al reiniciar: guardar el Parquet solo en /tmp NO basta.
+# No se deserializa pickle: el archivo persistente contiene únicamente Parquet + JSON.
+import io as _v28_io
+import json as _v28_json
+import shutil as _v28_shutil
+import tempfile as _v28_tempfile
+import zipfile as _v28_zipfile
+from pathlib import Path as _V28Path
+from datetime import datetime as _v28_datetime, timezone as _v28_timezone
+
+_V28_DIR = _V28Path('data/_historial_v28')
+_V28_SCHEMA = 2
+_V28_KEYS = (
+    'df_ops', 'df_thdr_v1', 'df_thdr_v2', 'df_carga_v1', 'df_carga_v2',
+    'df_viajes', 'df_ide_lb', 'df_incid', 'df_incid_full', 'df_oit',
+    'df_serv_tipo', 'df_pax_tipo',
+    'all_tr', 'all_seat', 'all_fact_full', 'all_prmte_full',
+    'all_prmte_2025', 'all_kmserv', 'all_saf_li',
+    '_oit_diag', '_mot_inval', '_seat_dups', '_errores_proc',
+    'diag_thdr', '_fichas_energia',
+)
+
+@st.cache_data(show_spinner=False, max_entries=4096)
+def _v28_hash_archivo(_ruta, _tam, _mtime_ns):
+    """El contenido define la identidad; el mtime solo invalida el hash local."""
+    _h = hashlib.sha256()
+    with open(_ruta, 'rb') as _fh:
+        for _bloque in iter(lambda: _fh.read(2 * 1024 * 1024), b''):
+            _h.update(_bloque)
+    return _h.hexdigest()
+
+
+def _v28_firma_origen():
+    """Firma estable entre GitHub Actions y el servidor Streamlit (sin ino/mtime)."""
+    _h = hashlib.sha256()
+    _cantidad = 0
+    for _categoria, _carpeta in sorted(DATA_DIRS.items()):
+        for _ruta_txt in listar_archivos(_carpeta):
+            _ruta = _V28Path(_ruta_txt)
+            _st = _ruta.stat()
+            _sha = _v28_hash_archivo(str(_ruta), _st.st_size, _st.st_mtime_ns)
+            _h.update(f'{_categoria}/{_ruta.name}\0{_st.st_size}\0{_sha}\n'.encode('utf-8'))
+            _cantidad += 1
+    return _h.hexdigest(), _cantidad
+
+
+def _v28_firma_codigo():
+    """Invalida el snapshot si cambia la lógica principal, el lector o dependencias."""
+    _h = hashlib.sha256()
+    _h.update(f'SCHEMA {_V28_SCHEMA}\n'.encode())
+    for _archivo in ('app.py', 'gestion_archivos.py', 'requirements.txt'):
+        _ruta = _V28Path(__file__).resolve().parent / _archivo
+        _h.update(_archivo.encode('utf-8'))
+        _h.update(_ruta.read_bytes())
+    return _h.hexdigest()
+
+
+def _v28_json_preparar(_valor):
+    if _valor is None or _valor is pd.NaT:
+        return None
+    if isinstance(_valor, (pd.Timestamp, _v28_datetime)):
+        return {'__v28_timestamp__': _valor.isoformat()}
+    if isinstance(_valor, date):
+        return {'__v28_date__': _valor.isoformat()}
+    if isinstance(_valor, np.generic):
+        return _v28_json_preparar(_valor.item())
+    if isinstance(_valor, np.ndarray):
+        return [_v28_json_preparar(_v) for _v in _valor.tolist()]
+    if isinstance(_valor, (list, tuple, set)):
+        return [_v28_json_preparar(_v) for _v in _valor]
+    if isinstance(_valor, dict):
+        return {str(_k): _v28_json_preparar(_v) for _k,_v in _valor.items()}
+    if isinstance(_valor, float) and not np.isfinite(_valor):
+        return None
+    if isinstance(_valor, (int, float, str, bool)):
+        return _valor
+    try:
+        if pd.isna(_valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(_valor)
+
+
+def _v28_json_recuperar(_valor):
+    if isinstance(_valor, list):
+        return [_v28_json_recuperar(_v) for _v in _valor]
+    if isinstance(_valor, dict):
+        if set(_valor)=={'__v28_timestamp__'}:
+            return pd.Timestamp(_valor['__v28_timestamp__'])
+        if set(_valor)=={'__v28_date__'}:
+            return date.fromisoformat(_valor['__v28_date__'])
+        return {_k:_v28_json_recuperar(_v) for _k,_v in _valor.items()}
+    return _valor
+
+
+def _v28_escribir_valor(_zip, _key, _valor):
+    """Parquet para tablas; JSON para metadatos. Nunca carga código desde el archivo."""
+    if isinstance(_valor, pd.DataFrame):
+        _tipo = 'frame'
+        _df = _valor
+    elif isinstance(_valor, list) and all(isinstance(_v, dict) for _v in _valor):
+        _tipo = 'records'
+        _df = pd.DataFrame(_valor)
+    else:
+        _tipo = 'json'
+        _df = None
+    if _df is not None:
+        try:
+            _mem = _v28_io.BytesIO()
+            _df.to_parquet(_mem, compression='zstd', index=False)
+            _zip.writestr(f'{_key}.parquet', _mem.getvalue())
+            return _tipo
+        except Exception:
+            # Columnas objeto heterogéneas: formato JSON seguro como respaldo.
+            _tipo = 'frame_json' if _tipo == 'frame' else 'json'
+            if _tipo == 'frame_json':
+                _valor = _valor.to_json(orient='table', date_format='iso')
+    _payload = _v28_json_preparar(_valor)
+    _zip.writestr(f'{_key}.json', _v28_json.dumps(_payload, ensure_ascii=False, separators=(',', ':')))
+    return _tipo
+
+
+def _v28_leer_valor(_zip, _key, _tipo):
+    if _tipo in ('frame', 'records'):
+        _df = pd.read_parquet(_v28_io.BytesIO(_zip.read(f'{_key}.parquet')))
+        return _df if _tipo == 'frame' else _df.to_dict('records')
+    _valor = _v28_json_recuperar(_v28_json.loads(_zip.read(f'{_key}.json')))
+    if _tipo == 'frame_json':
+        return pd.read_json(_v28_io.StringIO(_valor), orient='table')
+    if _tipo == 'json':
+        return _valor
+    raise ValueError('Formato de campo no admitido')
+
+
+def _v28_guardar_snapshot(_firma, _cantidad):
+    """El workflow escribe este archivo y lo confirma en GitHub. No se usa pickle."""
+    _V28_DIR.mkdir(parents=True, exist_ok=True)
+    _dir_temp = _V28Path(_v28_tempfile.mkdtemp(prefix='.v28-', dir=_V28_DIR))
+    try:
+        _zip_tmp = _dir_temp / 'historial.zip'
+        _tipos = {}
+        with _v28_zipfile.ZipFile(_zip_tmp, 'w', compression=_v28_zipfile.ZIP_DEFLATED, compresslevel=4,
+                                 allowZip64=True) as _zip:
+            for _key in _V28_KEYS:
+                if _key in st.session_state:
+                    _tipos[_key] = _v28_escribir_valor(_zip, _key, st.session_state[_key])
+        if not all(_key in _tipos for _key in ('df_ops', 'df_thdr_v1', 'df_thdr_v2', 'all_tr', 'all_seat', 'all_fact_full', 'all_prmte_full', 'all_kmserv', 'all_saf_li')):
+            raise ValueError('Snapshot incompleto: faltan los resultados operacionales')
+        _chunks = []
+        with _zip_tmp.open('rb') as _origen:
+            for _indice in range(1000):
+                _datos = _origen.read(16 * 1024 * 1024)
+                if not _datos:
+                    break
+                _nombre = f'historial_{_indice:03d}.part'
+                (_dir_temp / _nombre).write_bytes(_datos)
+                _chunks.append({'name':_nombre, 'bytes':len(_datos),
+                                'sha256':hashlib.sha256(_datos).hexdigest()})
+        if not _chunks:
+            raise ValueError('Snapshot vacío')
+        _manifest = {
+            'schema':_V28_SCHEMA,
+            'source_sha256':_firma,
+            'code_sha256':_v28_firma_codigo(),
+            'source_files':_cantidad,
+            'created_utc':_v28_datetime.now(_v28_timezone.utc).isoformat(),
+            'types':_tipos,
+            'parts':_chunks,
+        }
+        (_dir_temp / 'manifest.json').write_text(
+            _v28_json.dumps(_manifest, ensure_ascii=False, indent=2), encoding='utf-8'
+        )
+        # Orden atómico: todas las partes primero; manifest al final.
+        for _viejo in _V28_DIR.glob('historial_*.part'):
+            _viejo.unlink()
+        for _item in _chunks:
+            os.replace(_dir_temp/_item['name'], _V28_DIR/_item['name'])
+        os.replace(_dir_temp/'manifest.json', _V28_DIR/'manifest.json')
+        return sum(_c['bytes'] for _c in _chunks)
+    finally:
+        _v28_shutil.rmtree(_dir_temp, ignore_errors=True)
+
+
+def _v28_recuperar_snapshot(_firma):
+    """Carga el historial en la sesión solo si fuentes y código coinciden."""
+    _ruta = _V28_DIR / 'manifest.json'
+    if not _ruta.is_file():
+        return False
+    try:
+        _m = _v28_json.loads(_ruta.read_text(encoding='utf-8'))
+        if (_m.get('schema') != _V28_SCHEMA or _m.get('source_sha256') != _firma
+                or _m.get('code_sha256') != _v28_firma_codigo()):
+            return False
+        _datos = _v28_io.BytesIO()
+        for _part in _m['parts']:
+            _nombre = _part['name']
+            if not re.fullmatch(r'historial_\d{3}\.part', _nombre):
+                return False
+            _bytes = (_V28_DIR / _nombre).read_bytes()
+            if len(_bytes) != _part['bytes'] or hashlib.sha256(_bytes).hexdigest() != _part['sha256']:
+                return False
+            _datos.write(_bytes)
+        _datos.seek(0)
+        _recuperados = {}
+        with _v28_zipfile.ZipFile(_datos, 'r') as _zip:
+            for _key, _tipo in _m['types'].items():
+                if _key not in _V28_KEYS:
+                    continue
+                _recuperados[_key] = _v28_leer_valor(_zip, _key, _tipo)
+        if not all(_k in _recuperados for _k in ('df_ops','df_thdr_v1','df_thdr_v2','all_tr','all_seat','all_fact_full','all_prmte_full','all_kmserv','all_saf_li')):
+            return False
+        st.session_state.update(_recuperados)
+        if 'df_oit' in _recuperados:
+            st.session_state['df_oit'].attrs['diag'] = st.session_state.get('_oit_diag', {})
+        st.session_state['_v28_recuperado'] = True
+        st.session_state['_historial_archivos_procesados'] = _m.get('source_files', 0)
+        _ops = st.session_state['df_ops']
+        if not _ops.empty and 'Fecha' in _ops:
+            _fechas = pd.to_datetime(_ops['Fecha'], errors='coerce').dropna()
+            if not _fechas.empty:
+                st.session_state['_historial_fecha_inicio'] = _fechas.min().date()
+                st.session_state['_historial_fecha_fin'] = _fechas.max().date()
+        st.session_state['_v28_creado_utc'] = _m.get('created_utc')
+        return True
+    except Exception as _exc:
+        st.session_state['_v28_error_recuperacion'] = str(_exc)[:300]
+        return False
+
 # --- 6. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
     st.markdown("### 🚆 Datos operacionales")
@@ -2800,7 +3031,7 @@ with st.sidebar:
     _seccion = st.radio("Secciones", _SECCIONES, key="_nav_seccion", horizontal=False, label_visibility="collapsed")
     st.divider()
     with st.expander("📥 Cargar archivos", expanded=False):
-        st.caption("Formatos XLS, XLSX, XLSM y CSV · Los archivos guardados permanecen disponibles.")
+        st.caption("Formatos XLS, XLSX, XLSM y CSV. Los archivos cargados aquí permanecen solo mientras el servidor esté activo; para guardarlos entre reinicios, súbelos también a GitHub/data.")
         _upload_revision = st.session_state.get("_upload_revision", 0)
         def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
 
@@ -2853,7 +3084,7 @@ f_incid_all    = combinar_fuentes(f_incid, DATA_DIRS["incid"])
 f_oit_all      = combinar_fuentes(f_oit, DATA_DIRS["oit"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v27_historial_completo_automatico"
+_CACHE_VERSION = "v28_historial_persistente_incremental"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               firma_fuentes(f_v1_all, DATA_DIRS["v1"]),
               firma_fuentes(f_v2_all, DATA_DIRS["v2"]),
@@ -2873,10 +3104,21 @@ _fuentes_v27 = [f_v1_all, f_v2_all, f_umr_all, f_seat_all, f_bill_all,
 _hay_archivos = any(_fuentes_v27)
 _total_archivos_v27 = sum(len(_grupo) for _grupo in _fuentes_v27)
 _recalcular = st.session_state.get('_cache_key') != _cache_key
-# Inicio: se carga todo sin pulsar un botón. Si hay nuevos archivos o archivos
-# reemplazados, su firma cambia y se integra automáticamente al siguiente rerun.
+# La caché de sesión resuelve cambios de pestaña y filtros. El snapshot del repositorio
+# resuelve sesiones NUEVAS y reinicios de Streamlit Cloud.
+_v28_firma = None
+_v28_cantidad = _total_archivos_v27
+if _hay_archivos and (_recalcular or 'df_ops' not in st.session_state) and not st.session_state.get('_do_load'):
+    _v28_firma, _v28_cantidad = _v28_firma_origen()
+    if _v28_recuperar_snapshot(_v28_firma):
+        st.session_state['_cache_key'] = _cache_key
+        st.session_state['_do_load'] = False
+        _recalcular = False
+# Si faltan nuevos documentos o ha cambiado el código, se procesan las fuentes.
+# La lectura cara de THDR/UMR/SEAT/Factura se evita gracias a la caché de cada archivo.
 if _hay_archivos and (_recalcular or 'df_ops' not in st.session_state):
     st.session_state['_do_load'] = True
+    st.session_state['_v28_recuperado'] = False
     if '_inicio_carga_datos' not in st.session_state:
         st.session_state['_inicio_carga_datos'] = _medir_tiempo_carga()
 
@@ -3214,8 +3456,23 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     _inicio_carga = st.session_state.pop('_inicio_carga_datos', None)
     if _inicio_carga is not None:
         st.session_state['_ultima_carga_segundos'] = round(_medir_tiempo_carga() - _inicio_carga, 1)
+    # En GitHub Actions, y SOLO allí, publicar una base procesada duradera.
+    # En Streamlit Cloud se mantiene el archivo local de caché por archivo,
+    # pero no se confunde con almacenamiento permanente entre reinicios.
+    if os.getenv('OP_CACHE_BUILD') == '1':
+        if _v28_firma is None:
+            _v28_firma, _v28_cantidad = _v28_firma_origen()
+        _v28_bytes = _v28_guardar_snapshot(_v28_firma, _v28_cantidad)
+        st.session_state['_v28_tamano_snapshot'] = _v28_bytes
 
 # Estado de la base completa, separado de los filtros de visualización.
+if st.session_state.get('_v28_recuperado'):
+    st.sidebar.success("⚡ Historial persistente: restaurado sin volver a procesar Excel")
+elif _hay_archivos and os.getenv('OP_CACHE_BUILD') != '1':
+    if (_V28_DIR / 'manifest.json').exists():
+        st.sidebar.caption("♻️ Fuentes actualizadas: procesadas con caché incremental")
+    else:
+        st.sidebar.caption("ℹ️ El historial persistente se publica mediante GitHub Actions")
 if st.session_state.get('_cache_key') == _cache_key:
     _v27_ini = st.session_state.get('_historial_fecha_inicio')
     _v27_fin = st.session_state.get('_historial_fecha_fin')
