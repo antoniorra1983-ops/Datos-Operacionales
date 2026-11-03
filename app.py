@@ -2796,6 +2796,143 @@ def _mostrar_archivos_guardados(_directorios, _revision):
                 st.session_state["_upload_revision"] = _revision + 1
                 st.rerun()
 
+
+# ===== v34 · TIEMPOS REALES DE VIAJE THDR EN EL BI =====
+# Duración = hora de llegada destino - hora de salida origen, tal como la
+# registra THDR. NO es retraso respecto de horario programado. Se excluyen
+# duraciones imposibles/no disponibles; jamás se interpretan como cero.
+
+def _bi_tv_preparar(df_v1, df_v2, tamano_lote=1200):
+    """Compacta servicios THDR para GitHub Actions, evitando copia de matrices completas.
+
+    El resumen por servicio se guarda dentro del snapshot GitHub para que
+    Streamlit no tenga que abrir 1.000+ Excel ni las tablas THDR originales.
+    """
+    _columnas=['Fecha','Vía','Tipo de servicio','Tipo de tren','Composición',
+               'Servicio THDR','Viaje THDR','Duración (min)','Tipo Día']
+    _partes=[]
+    for _via, _origen in [('Vía 1',df_v1),('Vía 2',df_v2)]:
+        if _origen is None or _origen.empty or 'Fecha_Op' not in _origen.columns:
+            continue
+        for _inicio in range(0,len(_origen),tamano_lote):
+            _x=_origen.iloc[_inicio:_inicio+tamano_lote]
+            _calculados=_od_y_dur(_x)
+            if _calculados.empty: continue
+            _fechas=pd.to_datetime(_x['Fecha_Op'],errors='coerce').dt.normalize()
+            _ruta=(_x['Tipo_Servicio'].astype('string') if 'Tipo_Servicio' in _x
+                   else _calculados['OD'].astype('string'))
+            _ruta=_ruta.where(_ruta.notna() & _ruta.str.strip().ne(''),_calculados['OD'].astype('string'))
+            _m1=pd.to_numeric(_x['Motriz 1'],errors='coerce') if 'Motriz 1' in _x else pd.Series(np.nan,index=_x.index)
+            _m2=pd.to_numeric(_x['Motriz 2'],errors='coerce') if 'Motriz 2' in _x else pd.Series(np.nan,index=_x.index)
+            _doble=_m2.notna()
+            if 'Unidad' in _x:
+                _doble=_doble | _x['Unidad'].astype(str).str.upper().str.strip().eq('M')
+            _tipo=_m1.apply(_tipo_tren)
+            _doble=_doble & _tipo.ne('SFE')
+            _out=pd.DataFrame({
+                'Fecha':_fechas.to_numpy(),
+                'Vía':_via,
+                'Tipo de servicio':_ruta.astype(str).to_numpy(),
+                'Tipo de tren':_tipo.to_numpy(),
+                'Composición':np.where(_doble,'Doble','Simple'),
+                # Identificadores como texto uniforme: Parquet no falla por tipos mixtos.
+                'Servicio THDR':(_x['Tren'].astype('string').fillna('').to_numpy(dtype=str) if 'Tren' in _x else ''),
+                'Viaje THDR':(_x['Viaje'].astype('string').fillna('').to_numpy(dtype=str) if 'Viaje' in _x else ''),
+                'Duración (min)':pd.to_numeric(_calculados['Dur'],errors='coerce').to_numpy(),
+            })
+            _out['Tipo Día']=_out['Fecha'].dt.date.map(get_tipo_dia)
+            _out=_out[_out['Fecha'].notna() & _out['Tipo Día'].isin(['L','S','D/F'])]
+            _out=_out[~_out['Tipo de servicio'].isin(['Sin clasificar','<NA>','nan','None',''])]
+            # La rutina THDR solo acepta 1 a 180 minutos: no se fuerzan valores.
+            _partes.append(_out)
+    if not _partes: return pd.DataFrame(columns=_columnas)
+    _t=pd.concat(_partes,ignore_index=True)
+    _t['Duración (min)']=pd.to_numeric(_t['Duración (min)'],errors='coerce')
+    _t.loc[~_t['Duración (min)'].between(1,180),'Duración (min)']=np.nan
+    # No descartar viajes sin tiempo: se necesitan para medir cobertura THDR.
+    return _t[_columnas].sort_values(['Fecha','Vía','Servicio THDR'],kind='stable').reset_index(drop=True)
+
+
+def _bi_tv_comparables(detalle, dias_previos=45, minimo_dias=6, minimo_viajes=20):
+    """Referencia causalmente neutra por OD + tipo de tren + jornada.
+
+    Para cada fecha compara la MEDIANA de ese OD/tren con hasta 45 fechas
+    ANTERIORES de esa misma combinación, sin datos futuros ni jornadas mezcladas.
+    """
+    _campos=['Fecha','Tipo de servicio','Tipo de tren','Tipo Día','Viajes THDR',
+             'Viajes con hora válida','Mediana viaje (min)','Referencia por OD (min)',
+             'Variación por OD (%)','Días de referencia','Servicios de referencia',
+             'Minutos extra descriptivos']
+    if detalle is None or detalle.empty: return pd.DataFrame(columns=_campos)
+    _d=detalle.copy()
+    _d['Fecha']=pd.to_datetime(_d['Fecha'],errors='coerce').dt.normalize()
+    _d['Duración (min)']=pd.to_numeric(_d['Duración (min)'],errors='coerce')
+    _d=_d[_d['Fecha'].notna() & _d['Tipo Día'].isin(('L','S','D/F'))]
+    if _d.empty: return pd.DataFrame(columns=_campos)
+    _grupo=['Fecha','Tipo de servicio','Tipo de tren','Tipo Día']
+    _a=_d.groupby(_grupo,observed=True,dropna=False).agg(**{
+        'Viajes THDR':('Fecha','size'),
+        'Viajes con hora válida':('Duración (min)','count'),
+        'Mediana viaje (min)':('Duración (min)','median')
+    }).reset_index()
+    _a=_a.sort_values('Fecha',kind='stable')
+    _resultados=[]
+    _keys=['Tipo de servicio','Tipo de tren','Tipo Día']
+    for _,_g in _a.groupby(_keys,sort=False,observed=True,dropna=False):
+        _g=_g.sort_values('Fecha').copy()
+        # Solo días anteriores con al menos un servicio de duración válida.
+        _ok=_g['Viajes con hora válida'].gt(0)
+        _med=_g['Mediana viaje (min)'].where(_ok).shift(1)
+        _viajes=_g['Viajes con hora válida'].where(_ok,0).shift(1).fillna(0)
+        _n_dias=_med.rolling(dias_previos,min_periods=1).count()
+        _n_viajes=_viajes.rolling(dias_previos,min_periods=1).sum()
+        _referencia=_med.rolling(dias_previos,min_periods=1).median()
+        _referencia=_referencia.where((_n_dias>=minimo_dias)&(_n_viajes>=minimo_viajes))
+        _g['Referencia por OD (min)']=_referencia.to_numpy()
+        _g['Días de referencia']=_n_dias.to_numpy().astype(int)
+        _g['Servicios de referencia']=_n_viajes.to_numpy().astype(int)
+        _g['Variación por OD (%)']=100*(_g['Mediana viaje (min)']/_g['Referencia por OD (min)']-1)
+        # Minutos descriptivos: diferencia entre medianas × viajes de ese grupo.
+        # No es el atraso ferroviario real ni un consumo energético atribuible.
+        _g['Minutos extra descriptivos']=((_g['Mediana viaje (min)']-_g['Referencia por OD (min)'])
+                                          .clip(lower=0)*_g['Viajes con hora válida'])
+        _resultados.append(_g[_campos])
+    return pd.concat(_resultados,ignore_index=True).sort_values(['Fecha','Tipo de servicio']).reset_index(drop=True)
+
+
+def _bi_tv_por_dia(grupos):
+    """Una fila por fecha; medias ponderadas por número de viajes comparables."""
+    _c=['Fecha','Viajes THDR con ruta','Viajes con duración válida','Cobertura tiempos THDR (%)',
+        'Viajes con referencia','Tiempo comparable (min)','Referencia comparable (min)',
+        'Desvío tiempo comparable (%)','Grupos OD excedidos +15 %',
+        'Minutos extra descriptivos THDR']
+    if grupos is None or grupos.empty: return pd.DataFrame(columns=_c)
+    _r=[]
+    for _fecha,_g in grupos.groupby('Fecha',sort=True):
+        _n=int(_g['Viajes THDR'].sum())
+        _v=int(_g['Viajes con hora válida'].sum())
+        _x=_g[_g['Referencia por OD (min)'].gt(0) & _g['Mediana viaje (min)'].notna()]
+        _pesos=pd.to_numeric(_x['Viajes con hora válida'],errors='coerce').fillna(0)
+        _nr=int(_pesos.sum())
+        _actual=float((_x['Mediana viaje (min)']*_pesos).sum()/_nr) if _nr else np.nan
+        _ref=float((_x['Referencia por OD (min)']*_pesos).sum()/_nr) if _nr else np.nan
+        _pct=100*(_actual/_ref-1) if _nr and _ref>0 else np.nan
+        _r.append({'Fecha':_fecha,'Viajes THDR con ruta':_n,
+                   'Viajes con duración válida':_v,
+                   'Cobertura tiempos THDR (%)':100*_v/_n if _n else np.nan,
+                   'Viajes con referencia':_nr,'Tiempo comparable (min)':_actual,
+                   'Referencia comparable (min)':_ref,'Desvío tiempo comparable (%)':_pct,
+                   'Grupos OD excedidos +15 %':int(_x['Variación por OD (%)'].gt(15).sum()),
+                   'Minutos extra descriptivos THDR':float(_x['Minutos extra descriptivos'].sum()) if _nr else np.nan})
+    return pd.DataFrame(_r,columns=_c)
+
+
+def _bi_tv_preparar_panel(detalle):
+    if detalle is None or detalle.empty:
+        return pd.DataFrame(),pd.DataFrame()
+    _grupos=_bi_tv_comparables(detalle)
+    return _grupos,_bi_tv_por_dia(_grupos)
+
 # ===== v28 · HISTORIAL PERSISTENTE Y SEGURO =====
 # La aplicación utiliza un snapshot materializado en GitHub por el workflow adjunto.
 # Streamlit Cloud no conserva el disco al reiniciar: guardar el Parquet solo en /tmp NO basta.
@@ -2813,7 +2950,7 @@ _V28_SCHEMA = 2
 _V28_KEYS = (
     'df_ops', 'df_thdr_v1', 'df_thdr_v2', 'df_carga_v1', 'df_carga_v2',
     'df_viajes', 'df_ide_lb', 'df_incid', 'df_incid_full', 'df_oit',
-    'df_serv_tipo', 'df_pax_tipo',
+    'df_serv_tipo', 'df_pax_tipo', 'df_bi_tiempos',
     'all_tr', 'all_seat', 'all_fact_full', 'all_prmte_full',
     'all_prmte_2025', 'all_kmserv', 'all_saf_li',
     '_oit_diag', '_mot_inval', '_seat_dups', '_errores_proc',
@@ -2989,6 +3126,7 @@ def _v28_guardar_snapshot(_firma, _cantidad):
 _V29_CODIGOS_COMPATIBLES = {
     # v28-v31 publicados. La v32 añade cruce BI con OIT sin alterar parseo,
     # sin alterar el parseo histórico. Se permite usarlos durante precálculo.
+    "3c1a92a75e7fac5fe7ea46f84f1eeb307bf924fb611046dce72d2e205ed28918",  # snapshot v33 publicado
     "aeb1a712743d0bf2094572dbaf0e52c5fe3d55729a290a4dce3140220383acdf",  # v30 real publicada
     "1b866ad6530b26b8063f6cf1b53fa23dbe8bb0929346bd31ae022715c0960043",  # v32 publicada (si coincide con manifest)
     "21112a1e75bb36180c8dd11e0f6f5b18950f292882ba1fd76343c955431549e2",
@@ -3013,7 +3151,7 @@ _V29_DATOS_POR_SECCION = (
     ('df_carga_v1', 'df_carga_v2', 'all_prmte_full'),
     ('df_carga_v1', 'df_carga_v2'),
     (),  # Causa raíz: esta vista tiene su propia carga anual por caché.
-    ("df_serv_tipo", "df_pax_tipo", "df_incid", "df_incid_full", "df_ide_lb",
+    ("df_serv_tipo", "df_pax_tipo", "df_bi_tiempos", "df_incid", "df_incid_full", "df_ide_lb",
       "all_tr", "df_oit", "_oit_diag", "_errores_proc", "_seat_dups"),
       # BI v33: UMR por tren para modelo IDE 100/M-SFE, incidentes, OIT y rutas.
 )
@@ -3084,6 +3222,11 @@ def _v28_recuperar_snapshot(_firma, _claves=None):
         _solicitadas = set(_V28_KEYS if _claves is None else _claves)
         if 'df_ops' not in _solicitadas:
             _solicitadas.add('df_ops')
+        # El snapshot v33 todavía no incluye tiempos THDR precalculados.
+        # Lo omite temporalmente y mantiene el BI online mientras Actions genera v34.
+        if 'df_bi_tiempos' not in _m['types']:
+            _solicitadas.discard('df_bi_tiempos')
+            st.session_state.pop('df_bi_tiempos',None)
         _faltantes = _solicitadas - set(_m['types'])
         if _faltantes:
             raise ValueError('Faltan tablas en el historial: '+', '.join(sorted(_faltantes)))
@@ -3668,6 +3811,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
     # En Streamlit Cloud se mantiene el archivo local de caché por archivo,
     # pero no se confunde con almacenamiento permanente entre reinicios.
     if os.getenv('OP_CACHE_BUILD') == '1':
+        # THDR original ya cargado en el proceso de Actions: preprocesar solo
+        # una vez y guardar viajes compactos para uso inmediato del BI.
+        st.session_state['df_bi_tiempos']=_bi_tv_preparar(df_thdr_v1,df_thdr_v2)
         if _v28_firma is None:
             _v28_firma, _v28_cantidad = _v28_firma_origen()
         _v28_bytes = _v28_guardar_snapshot(_v28_firma, _v28_cantidad)
@@ -4164,7 +4310,7 @@ def _bi_ide_referencias(diario, linea_base, kms_sfe, ventana=45, minimo=10):
     return _t
 
 
-def _bi_ide_cruzar_fuentes(tabla, inc_full=None, inc_acoples=None, servicios=None, pax_rutas=None):
+def _bi_ide_cruzar_fuentes(tabla, inc_full=None, inc_acoples=None, servicios=None, pax_rutas=None, tiempos=None):
     """Incorpora evidencia diaria sin multiplicar las filas de energía/IDE."""
     if tabla is None or tabla.empty:
         return pd.DataFrame()
@@ -4225,6 +4371,13 @@ def _bi_ide_cruzar_fuentes(tabla, inc_full=None, inc_acoples=None, servicios=Non
         _d=_d.merge(_g,on='Fecha',how='left',validate='one_to_one')
     else:
         _d['Pasajeros asociados a recorridos']=np.nan
+    # THDR preagregado: una fila por fecha, NO una por tren o estación.
+    if tiempos is not None and not tiempos.empty and 'Fecha' in tiempos:
+        _tv=tiempos.copy()
+        _tv['Fecha']=pd.to_datetime(_tv['Fecha'],errors='coerce').dt.normalize()
+        if _tv['Fecha'].duplicated().any():
+            raise ValueError('Tiempos THDR deben tener una fila por fecha')
+        _d=_d.merge(_tv,on='Fecha',how='left',validate='one_to_one')
     return _d
 
 
@@ -4249,7 +4402,9 @@ def _bi_ide_factores_dia(historico, fecha, ventana=45, minimo=5):
                   ('Servicios','Servicios'),('PAX','Pasajeros'),
                   ('Incidentes PCC','Incidentes PCC'),('Incidentes con afectación','Incidentes con afectación'),
                   ('Órdenes OIT madrugada','Órdenes OIT de madrugada'),
-                  ('OIT cierre madrugada siguiente','OIT cierre madrugada siguiente')]
+                  ('OIT cierre madrugada siguiente','OIT cierre madrugada siguiente'),
+                  ('Desvío tiempo comparable (%)','Desvío del tiempo de viaje por OD (%)'),
+                  ('Viajes con referencia','Viajes THDR comparables')]
     _rs=[]
     for _campo,_label in _indicadores:
         if _campo not in _h:
@@ -4432,6 +4587,20 @@ if _seccion == '🎯 BI Ejecutivo':
     _bi_oit_disponible = bool(listar_archivos(DATA_DIRS['oit']))
     _bi_diario_historico = _bi_cruzar_nocturnos(
         _bi_hist, st.session_state.get('df_oit',pd.DataFrame()), _bi_oit_disponible)
+    # Resumen THDR compacto guardado en el snapshot; nunca reabrir los Excel.
+    _bi_tv_data=st.session_state.get('df_bi_tiempos',pd.DataFrame())
+    _bi_tv_firma=(_cache_key,st.session_state.get('_v28_creado_utc'))
+    if (_bi_tv_data is not None and not _bi_tv_data.empty and
+            st.session_state.get('_bi_tv_firma_v34')!=_bi_tv_firma):
+        _gr,_dia_tv=_bi_tv_preparar_panel(_bi_tv_data)
+        st.session_state['_bi_tv_grupos_v34']=_gr
+        st.session_state['_bi_tv_diario_v34']=_dia_tv
+        st.session_state['_bi_tv_firma_v34']=_bi_tv_firma
+    elif _bi_tv_data is None or _bi_tv_data.empty:
+        for _k in ('_bi_tv_firma_v34','_bi_tv_grupos_v34','_bi_tv_diario_v34'):
+            st.session_state.pop(_k,None)
+    _bi_tv_grupos=st.session_state.get('_bi_tv_grupos_v34',pd.DataFrame())
+    _bi_tv_diario=st.session_state.get('_bi_tv_diario_v34',pd.DataFrame())
     _bi_diario = (_bi_diario_historico[
         _bi_diario_historico['Fecha'].isin(set(_bi_filtro['Fecha']))
     ].copy() if not _bi_diario_historico.empty else pd.DataFrame())
@@ -4440,9 +4609,10 @@ if _seccion == '🎯 BI Ejecutivo':
     elif _bi_filtro.empty:
         st.info('No existen datos para los filtros seleccionados. Cambia el período en la barra superior.')
     else:
-        _bt_res,_bt_diario,_bt_alert,_bt_ide,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
+        _bt_res,_bt_diario,_bt_alert,_bt_ide,_bt_tv,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
             '📊 Resumen ejecutivo','🌙 Día a día · trenes nocturnos','🚦 Alertas',
-            '🔬 Investigación IDE','🔮 Proyecciones','🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
+            '🔬 Investigación IDE','⏱️ Tiempos de viaje THDR','🔮 Proyecciones',
+            '🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
         with _bt_res:
             _ini=_bi_filtro['Fecha'].min(); _fin=_bi_filtro['Fecha'].max()
             _prev,_tiene_comparable = _bi_referencia_comparable(_bi_hist,_bi_filtro)
@@ -4622,7 +4792,7 @@ if _seccion == '🎯 BI Ejecutivo':
             st.markdown('#### Investigación integral de días con sobreconsumo IDE')
             st.caption('Identifica el día en que el IDE real excede la línea base calculada para trenes '
                        '100/M y SFE. Se cruzan por fecha los datos energéticos, UMR, THDR, pasajeros, '
-                       'incidentes PCC y órdenes OIT SFE de madrugada. Las coincidencias NO prueban causalidad.')
+                       'incidentes PCC, tiempos reales THDR y órdenes OIT SFE de madrugada. Las coincidencias NO prueban causalidad.')
             if ('_bi_km_sfe_v33' not in st.session_state or st.session_state.get('_bi_km_sfe_firma_v33') != _cache_key):
                 # UMR por tren se lee del snapshot existente, no de todos los Excel.
                 _sfe_dia=_bi_ide_km_sfe(st.session_state.get('all_tr',[]))
@@ -4636,7 +4806,7 @@ if _seccion == '🎯 BI Ejecutivo':
                 _ide_historico,st.session_state.get('df_incid_full',pd.DataFrame()),
                 st.session_state.get('df_incid',pd.DataFrame()),
                 st.session_state.get('df_serv_tipo',pd.DataFrame()),
-                st.session_state.get('df_pax_tipo',pd.DataFrame()))
+                st.session_state.get('df_pax_tipo',pd.DataFrame()),_bi_tv_diario)
             _ide_fecha_vis=set(_bi_filtro['Fecha'])
             _ide_periodo=_ide_historico[_ide_historico['Fecha'].isin(_ide_fecha_vis)].copy()
             if _ide_periodo.empty:
@@ -4686,7 +4856,10 @@ if _seccion == '🎯 BI Ejecutivo':
                                  'E_Tr','Odómetro [km]','Servicios','PAX','Tren-Km [km]',
                                  'Incidentes PCC','Incidentes con afectación','Acoples registrados',
                                  'Desacoples registrados','Órdenes OIT madrugada','OIT cierre madrugada siguiente',
-                                 'Unidades SFE OIT','Fuente']
+                                 'Unidades SFE OIT','Viajes con duración válida',
+                                 'Viajes con referencia','Tiempo comparable (min)',
+                                 'Referencia comparable (min)','Desvío tiempo comparable (%)',
+                                 'Grupos OD excedidos +15 %','Fuente']
                     _reporte=_fuera[[c for c in _vista_cols if c in _fuera]].copy()
                     st.markdown('**Días prioritarios para investigar · mayor desviación primero**')
                     st.dataframe(_reporte,hide_index=True,width='stretch')
@@ -4749,6 +4922,29 @@ if _seccion == '🎯 BI Ejecutivo':
                         if _noct:
                             st.caption('SFE informadas: '+str(_dia.get('Unidades SFE OIT','')))
                         st.caption('OIT indica fecha de CIERRE, no hora real de circulación; '           'la madrugada siguiente podría corresponder a la noche anterior, '           'pero no está confirmado.')
+                    st.markdown('**Duración real de viajes THDR y rutas del día**')
+                    _tv_ref=_bi_tv_grupos[_bi_tv_grupos['Fecha'].eq(_f)].copy() if not _bi_tv_grupos.empty else pd.DataFrame()
+                    if _tv_ref.empty:
+                        st.info('Sin resumen de tiempos THDR en la fecha; revisa la actualización de GitHub Actions y cobertura de horarios.')
+                    else:
+                        _t1,_t2,_t3=st.columns(3)
+                        _vref=_dia.get('Viajes con referencia',np.nan)
+                        _ds=_dia.get('Desvío tiempo comparable (%)',np.nan)
+                        _t1.metric('Viajes con hora válida',
+                                   _ncl(_dia.get('Viajes con duración válida',0)))
+                        _t2.metric('Viajes con referencia histórica',
+                                   _ncl(_vref) if pd.notna(_vref) else 'Sin referencia')
+                        _t3.metric('Variación viaje por OD',
+                                   f'{_ds:+.1f} %' if pd.notna(_ds) else 'Sin referencia')
+                        _tcols=['Tipo de servicio','Tipo de tren','Viajes THDR','Viajes con hora válida',
+                                'Mediana viaje (min)','Referencia por OD (min)',
+                                'Variación por OD (%)','Días de referencia']
+                        st.dataframe(_tv_ref[[c for c in _tcols if c in _tv_ref]].sort_values(
+                            'Variación por OD (%)',ascending=False,na_position='last').head(100),
+                            hide_index=True,width='stretch')
+                        st.caption('La referencia compara el mismo origen-destino, tipo de tren y jornada '  
+                                   'con hasta 45 fechas anteriores; se exigen al menos 6 días y 20 viajes. '  
+                                   'La desviación del tiempo NO demuestra que haya causado el aumento de IDE.')
                     st.markdown('**Línea base aplicada y procedencia del dato energético**')
                     _trazabilidad=pd.DataFrame([{'Indicador':_col,'Valor':_dia.get(_col,np.nan)} for _col in [
                         'Intercepcion','IDE_LB_100M','IDE_LB_SFE','Odom_SFE','Odom_100M',
@@ -4789,6 +4985,98 @@ if _seccion == '🎯 BI Ejecutivo':
                                'el evento: la cobertura de cada archivo puede ser distinta. '
                                'Para movimientos de tren con horarios reales, consulta THDR en '
                                '«Análisis de contribuyentes» y verifica sus campos originales.')
+
+
+        with _bt_tv:
+            st.markdown('#### Tiempo real de viaje THDR · cruce con energía e IDE')
+            st.caption('Tiempo de viaje = llegada al destino menos salida del origen registrada en THDR, '
+                       'con cruce de medianoche cuando corresponde. No es atraso frente a horario '
+                       'programado: compara trayectos O-D y tipos de tren equivalentes y '
+                       'separa Laboral, Sábado y Domingo/festivo. No demuestra causalidad energética.')
+            if _bi_tv_data is None or _bi_tv_data.empty:
+                st.warning('El resumen THDR de tiempos todavía no se encuentra en la base histórica. '
+                           'GitHub Actions debe generar el nuevo historial v34 después de subir app.py. '
+                           'Esta vista no relee los Excel en Streamlit para evitar problemas de memoria.')
+            elif _bi_tv_grupos.empty or _bi_tv_diario.empty:
+                st.info('No hay viajes con origen/destino reconocidos en los THDR disponibles.')
+            else:
+                _fechas_tv=set(_bi_filtro['Fecha'].dropna())
+                _tv_vis=_bi_tv_diario[_bi_tv_diario['Fecha'].isin(_fechas_tv)].copy()
+                if '_fuera' in locals() and not _fuera.empty:
+                    _solo_ex=st.checkbox('Solo días con IDE excedido (referencia elegida en Investigación IDE)',
+                                        value=False,key='_bi_tv_ide_exceso_v34')
+                    if _solo_ex:
+                        _tv_vis=_tv_vis[_tv_vis['Fecha'].isin(set(_fuera['Fecha']))]
+                if _tv_vis.empty:
+                    st.info('Sin tiempos THDR en los días seleccionados. Modifica los filtros.')
+                else:
+                    _n_tv=int(_tv_vis['Viajes con duración válida'].sum())
+                    _n_ref=int(_tv_vis['Viajes con referencia'].sum())
+                    _m=_tv_vis['Desvío tiempo comparable (%)'].dropna()
+                    _c1,_c2,_c3,_c4=st.columns(4)
+                    _c1.metric('Días con THDR',_ncl(len(_tv_vis)))
+                    _c2.metric('Viajes con duración',_ncl(_n_tv))
+                    _c3.metric('Viajes comparables',_ncl(_n_ref))
+                    _c4.metric('Días con sobretiempo +15 %',_ncl(int(_m.gt(15).sum())))
+                    _tv_cruce=_bi_filtro[['Fecha','Tipo de jornada','IDE (kWh/km)','E_Tr',
+                                          'Odómetro [km]','PAX','Servicios']].merge(
+                        _tv_vis,on='Fecha',how='inner',validate='one_to_one')
+                    _tv_cols=['Fecha','Tipo de jornada','IDE (kWh/km)',
+                              'E_Tr','Odómetro [km]','Viajes THDR con ruta',
+                              'Viajes con duración válida','Cobertura tiempos THDR (%)',
+                              'Viajes con referencia','Tiempo comparable (min)',
+                              'Referencia comparable (min)','Desvío tiempo comparable (%)',
+                              'Grupos OD excedidos +15 %']
+                    st.markdown('**Cruce diario de IDE, energía y tiempos reales THDR**')
+                    st.dataframe(_tv_cruce[[c for c in _tv_cols if c in _tv_cruce]],
+                                 hide_index=True,width='stretch')
+                    st.download_button('⬇️ Exportar cruce IDE y tiempos',
+                        data=_tv_cruce.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                        file_name='bi_tiempo_viajes_ide_diario.csv',mime='text/csv',
+                        key='_bi_tv_descarga_diaria_v34')
+                    _gra=_tv_cruce.dropna(subset=['Desvío tiempo comparable (%)','IDE (kWh/km)'])
+                    if not _gra.empty:
+                        st.plotly_chart(px.scatter(_gra,x='Desvío tiempo comparable (%)',
+                            y='IDE (kWh/km)',color='Tipo de jornada',hover_data=['Fecha',
+                            'Viajes con referencia'],title='IDE vs variación de duración por O-D comparables'),
+                            width='stretch',key='_bi_tv_ide_scatter_v34')
+                        st.caption('Relación descriptiva por fecha. Un punto NO prueba que el tiempo de viaje '
+                                   'cause mayor IDE: también pueden influir demanda, detenciones e incidentes.')
+                    _fechas=sorted(_tv_vis['Fecha'].dt.date.unique(),reverse=True)
+                    _dia_sel=st.selectbox('Fecha para investigar los tiempos THDR',_fechas,
+                                          format_func=lambda d:d.strftime('%d-%m-%Y'),key='_bi_tv_dia_v34')
+                    _ruta_grupos=_bi_tv_grupos[_bi_tv_grupos['Fecha'].eq(pd.Timestamp(_dia_sel))].copy()
+                    if not _ruta_grupos.empty:
+                        _op_rutas=['Todos los recorridos']+sorted(_ruta_grupos['Tipo de servicio'].dropna().unique().tolist())
+                        _rsel=st.selectbox('Recorrido O-D',_op_rutas,key='_bi_tv_ruta_v34')
+                        if _rsel!='Todos los recorridos':
+                            _ruta_grupos=_ruta_grupos[_ruta_grupos['Tipo de servicio'].eq(_rsel)]
+                        st.markdown('**Recorridos y tipos de tren del día**')
+                        _det_cols=['Tipo de servicio','Tipo de tren','Viajes THDR',
+                                   'Viajes con hora válida','Mediana viaje (min)',
+                                   'Referencia por OD (min)','Variación por OD (%)',
+                                   'Días de referencia','Servicios de referencia']
+                        st.dataframe(_ruta_grupos[_det_cols].sort_values('Variación por OD (%)',
+                                     ascending=False,na_position='last'),hide_index=True,width='stretch')
+                        st.download_button('⬇️ Exportar recorridos de la fecha',
+                            data=_ruta_grupos[_det_cols].to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                            file_name=f'bi_thdr_recorridos_{_dia_sel:%Y%m%d}.csv',
+                            mime='text/csv',key='_bi_tv_recorridos_v34')
+                        _trips=_bi_tv_data[pd.to_datetime(_bi_tv_data['Fecha'],errors='coerce').dt.normalize()
+                                           .eq(pd.Timestamp(_dia_sel))]
+                        if _rsel!='Todos los recorridos':
+                            _trips=_trips[_trips['Tipo de servicio'].eq(_rsel)]
+                        _sal=['Vía','Tipo de servicio','Tipo de tren','Composición','Servicio THDR',
+                              'Viaje THDR','Duración (min)']
+                        st.markdown('**Viajes THDR individuales (horas observadas)**')
+                        st.dataframe(_trips[_sal].head(500),hide_index=True,width='stretch')
+                        if _trips['Duración (min)'].isna().any():
+                            st.caption('Los viajes sin hora válida se muestran vacíos y se excluyen '
+                                       'de medianas y porcentajes, no se cuentan como cero.')
+                st.caption('Cobertura: THDR Vía 1 y Vía 2 que tengan fecha, trayecto y horas. '
+                           'Solo se calcula referencia cuando hay al menos 6 fechas anteriores '
+                           'y 20 viajes en el mismo O-D, tipo de tren y jornada. '
+                           'Comparaciones sin antecedentes suficientes aparecen sin referencia.')
 
         with _bt_pred:
             st.markdown('#### Proyección operativa orientativa')
