@@ -1,0 +1,56 @@
+{
+  "schema": 2,
+  "source_sha256": "8b2f90a206465932849269d9cd1c83278c05146bc4d5d0b249fbe0194ac839a3",
+  "code_sha256": "92b92bc8d9664a2757bec73108fea1f8ffbf4088d162af87dfd926b5ebd8b0b4",
+  "source_files": 1215,
+  "created_utc": "2026-11-03T16:48:23.738240+00:00",
+  "types": {
+    "df_ops": "frame",
+    "df_thdr_v1": "frame_json",
+    "df_thdr_v2": "frame_json",
+    "df_carga_v1": "frame",
+    "df_carga_v2": "frame",
+    "df_viajes": "frame",
+    "df_ide_lb": "frame",
+    "df_incid": "frame",
+    "df_incid_full": "frame",
+    "df_oit": "frame",
+    "df_serv_tipo": "frame",
+    "df_pax_tipo": "frame",
+    "all_tr": "records",
+    "all_seat": "records",
+    "all_fact_full": "records",
+    "all_prmte_full": "records",
+    "all_prmte_2025": "records",
+    "all_kmserv": "records",
+    "all_saf_li": "records",
+    "_oit_diag": "json",
+    "_mot_inval": "json",
+    "_seat_dups": "json",
+    "_errores_proc": "json",
+    "diag_thdr": "records",
+    "_fichas_energia": "records"
+  },
+  "parts": [
+    {
+      "name": "historial_000.part",
+      "bytes": 16777216,
+      "sha256": "7a38c75b36ccfad818e57009885bbc1386999b94688fb8198c666329c14b1cd1"
+    },
+    {
+      "name": "historial_001.part",
+      "bytes": 16777216,
+      "sha256": "2f10ddf09ee02049ef75e3bafaf2c189c9ee368df6ecb9e76b08c14edad8b25f"
+    },
+    {
+      "name": "historial_002.part",
+      "bytes": 16777216,
+      "sha256": "0c6d93004dc74731291bfe94befa5096189f13aa897059831fa043406553bc3f"
+    },
+    {
+      "name": "historial_003.part",
+      "bytes": 14617548,
+      "sha256": "bfc7071d0246687cb155c3c4692e426024f55b9c467728fb4bd4dea2004fe5b4"
+    }
+  ]
+}
