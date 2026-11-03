@@ -2708,7 +2708,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía",
-              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo"]
+              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo"]
 
 # ===== OPTIMIZACIÓN INTEGRADA: GESTIÓN DE ARCHIVOS =====
 # El gestor sigue dentro del sidebar; las búsquedas y filtros no vuelven
@@ -2987,7 +2987,10 @@ def _v28_guardar_snapshot(_firma, _cantidad):
 # por streaming y se reconstruye UN ZIP local. Es caché temporal, no fuente de verdad.
 # Se reconocen exclusivamente los snapshots generados por v28 mientras se migra a v29.
 _V29_CODIGOS_COMPATIBLES = {
+    # v28 y v29 publicados. Permiten mostrar el BI mientras GitHub Actions
+    # materializa el snapshot para la nueva versión del código.
     "92b92bc8d9664a2757bec73108fea1f8ffbf4088d162af87dfd926b5ebd8b0b4",
+    "21112a1e75bb36180c8dd11e0f6f5b18950f292882ba1fd76343c955431549e2",
 }
 _V29_DATOS_POR_SECCION = (
     ('df_carga_v1', 'df_carga_v2', 'df_viajes', 'df_serv_tipo', 'df_pax_tipo', '_errores_proc'),
@@ -3005,12 +3008,18 @@ _V29_DATOS_POR_SECCION = (
     ('df_carga_v1', 'df_carga_v2', 'all_prmte_full'),
     ('df_carga_v1', 'df_carga_v2'),
     (),  # Causa raíz: esta vista tiene su propia carga anual por caché.
+    ("df_serv_tipo", "df_pax_tipo", "df_incid", "_errores_proc", "_seat_dups"),  # BI ejecutivo: fuentes livianas.
 )
 
 def _v29_necesarios():
     _idx = _SECCIONES.index(_seccion)
     # Datos comunes para el filtro global y para toda la navegación.
-    return {'df_ops', *(_V29_DATOS_POR_SECCION[_idx])}
+    _claves = {'df_ops', *(_V29_DATOS_POR_SECCION[_idx])}
+    # Detalle THDR de BI a demanda; evita reservar RAM de miles de servicios
+    # cuando sólo se consulta el resumen ejecutivo.
+    if _seccion == '🎯 BI Ejecutivo' and st.session_state.get('_bi_detalle_thdr', False):
+        _claves.update(('df_thdr_v1', 'df_thdr_v2'))
+    return _claves
 
 
 def _v29_archivo_local(_manifest):
@@ -3109,48 +3118,139 @@ def _v28_recuperar_snapshot(_firma, _claves=None):
         st.session_state['_v28_error_recuperacion'] = str(_exc)[:500]
         return False
 
+
+# ===== v30 · CONTROL DE ACCESO POR PERFILES =====
+# Credenciales exclusivamente en Streamlit Secrets (NO en GitHub).
+# Sin configuración, panel en modo consulta: las cargas/borrados quedan bloqueados.
+import hmac as _bi_hmac
+
+_BI_ROLES = ('lector', 'analista', 'admin')
+
+def _bi_validar_clave(_clave, _usuario):
+    """PBKDF2-HMAC-SHA256; compara hash en tiempo constante."""
+    try:
+        _salt = bytes.fromhex(str(_usuario['salt_hex']))
+        _esperado = bytes.fromhex(str(_usuario['password_hash_hex']))
+        _n = int(_usuario.get('iterations', 390000))
+        if len(_salt) < 16 or len(_esperado) != 32 or _n < 200000 or _n > 2000000:
+            return False
+        _calculado = hashlib.pbkdf2_hmac('sha256', _clave.encode('utf-8'), _salt, _n)
+        return _bi_hmac.compare_digest(_calculado, _esperado)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
+def _bi_configuracion():
+    try:
+        _conf = st.secrets.get('bi_access', {})
+        return _conf if hasattr(_conf, 'get') and _conf.get('enabled', False) else None
+    except Exception:
+        return None
+
+
+def _bi_autenticar():
+    # El runner de GitHub Actions no es un visitante de la web; debe poder
+    # construir el historial aun sin Secrets ni sesión autenticada.
+    if os.getenv('OP_CACHE_BUILD') == '1':
+        return 'admin', 'GitHub Actions'
+    _cfg = _bi_configuracion()
+    if _cfg is None:
+        st.sidebar.caption('🔓 Acceso de consulta abierto · administración bloqueada')
+        return 'lector', 'Consulta pública'
+    _usuarios = _cfg.get('users', [])
+    if not isinstance(_usuarios, (list, tuple)) or not _usuarios:
+        st.error('El control de acceso está activado, pero no hay usuarios válidos configurados.')
+        st.stop()
+    _cuentas = {str(u.get('username', '')).strip().casefold(): u
+                for u in _usuarios if hasattr(u, 'get') and u.get('username')}
+    _activo = st.session_state.get('_bi_usuario')
+    if _activo and _activo in _cuentas:
+        _rol = str(_cuentas[_activo].get('role', 'lector')).lower()
+        _identidad = hashlib.sha256(
+            (_rol + ':' + str(_cuentas[_activo].get('password_hash_hex',''))).encode()
+        ).hexdigest()
+        if _rol in _BI_ROLES and st.session_state.get('_bi_identidad') == _identidad:
+            st.sidebar.caption(f'🔒 {_activo} · {_rol}')
+            if st.sidebar.button('Cerrar sesión', key='_bi_salir'):
+                for _key in ('_bi_usuario', '_bi_identidad', '_bi_detalle_thdr', '_nav_seccion'):
+                    st.session_state.pop(_key, None)
+                st.rerun()
+            return _rol, _activo
+    st.sidebar.markdown('### 🔒 Acceso al BI')
+    with st.sidebar.form('_bi_form_ingreso',clear_on_submit=True):
+        _nombre = st.text_input('Usuario', key='_bi_login_user')
+        _clave = st.text_input('Contraseña', type='password', key='_bi_login_pwd')
+        _enviar = st.form_submit_button('Ingresar', use_container_width=True)
+    if _enviar:
+        _ident = _nombre.strip().casefold()
+        _cuenta = _cuentas.get(_ident)
+        if _cuenta and _bi_validar_clave(_clave, _cuenta):
+            st.session_state['_bi_usuario'] = _ident
+            _rol = str(_cuenta.get('role','lector')).lower()
+            st.session_state['_bi_identidad'] = hashlib.sha256(
+                (_rol + ':' + str(_cuenta.get('password_hash_hex',''))).encode()
+            ).hexdigest()
+            st.rerun()
+        st.sidebar.error('Usuario o contraseña incorrectos.')
+    st.info('Inicia sesión con un usuario autorizado para consultar este BI.')
+    st.stop()
+
+_BI_ROL_ACTUAL, _BI_USUARIO_ACTUAL = _bi_autenticar()
+_BI_ADMIN = _BI_ROL_ACTUAL == 'admin'
+_BI_ANALISTA = _BI_ROL_ACTUAL in ('analista', 'admin')
+
 # --- 6. INTERFAZ Y SIDEBAR ---
+# Por defecto, ningún visitante puede escribir archivos de origen.
+f_v1 = f_v2 = f_umr = f_seat_files = f_bill_files = []
+f_carga_v1 = f_carga_v2 = f_viajes = f_ide = f_incid = f_oit = []
 with st.sidebar:
     st.markdown("### 🚆 Datos operacionales")
     st.caption("EFE Valparaíso · Navegación")
     _seccion = st.radio("Secciones", _SECCIONES, key="_nav_seccion", horizontal=False, label_visibility="collapsed")
     st.divider()
-    with st.expander("📥 Cargar archivos", expanded=False):
-        st.caption("Formatos XLS, XLSX, XLSM y CSV. Los archivos cargados aquí permanecen solo mientras el servidor esté activo; para guardarlos entre reinicios, súbelos también a GitHub/data.")
-        _upload_revision = st.session_state.get("_upload_revision", 0)
-        def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
+    if _BI_ADMIN:
+        with st.expander("📥 Cargar archivos", expanded=False):
+            st.caption("Formatos XLS, XLSX, XLSM y CSV. Los archivos cargados aquí permanecen solo mientras el servidor esté activo; para guardarlos entre reinicios, súbelos también a GitHub/data.")
+            _upload_revision = st.session_state.get("_upload_revision", 0)
+            def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
 
-        f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v1_{_upload_revision}")
-        f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v2_{_upload_revision}")
-        f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_umr_{_upload_revision}")
-        f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_seat_files_{_upload_revision}")
-        f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_bill_files_{_upload_revision}")
-        f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v1_{_upload_revision}")
-        f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v2_{_upload_revision}")
-        f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_viajes_{_upload_revision}")
-        f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_ide_{_upload_revision}")
-        f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_incid_{_upload_revision}")
-        f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_oit_{_upload_revision}")
-        for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
-                        (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
-                        (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
-                        (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"]),
-                        (f_oit,DATA_DIRS["oit"])]:
-            for uf in (_ul or []):
-                try:
-                    guardar_archivo(uf, _ca)
-                except (ValueError, OSError) as _error_archivo:
-                    st.error(f"No se pudo guardar {uf.name}: {_error_archivo}")
+            f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v1_{_upload_revision}")
+            f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v2_{_upload_revision}")
+            f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_umr_{_upload_revision}")
+            f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_seat_files_{_upload_revision}")
+            f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_bill_files_{_upload_revision}")
+            f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v1_{_upload_revision}")
+            f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v2_{_upload_revision}")
+            f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_viajes_{_upload_revision}")
+            f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_ide_{_upload_revision}")
+            f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_incid_{_upload_revision}")
+            f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_oit_{_upload_revision}")
+            for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
+                            (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
+                            (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
+                            (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"]),
+                            (f_oit,DATA_DIRS["oit"])]:
+                for uf in (_ul or []):
+                    try:
+                        guardar_archivo(uf, _ca)
+                    except (ValueError, OSError) as _error_archivo:
+                        st.error(f"No se pudo guardar {uf.name}: {_error_archivo}")
 
     st.divider()
     st.markdown("**📚 Base histórica completa**")
     st.caption("Se cargan automáticamente todos los archivos disponibles. Los filtros de año, mes, semana, jornada y fecha se aplican después, sin volver a leer Excel.")
-    if st.button("🔄 Reconstruir datos históricos", use_container_width=True,
+    if _BI_ADMIN and st.button("🔄 Reconstruir datos históricos", use_container_width=True,
                  help="Fuerza el reprocesamiento; no es necesario para cambiar los filtros."):
         st.session_state["_do_load"] = True
         st.session_state["_inicio_carga_datos"] = _medir_tiempo_carga()
     st.divider()
-    _mostrar_archivos_guardados(DATA_DIRS, _upload_revision)
+    if _BI_ADMIN:
+        _mostrar_archivos_guardados(DATA_DIRS, st.session_state.get('_upload_revision', 0))
+    else:
+        with st.expander('📥 Cargar archivos', expanded=False):
+            st.info('La carga y eliminación están reservadas al administrador. '
+                    'Configura los usuarios en Streamlit Secrets para habilitarlas.')
+        st.caption('🔒 La reconstrucción del historial está reservada al administrador.')
 
 # ===== v27: INGESTA HISTÓRICA ÚNICA (LOS FILTROS SON SOLO DE VISUALIZACIÓN) =====
 # Se procesan todas las fuentes, sin exclusiones por fecha/nombre.
@@ -3194,7 +3294,10 @@ _recalcular = st.session_state.get('_cache_key') != _cache_key
 _v28_firma = None
 _v28_cantidad = _total_archivos_v27
 _v29_otra_seccion = (os.getenv('OP_CACHE_BUILD') != '1'
-                     and st.session_state.get('_v29_seccion_recuperada') != _SECCIONES.index(_seccion))
+                     and (st.session_state.get('_v29_seccion_recuperada') != _SECCIONES.index(_seccion)
+                          or (_seccion == '🎯 BI Ejecutivo'
+                              and st.session_state.get('_bi_detalle_thdr',False)
+                              and not {'df_thdr_v1','df_thdr_v2'}.issubset(st.session_state.keys()))))
 if (_hay_archivos and (_recalcular or 'df_ops' not in st.session_state or _v29_otra_seccion)
         and not st.session_state.get('_do_load')):
     _v28_firma, _v28_cantidad = _v28_firma_origen()
@@ -3765,6 +3868,378 @@ if not df_ops.empty and _seccion != _SECCIONES[4]:
     _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
     _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
     st.caption("Filtros activos · " + " · ".join(_rf) + f" · {_ncl(len(df_ops), 0)} día(s)")
+
+# ===== v30 · INTELIGENCIA DE NEGOCIOS OPERACIONAL =====
+# Sección adicional: no modifica las 14 vistas históricas ni los cálculos fuente.
+def _bi_serie(df, nombre):
+    if nombre in df.columns:
+        return pd.to_numeric(df[nombre], errors='coerce')
+    return pd.Series(np.nan, index=df.index, dtype='float64')
+
+
+def _bi_base_liviana(tabla):
+    """Serie diaria de KPI: conserva NaN para ausencia, no inventa observaciones."""
+    _nombres = ['E_Total', 'E_Tr', 'E_12', 'Odómetro [km]',
+                'Tren-Km [km]', 'PAX', 'Servicios', 'IDE (kWh/km)']
+    if tabla is None or getattr(tabla, 'empty', True) or 'Fecha' not in tabla.columns:
+        return pd.DataFrame(columns=['Fecha'] + _nombres)
+    _out = pd.DataFrame({'Fecha':pd.to_datetime(tabla['Fecha'], errors='coerce').dt.normalize()})
+    for _col in _nombres:
+        _out[_col] = _bi_serie(tabla, _col)
+    if 'Fuente' in tabla.columns:
+        _out['Fuente'] = tabla['Fuente'].astype(str).to_numpy()
+    return _out.dropna(subset=['Fecha']).sort_values('Fecha').reset_index(drop=True)
+
+
+def _bi_valor_kpi(tabla, campo):
+    if campo == 'IDE (kWh/km)':
+        # El IDE de periodo es consumo tracción / kilometraje real.
+        _km = _bi_serie(tabla,'Odómetro [km]').clip(lower=0).sum(min_count=1)
+        _en = _bi_serie(tabla,'E_Tr').clip(lower=0).sum(min_count=1)
+        return float(_en/_km) if pd.notna(_km) and _km > 0 and pd.notna(_en) else np.nan
+    if campo not in tabla.columns:
+        return np.nan
+    _x = _bi_serie(tabla,campo)
+    return float(_x.sum(min_count=1)) if _x.notna().any() else np.nan
+
+
+def _bi_var_pct(actual, previo):
+    if not np.isfinite(actual) or not np.isfinite(previo) or previo <= 0:
+        return None
+    return 100.0 * (actual - previo) / previo
+
+
+def _bi_alertas_historicas(historico, visible, umbral_pct=30):
+    """Desviaciones históricas con referencia sólo a fechas anteriores.
+
+    Ventana 45 observaciones diarias, mínimo 15. No es detección de falla
+    certificada: identifica señales para revisión operacional.
+    """
+    if historico.empty or visible.empty:
+        return pd.DataFrame(columns=['Fecha','Indicador','Hallazgo','Valor','Referencia','Variación %'])
+    _cols = [c for c in ['E_Total','E_Tr','IDE (kWh/km)','Odómetro [km]', 'PAX','Servicios'] if c in historico]
+    _hist = historico[['Fecha']+_cols].drop_duplicates('Fecha',keep='last').sort_values('Fecha').copy()
+    _hist['_visible'] = _hist['Fecha'].isin(set(visible['Fecha'].dropna()))
+    _registros=[]
+    for _campo in ['E_Total', 'IDE (kWh/km)', 'Odómetro [km]', 'PAX', 'Servicios']:
+        if _campo not in _hist:
+            continue
+        _v = pd.to_numeric(_hist[_campo],errors='coerce')
+        # No tratar 0 como evidencia de operación para una línea base (puede ser dato faltante).
+        _ref = _v.where(_v>0).shift(1).rolling(45,min_periods=15).median()
+        _desviacion=(_v/_ref-1)*100
+        _ok = (_hist['_visible'] & _ref.gt(0) & _v.notna() &
+               _desviacion.abs().ge(umbral_pct))
+        for _i in np.flatnonzero(_ok.to_numpy()):
+            _diff=float(_desviacion.iloc[_i])
+            # Una baja de consumo sola NO implica una falla; se reporta como cambio.
+            _registros.append({'Fecha':_hist['Fecha'].iloc[_i],
+                               'Indicador':_campo,
+                               'Hallazgo': 'Superior a referencia' if _diff>0 else 'Inferior a referencia',
+                               'Valor':round(float(_v.iloc[_i]),2),
+                               'Referencia':round(float(_ref.iloc[_i]),2),
+                               'Variación %':round(_diff,1)})
+    # Ausencia de energía con operación registrada: revisar fuentes.
+    if 'E_Total' in _hist.columns and 'Odómetro [km]' in _hist.columns:
+        _faltan=(_hist['_visible'] & _hist['Odómetro [km]'].gt(0) &
+                 (_hist['E_Total'].isna() | _hist['E_Total'].le(0)))
+        for _i in np.flatnonzero(_faltan.to_numpy()):
+            _registros.append({'Fecha':_hist['Fecha'].iloc[_i],
+                               'Indicador':'E_Total', 'Hallazgo':'Posible ausencia de dato de energía',
+                               'Valor':float(_hist['E_Total'].iloc[_i]) if pd.notna(_hist['E_Total'].iloc[_i]) else np.nan,
+                               'Referencia':np.nan,'Variación %':np.nan})
+    if not _registros:
+        return pd.DataFrame(columns=['Fecha','Indicador','Hallazgo','Valor','Referencia','Variación %'])
+    return pd.DataFrame(_registros).sort_values(['Fecha','Indicador'],ascending=[False,True]).reset_index(drop=True)
+
+
+def _bi_pronosticar(historico, indicador, dias=14):
+    """Proyección orientativa por día de semana + tendencia acotada (±15%).
+
+    Muestra insuficiente: no inventar valores. Sin intervalos de confianza porque
+    no se ha calibrado un modelo estadístico formal.
+    """
+    if historico is None or historico.empty or indicador not in historico.columns:
+        return pd.DataFrame()
+    _z=historico[['Fecha',indicador]].copy()
+    _z['Fecha']=pd.to_datetime(_z['Fecha'],errors='coerce').dt.normalize()
+    _z[indicador]=pd.to_numeric(_z[indicador],errors='coerce')
+    _z=_z.dropna(subset=['Fecha',indicador]).sort_values('Fecha')
+    _z=_z[_z[indicador]>0].drop_duplicates('Fecha',keep='last').tail(90)
+    if len(_z)<28:
+        return pd.DataFrame()
+    _z['_dia']=_z['Fecha'].dt.dayofweek
+    _reciente=_z.tail(56)
+    _referencia=_reciente.groupby('_dia')[indicador].median()
+    _global=float(_reciente[indicador].median())
+    # Control de tendencia: 21 observaciones actuales frente a 21 previas.
+    _a=float(_z[indicador].iloc[-21:].median())
+    _b=float(_z[indicador].iloc[-42:-21].median())
+    _factor=float(np.clip(_a/_b,0.85,1.15)) if _b>0 else 1.0
+    _inicio=_z['Fecha'].max()+pd.Timedelta(days=1)
+    _fechas=pd.date_range(_inicio,periods=dias,freq='D')
+    _pred=[max(0.,float(_referencia.get(_d.dayofweek,_global))*_factor)
+           for _d in _fechas]
+    return pd.DataFrame({'Fecha':_fechas, 'Proyección':_pred, 'Indicador':indicador})
+
+
+def _bi_calidad(historico, errores=None, duplicados_seat=None):
+    """Controles descriptivos, sin modificar registros fuentes."""
+    _incidencias=[]
+    if historico.empty:
+        return pd.DataFrame([{'Control':'Base operacional','Hallazgos':1,'Detalle':'Sin registros diarios disponibles'}])
+    _fecha=pd.to_datetime(historico['Fecha'],errors='coerce')
+    _mal=int(_fecha.isna().sum())
+    _incidencias.append({'Control':'Fechas inválidas','Hallazgos':_mal,'Detalle':'Registros con fecha no interpretable'})
+    _duplicadas=int(_fecha.duplicated(keep=False).sum())
+    _incidencias.append({'Control':'Fechas repetidas','Hallazgos':_duplicadas,'Detalle':'Filas con igual fecha en la base diaria'})
+    for _col in ['E_Total','E_Tr','Odómetro [km]','IDE (kWh/km)','PAX','Servicios']:
+        if _col not in historico.columns:
+            _incidencias.append({'Control':_col,'Hallazgos':len(historico),
+                                  'Detalle':'Columna no disponible en la base histórica'})
+            continue
+        _serie=pd.to_numeric(historico[_col],errors='coerce')
+        _vacios=int(_serie.isna().sum())
+        _negativos=int((_serie<0).sum())
+        _incidencias.append({'Control':_col,'Hallazgos':_vacios+_negativos,
+                              'Detalle':f'{_vacios} sin valor; {_negativos} negativos'})
+    if 'Fuente' in historico.columns:
+        _ausente=int(historico['Fuente'].astype(str).str.strip().str.upper().isin(['N/A','NONE','NAN','']).sum())
+        _incidencias.append({'Control':'Fuente energética no disponible','Hallazgos':_ausente,
+                              'Detalle':'Jornadas sin fuente de energía asignada'})
+    if duplicados_seat is not None:
+        _incidencias.append({'Control':'SEAT · duplicados resueltos','Hallazgos':int(duplicados_seat),
+                              'Detalle':'Registros excluidos por regla de prioridad existente'})
+    if errores:
+        _incidencias.append({'Control':'Archivos con error de procesamiento','Hallazgos':len(errores),
+                              'Detalle':'Consultar detalle de excepciones de carga'})
+    return pd.DataFrame(_incidencias)
+
+
+if _seccion == '🎯 BI Ejecutivo':
+    st.caption('BI OPERACIONAL · EFE Valparaíso · La información respeta los filtros generales de arriba.')
+    _bi_hist = _bi_base_liviana(st.session_state.get('df_ops',pd.DataFrame()))
+    _bi_filtro = _bi_base_liviana(df_ops)
+    if _bi_hist.empty:
+        st.warning('No hay registros diarios del historial para construir el BI ejecutivo.')
+    elif _bi_filtro.empty:
+        st.info('No existen datos para los filtros seleccionados. Cambia el período en la barra superior.')
+    else:
+        _bt_res,_bt_alert,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
+            '📊 Resumen ejecutivo','🚦 Alertas','🔮 Proyecciones',
+            '🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
+        with _bt_res:
+            _ini=_bi_filtro['Fecha'].min(); _fin=_bi_filtro['Fecha'].max()
+            _dias_periodo=int((_fin-_ini).days)+1
+            _desde=_ini-pd.Timedelta(days=_dias_periodo)
+            _hasta=_ini-pd.Timedelta(days=1)
+            _prev=_bi_hist[_bi_hist['Fecha'].between(_desde,_hasta)]
+            st.markdown('#### Indicadores de desempeño')
+            st.caption('Variación frente a un período calendario anterior de igual duración. '
+                       'Sin período comparable se muestra sin variación.')
+            _kpis=[('E_Total','Energía total','kWh',0),
+                   ('E_Tr','Energía tracción','kWh',0),
+                   ('Odómetro [km]','Kilometraje','km',0),
+                   ('IDE (kWh/km)','IDE del período','kWh/km',2),
+                   ('PAX','Pasajeros','pax',0),
+                   ('Servicios','Servicios','servicios',0)]
+            _kcols=st.columns(3)
+            for _ki,(_campo,_titulo,_unidad,_dec) in enumerate(_kpis):
+                _actual=_bi_valor_kpi(_bi_filtro,_campo)
+                _anterior=_bi_valor_kpi(_prev,_campo)
+                _variacion=_bi_var_pct(_actual,_anterior)
+                _val='Sin datos' if not np.isfinite(_actual) else f'{_ncl(_actual,_dec)} {_unidad}'
+                _delta=f'{_variacion:+.1f}% vs anterior' if _variacion is not None else None
+                _kcols[_ki%3].metric(_titulo,_val,delta=_delta,delta_color='off',
+                                     help='El cambio no indica por sí solo mejoría o deterioro.')
+            st.caption(f'Período visible: {_ini:%d/%m/%Y} — {_fin:%d/%m/%Y} · '
+                       f'{len(_bi_filtro):,} registros diarios · '
+                       f'Período comparado: {_desde:%d/%m/%Y} — {_hasta:%d/%m/%Y} ({len(_prev)} registros)')
+            _c1,_c2=st.columns(2)
+            for _cont,_campo,_titulo in [(_c1,'E_Total','Energía diaria'),
+                                          (_c2,'IDE (kWh/km)','IDE por día')]:
+                with _cont:
+                    if _campo in _bi_filtro and _bi_filtro[_campo].notna().any():
+                        _fig=px.line(_bi_filtro,x='Fecha',y=_campo,markers=len(_bi_filtro)<50,
+                                     title=_titulo)
+                        st.plotly_chart(_fig, width='stretch',key=f'_bi_panel_{_campo}')
+                    else: st.info(f'Sin datos disponibles para {_titulo}.')
+            _suma_fuentes = df_ops['Fuente'].value_counts(dropna=False).rename_axis('Fuente').reset_index(name='Días') if 'Fuente' in df_ops.columns else pd.DataFrame()
+            if not _suma_fuentes.empty:
+                st.markdown('**Procedencia de la energía por día**')
+                st.dataframe(_suma_fuentes,hide_index=True,width='stretch')
+
+        with _bt_alert:
+            st.markdown('#### Alertas calculadas automáticamente')
+            _umbral=st.slider('Desviación mínima respecto de la mediana anterior (%)',
+                              min_value=15,max_value=100,value=30,step=5,key='_bi_umbral_alertas')
+            _alertas=_bi_alertas_historicas(_bi_hist,_bi_filtro,_umbral)
+            _col_a,_col_b,_col_c=st.columns(3)
+            _col_a.metric('Hallazgos en período',_ncl(len(_alertas)))
+            _col_b.metric('Días con hallazgos',_ncl(_alertas['Fecha'].nunique() if not _alertas.empty else 0))
+            _col_c.metric('Archivos con error',_ncl(len(st.session_state.get('_errores_proc',{}))))
+            st.caption('Método: mediana de hasta 45 observaciones anteriores, con al menos 15 datos válidos. '
+                       'Los avisos son señales de análisis, no fallas confirmadas ni notificaciones externas.')
+            if _alertas.empty:
+                st.success('No se detectan desviaciones que cumplan el umbral elegido.')
+            else:
+                _mostrar=_alertas.head(150).copy()
+                _mostrar['Fecha']=_mostrar['Fecha'].dt.strftime('%d-%m-%Y')
+                st.dataframe(_mostrar,hide_index=True,width='stretch')
+                if len(_alertas)>150:
+                    st.caption(f'Mostrando 150 de {len(_alertas)} hallazgos. Ajusta los filtros para revisar otros períodos.')
+                _buf = _alertas.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig')
+                st.download_button('⬇️ Exportar alertas CSV',data=_buf,file_name='alertas_bi_operacional.csv',
+                                   mime='text/csv',key='_bi_csv_alertas')
+
+        with _bt_pred:
+            st.markdown('#### Proyección operativa orientativa')
+            _c1,_c2=st.columns(2)
+            _campo=_c1.selectbox('Indicador a proyectar',
+                                 ['E_Total','E_Tr','Odómetro [km]','PAX','Servicios'],
+                                 format_func=lambda x:{'E_Total':'Energía total (kWh)',
+                                    'E_Tr':'Tracción (kWh)','Odómetro [km]':'Kilometraje (km)',
+                                    'PAX':'Pasajeros','Servicios':'Servicios'}[x],key='_bi_modelo_campo')
+            _dias=_c2.selectbox('Horizonte de proyección (días)',[7,14,30],index=1,key='_bi_modelo_dias')
+            # Forecast del historial total, no cambia al filtrar un mes remoto.
+            _proy=_bi_pronosticar(_bi_hist,_campo,_dias)
+            if _proy.empty:
+                st.warning('Datos históricos insuficientes (mínimo 28 observaciones positivas) para este indicador.')
+            else:
+                _ult=_bi_hist[['Fecha',_campo]].dropna().tail(30)
+                _fig=go.Figure()
+                _fig.add_trace(go.Scatter(x=_ult['Fecha'],y=_ult[_campo],mode='lines+markers',name='Observado'))
+                _fig.add_trace(go.Scatter(x=_proy['Fecha'],y=_proy['Proyección'],mode='lines+markers',
+                                          name='Proyección (estimación)',line=dict(dash='dash')))
+                _fig.update_layout(title=f'Historial reciente y próximos {_dias} días',
+                                   xaxis_title='Fecha',yaxis_title=_campo,margin=dict(t=65,b=20))
+                st.plotly_chart(_fig,width='stretch',key='_bi_grafico_proyeccion')
+                _total=_proy['Proyección'].sum()
+                st.metric('Total proyectado del horizonte',f'{_ncl(_total,1)}')
+                _det=_proy.rename(columns={'Proyección':'Valor proyectado'}).copy()
+                _det['Fecha']=_det['Fecha'].dt.strftime('%d-%m-%Y')
+                st.dataframe(_det[['Fecha','Valor proyectado']],hide_index=True,width='stretch')
+                st.download_button('⬇️ Exportar proyección CSV',
+                                   data=_det.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                                   file_name='proyeccion_bi_operacional.csv',mime='text/csv',key='_bi_csv_proyeccion')
+                st.caption('Estimación exploratoria: medianas por día de semana de hasta 56 observaciones recientes, '
+                           'más un ajuste de tendencia limitado a ±15 %. No incluye clima, feriados futuros, '
+                           'cambios de programación ni intervalos estadísticos de confianza.')
+
+        with _bt_causa:
+            st.markdown('#### Explorar un día y sus factores observados')
+            st.caption('Esta vista identifica contribuyentes y patrones descriptivos. '
+                       'No establece causalidad sin investigación adicional.')
+            _dias_posibles=sorted(_bi_filtro['Fecha'].dropna().dt.date.unique(),reverse=True)
+            _fecha_sel=st.selectbox('Fecha del análisis',_dias_posibles,
+                                    format_func=lambda x:x.strftime('%d-%m-%Y'),key='_bi_fecha_detalle')
+            _fila=_bi_filtro[_bi_filtro['Fecha'].dt.date==_fecha_sel]
+            if not _fila.empty:
+                _r=_fila.iloc[0]
+                _mc1,_mc2,_mc3,_mc4=st.columns(4)
+                for _mc,_key,_nom,_dec in [(_mc1,'E_Total','Energía total',0),
+                                          (_mc2,'E_Tr','Tracción',0),
+                                          (_mc3,'Odómetro [km]','Kilómetros',0),
+                                          (_mc4,'IDE (kWh/km)','IDE',2)]:
+                    _v=_r.get(_key,np.nan)
+                    _mc.metric(_nom,_ncl(_v,_dec) if pd.notna(_v) else 'Sin dato')
+                _tipo=_r['Fecha'].dayofweek
+                _pares=_bi_hist[_bi_hist['Fecha'].dt.dayofweek==_tipo].copy()
+                _pares=_pares[_pares['Fecha']<_r['Fecha']].tail(52)
+                _comparacion=[]
+                for _k,_n in [('E_Total','Energía total'),('E_Tr','Tracción'),
+                               ('Odómetro [km]','Kilometraje'),('IDE (kWh/km)','IDE')]:
+                    _act=float(_r.get(_k,np.nan))
+                    _ref=pd.to_numeric(_pares.get(_k,pd.Series(dtype=float)),errors='coerce').replace(0,np.nan).median()
+                    _p=_bi_var_pct(_act,float(_ref) if pd.notna(_ref) else np.nan)
+                    _comparacion.append({'Indicador':_n,'Día seleccionado':round(_act,2) if pd.notna(_act) else np.nan,
+                                          'Mediana mismo día de semana':round(_ref,2) if pd.notna(_ref) else np.nan,
+                                          'Diferencia %':round(_p,1) if _p is not None else np.nan})
+                st.markdown('**Comparación con días equivalentes anteriores**')
+                st.dataframe(pd.DataFrame(_comparacion),hide_index=True,width='stretch')
+                if 'Fuente' in _r:
+                    st.caption('Fuente de energía priorizada para ese día: '+str(_r['Fuente'])+
+                               ' (jerarquía existente Factura → PRMTE → SEAT)')
+                _dt_sel=pd.Timestamp(_fecha_sel)
+                if not df_serv_tipo.empty and 'Fecha' in df_serv_tipo.columns:
+                    _rutas=df_serv_tipo[pd.to_datetime(df_serv_tipo['Fecha'],errors='coerce').dt.normalize()==_dt_sel]
+                    if not _rutas.empty:
+                        st.markdown('**Servicios por recorrido**')
+                        _tabla_rutas=_rutas[[c for c in ['Tipo_Servicio','Servicios','TrenKm'] if c in _rutas]].copy()
+                        if 'Servicios' in _tabla_rutas:
+                            _tabla_rutas=_tabla_rutas.sort_values('Servicios',ascending=False)
+                        st.dataframe(_tabla_rutas.head(40),hide_index=True,width='stretch')
+                if not df_pax_tipo.empty and 'Fecha' in df_pax_tipo.columns:
+                    _pax_r=df_pax_tipo[pd.to_datetime(df_pax_tipo['Fecha'],errors='coerce').dt.normalize()==_dt_sel]
+                    if not _pax_r.empty:
+                        st.markdown('**Pasajeros asociados a recorridos identificados**')
+                        st.dataframe(_pax_r[[c for c in ['Tipo_Servicio','PAX'] if c in _pax_r]].head(40),
+                                     hide_index=True,width='stretch')
+                if _BI_ANALISTA:
+                    if not st.session_state.get('_bi_detalle_thdr',False):
+                        if st.button('🔍 Cargar detalle THDR de trenes y estaciones',key='_bi_thdr_solicitar'):
+                            st.session_state['_bi_detalle_thdr']=True
+                            st.rerun()
+                        st.caption('El detalle THDR puede consumir memoria; sólo se carga cuando lo solicitas.')
+                    else:
+                        if st.button('Ocultar detalle THDR',key='_bi_thdr_ocultar'):
+                            st.session_state['_bi_detalle_thdr']=False
+                            for _clave_liberar in ('df_thdr_v1','df_thdr_v2'):
+                                st.session_state.pop(_clave_liberar, None)
+                            st.rerun()
+                        _trenes=[]
+                        for _via,_t in [('Vía 1',df_thdr_v1),('Vía 2',df_thdr_v2)]:
+                            if _t is None or _t.empty or 'Fecha_Op' not in _t.columns: continue
+                            _dia_t=_t[pd.to_datetime(_t['Fecha_Op'],errors='coerce').dt.normalize()==_dt_sel]
+                            if _dia_t.empty: continue
+                            _cols_t=[c for c in ['Tren','Viaje','Tipo_Servicio','Motriz 1','Motriz 2',
+                                                 'Km_Recorrido','Tren-Km'] if c in _dia_t.columns]
+                            if _cols_t:
+                                _u=_dia_t[_cols_t].copy();_u.insert(0,'Vía',_via)
+                                _trenes.append(_u)
+                        if _trenes:
+                            st.markdown('**Detalle de servicios y trenes del día**')
+                            st.dataframe(pd.concat(_trenes,ignore_index=True).head(300),
+                                         hide_index=True,width='stretch')
+                        else:
+                            st.info('No se encontraron servicios THDR para la fecha seleccionada.')
+                        _pasos=[]
+                        for _via,_t in [('Vía 1',df_thdr_v1),('Vía 2',df_thdr_v2)]:
+                            if _t is None or _t.empty or 'Fecha_Op' not in _t.columns: continue
+                            _dia_t=_t[pd.to_datetime(_t['Fecha_Op'],errors='coerce').dt.normalize()==_dt_sel]
+                            for _est in ESTACIONES:
+                                _cs=get_col_thdr(_dia_t,_est,'SALIDA')
+                                if _cs is None: continue
+                                _n=int(pd.to_numeric(_dia_t[_cs],errors='coerce').notna().sum())
+                                if _n:_pasos.append({'Vía':_via,'Estación':_est,'Salidas registradas':_n})
+                        if _pasos:
+                            st.markdown('**Pasos registrados en estaciones (no es afluencia de pasajeros)**')
+                            st.dataframe(pd.DataFrame(_pasos),hide_index=True,width='stretch')
+                else:
+                    st.info('El detalle de trenes y estaciones se habilita con perfil Analista o Administrador.')
+
+        with _bt_calidad:
+            st.markdown('#### Calidad y trazabilidad de la información')
+            _issues=st.session_state.get('_errores_proc',{})
+            _qc=_bi_calidad(_bi_hist,_issues,st.session_state.get('_seat_dups'))
+            _q1,_q2,_q3=st.columns(3)
+            _q1.metric('Días en base operacional',_ncl(len(_bi_hist)))
+            _q2.metric('Controles con hallazgos',_ncl(int((_qc['Hallazgos']>0).sum())))
+            _q3.metric('Fuentes físicas declaradas',_ncl(st.session_state.get('_historial_archivos_procesados',0)))
+            st.dataframe(_qc,hide_index=True,width='stretch')
+            if _issues:
+                with st.expander(f'Archivos con errores detectados ({len(_issues)})'):
+                    _df_err=pd.DataFrame([{'Archivo':k,'Detalle':str(v)} for k,v in _issues.items()])
+                    st.dataframe(_df_err,hide_index=True,width='stretch')
+            _fecha_max=_bi_hist['Fecha'].max()
+            st.caption(f'Última fecha registrada: {_fecha_max:%d/%m/%Y}. '
+                       'Origen: base diaria y diagnósticos del procesamiento existente. '
+                       'Un hallazgo de calidad no modifica ni elimina datos.')
+            _u=st.session_state.get('_v28_creado_utc')
+            if _u: st.caption('Instantánea histórica publicada: '+str(_u))
+            st.download_button('⬇️ Exportar controles CSV',
+                               data=_qc.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                               file_name='calidad_bi_operacional.csv',mime='text/csv',key='_bi_csv_calidad')
 
 if _seccion == _SECCIONES[0]:
     _ep=st.session_state.get('_errores_proc',{})
