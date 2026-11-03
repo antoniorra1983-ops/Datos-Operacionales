@@ -957,11 +957,96 @@ def _filtra_fecha_op(df, fecha):
         return df
     return df[pd.to_datetime(df['Fecha_Op'], errors='coerce').dt.date == fecha]
 
+# ===== v35 · REGLA ÚNICA DE FLOTA SFE COMERCIAL =====
+# Estas fechas representan habilitación comercial, NO confirman una circulación
+# particular. Circulación observada exige UMR/THDR. No se infiere km faltante.
+_SFE_COMERCIAL_DESDE = {
+    '412': pd.Timestamp(2026, 4, 22),   # primer SFE (servicio con pasajeros)
+    '410': pd.Timestamp(2026, 9, 25),   # incorporaciones informadas operacionalmente
+    '411': pd.Timestamp(2026, 9, 25),
+}
+_SFE_ETAPAS = ('Antes de SFE comercial', 'SFE-412 comercial', 'SFE-410/411/412 comerciales')
+
+
+def _sfe_unidad(tren):
+    """Normaliza las unidades 410, 411 y 412, sin suponer que SFE12 = 412."""
+    _t=str(tren).strip().upper()
+    _m=re.fullmatch(r'(?:SFE[\s._-]*)?(410|411|412)(?:\.0+)?',_t)
+    return _m.group(1) if _m else None
+
+
+def _sfe_comercial(tren, fecha):
+    """Fecha de habilitación; NO equivale a un servicio THDR observado."""
+    _id=_sfe_unidad(tren)
+    _f=pd.to_datetime(fecha,errors='coerce')
+    return bool(_id and pd.notna(_f) and _f.normalize() >= _SFE_COMERCIAL_DESDE[_id])
+
+
+def _sfe_mascara_comercial(trenes, fechas):
+    """Máscara vectorizada, indexada igual que la entrada (UMR y THDR)."""
+    _tt=pd.Series(trenes)
+    _ff=pd.to_datetime(pd.Series(fechas,index=_tt.index),errors='coerce').dt.normalize()
+    _ids=(_tt.astype('string').str.upper().str.strip()
+          .str.extract(r'^(?:SFE[\s._-]*)?(410|411|412)(?:\.0+)?$',expand=False))
+    _umbral=_ids.map(_SFE_COMERCIAL_DESDE)
+    return (_ids.notna() & _ff.ge(_umbral)).fillna(False).astype(bool)
+
+
+def _sfe_fase(fecha):
+    """Cohorte temporal, independiente de si se registraron km ese día."""
+    _f=pd.to_datetime(fecha,errors='coerce')
+    if pd.isna(_f): return 'Sin fecha'
+    _f=_f.normalize()
+    if _f < _SFE_COMERCIAL_DESDE['412']: return _SFE_ETAPAS[0]
+    if _f < _SFE_COMERCIAL_DESDE['410']: return _SFE_ETAPAS[1]
+    return _SFE_ETAPAS[2]
+
+
+def _sfe_km_por_unidad(registros):
+    """Una fila por fecha, cuenta únicamente km UMR observados de unidades identificadas.
+
+    Km de pruebas, comerciales, unidades sin registro y disponibilidad no son
+    intercambiables. Sin fuente UMR se deja NaN, nunca un cero supuesto.
+    """
+    _cols=['Fecha','SFE-410 km comercial','SFE-411 km comercial','SFE-412 km comercial',
+           'SFE comerciales km UMR','SFE pruebas km UMR','Unidades SFE con km comercial']
+    if not registros:
+        return pd.DataFrame(columns=_cols)
+    _r=pd.DataFrame(registros)
+    if not {'Fecha','Tren','Valor'}.issubset(_r.columns):
+        return pd.DataFrame(columns=_cols)
+    _r['Fecha']=pd.to_datetime(_r['Fecha'],errors='coerce').dt.normalize()
+    _r['Valor']=pd.to_numeric(_r['Valor'],errors='coerce')
+    if 'Clase' in _r and _r['Clase'].notna().any():
+        _r=_r[_r['Clase'].astype(str).str.lower().str.strip().eq('km')].copy()
+    else:
+        _r=_r[_r['Valor'].lt(50000)].copy()
+    _r=_r[_r['Fecha'].notna() & _r['Valor'].between(0,2000)].copy()
+    if _r.empty: return pd.DataFrame(columns=_cols)
+    _r['Unidad']=_r['Tren'].map(_sfe_unidad)
+    _es_sfe=_r['Tren'].astype(str).str.upper().str.strip().str.startswith('SFE')
+    _r=_r[_es_sfe].copy()
+    if _r.empty: return pd.DataFrame(columns=_cols)
+    _r['Comercial']=_sfe_mascara_comercial(_r['Tren'],_r['Fecha'])
+    _r['Prueba']=~_r['Comercial']
+    _r['Km comercial']=_r['Valor'].where(_r['Comercial'],0)
+    _r['Km pruebas']=_r['Valor'].where(_r['Prueba'],0)
+    _p=(_r[_r['Comercial'] & _r['Unidad'].notna()]
+        .pivot_table(index='Fecha',columns='Unidad',values='Valor',aggfunc='sum'))
+    _d=_r.groupby('Fecha',as_index=False).agg(**{
+        'SFE comerciales km UMR':('Km comercial','sum'),
+        'SFE pruebas km UMR':('Km pruebas','sum')})
+    _p=_p.reindex(_d['Fecha']).fillna(0)
+    for _id in ('410','411','412'):
+        _d[f'SFE-{_id} km comercial']=_p[_id].to_numpy() if _id in _p else 0.0
+    _d['Unidades SFE con km comercial']=sum(_d[f'SFE-{u} km comercial'].gt(0).astype(int) for u in ('410','411','412'))
+    return _d[_cols]
+
 def _km_por_tren(all_tr, excluir_sfe=True):
     """Desde all_tr (Tren, Fecha, Valor) separa odómetro acumulado (valores grandes) y
     kilometraje diario (valores chicos) de la hoja UMR, y resume km recorridos por tren.
-    Con excluir_sfe=True aplica la regla de SFE en pruebas: hasta el 20-abr-2026 todos los
-    SFE quedan fuera; desde el 21-abr-2026 solo el SFE 412 cuenta y el resto sigue fuera.
+    Con excluir_sfe=True incluye únicamente SFE-412 desde 22-04-2026 y
+    SFE-410/411 desde 25-09-2026. Antes de esas fechas, SFE en pruebas aparte.
     Devuelve (resumen_por_tren, km_diario_flota, pivote_km_diario)."""
     _vacio = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     if not all_tr:
@@ -976,12 +1061,9 @@ def _km_por_tren(all_tr, excluir_sfe=True):
         return _vacio
     if excluir_sfe:
         # Regla SFE en pruebas: descartar el km de los SFE que no deben contar en cada fecha.
-        _SFE_CT = pd.Timestamp(2026, 4, 21)
         _tru = _d['Tren'].astype(str).str.upper()
         _es_sfe = _tru.str.startswith('SFE')
-        _n_sfe = _tru.str.extract(r'SFE[\s\-_.]*0*(\d+)')[0]
-        _es_412 = _n_sfe == '412'
-        _cuenta = (~_es_sfe) | (_es_412 & (_d['Fecha'] >= _SFE_CT))
+        _cuenta = (~_es_sfe) | _sfe_mascara_comercial(_d['Tren'],_d['Fecha'])
         _d = _d[_cuenta]
         if _d.empty:
             return _vacio
@@ -2027,11 +2109,10 @@ def _armar_df_ops(all_ops, all_tr, all_fact_full, all_prmte_full, all_seat):
     Factura > PRMTE > SEAT. La usa la carga principal y la línea base del año anterior. Devuelve (df_ops, seat_dups)."""
     df_ops=pd.DataFrame(all_ops).groupby("Fecha").agg({"Odómetro [km]":"sum","Tren-Km [km]":"sum"}).reset_index()
     # --- Excluir SFE en pruebas del Odómetro/Tren-Km ---
-    # Regla: hasta el 20-abr-2026 TODOS los SFE van aparte (en pruebas). Desde el
-    # 21-abr-2026 el SFE 412 se integra al total y el resto sigue aparte.
+    # Regla comercial v35: SFE-412 desde 22-abr-2026 y SFE-410/411 desde
+    # 25-sep-2026. Fuera de esas fechas sus km siguen como pruebas aparte.
     # El km diario de cada SFE se toma de all_tr (odómetro por tren). Se descuenta del
     # total del UMR el aporte de los SFE que NO deben contar en cada fecha.
-    _SFE_CORTE = pd.Timestamp(2026, 4, 21)
     _sfe_desc = {}
     if all_tr:
         _dt_all = pd.DataFrame(all_tr)
@@ -2060,8 +2141,7 @@ def _armar_df_ops(all_ops, all_tr, all_fact_full, all_prmte_full, all_seat):
                 # Sumar el km de los SFE que NO deben contar en esa fecha
                 _sfe_fe = _dt_km[_es_sfe & (_dt_km['Fecha'] == _fe_s)]
                 for _, _rs in _sfe_fe.iterrows():
-                    _es_412 = bool(re.search(r'\b412\b', str(_rs['Tren'])))
-                    _cuenta = _es_412 and (_fe_s >= _SFE_CORTE)
+                    _cuenta = _sfe_comercial(_rs['Tren'],_fe_s)
                     if not _cuenta:
                         _sfe_desc[_fe_s] = _sfe_desc.get(_fe_s, 0.0) + float(_rs['Valor'])
     if _sfe_desc:
@@ -2808,7 +2888,8 @@ def _bi_tv_preparar(df_v1, df_v2, tamano_lote=1200):
     El resumen por servicio se guarda dentro del snapshot GitHub para que
     Streamlit no tenga que abrir 1.000+ Excel ni las tablas THDR originales.
     """
-    _columnas=['Fecha','Vía','Tipo de servicio','Tipo de tren','Composición',
+    _columnas=['Fecha','Vía','Tipo de servicio','Tipo de tren','Unidad SFE',
+               'SFE comercial registrado THDR','Composición',
                'Servicio THDR','Viaje THDR','Duración (min)','Tipo Día']
     _partes=[]
     for _via, _origen in [('Vía 1',df_v1),('Vía 2',df_v2)]:
@@ -2834,12 +2915,15 @@ def _bi_tv_preparar(df_v1, df_v2, tamano_lote=1200):
                 'Vía':_via,
                 'Tipo de servicio':_ruta.astype(str).to_numpy(),
                 'Tipo de tren':_tipo.to_numpy(),
+                'Unidad SFE':_m1.map(lambda x:f'SFE-{int(x)}' if pd.notna(x) and int(x) in (410,411,412) else '').to_numpy(),
                 'Composición':np.where(_doble,'Doble','Simple'),
                 # Identificadores como texto uniforme: Parquet no falla por tipos mixtos.
                 'Servicio THDR':(_x['Tren'].astype('string').fillna('').to_numpy(dtype=str) if 'Tren' in _x else ''),
                 'Viaje THDR':(_x['Viaje'].astype('string').fillna('').to_numpy(dtype=str) if 'Viaje' in _x else ''),
                 'Duración (min)':pd.to_numeric(_calculados['Dur'],errors='coerce').to_numpy(),
             })
+            _out['SFE comercial registrado THDR']=_sfe_mascara_comercial(
+                _m1.reset_index(drop=True),_out['Fecha']).to_numpy()
             _out['Tipo Día']=_out['Fecha'].dt.date.map(get_tipo_dia)
             _out=_out[_out['Fecha'].notna() & _out['Tipo Día'].isin(['L','S','D/F'])]
             _out=_out[~_out['Tipo de servicio'].isin(['Sin clasificar','<NA>','nan','None',''])]
@@ -2869,7 +2953,8 @@ def _bi_tv_comparables(detalle, dias_previos=45, minimo_dias=6, minimo_viajes=20
     _d['Duración (min)']=pd.to_numeric(_d['Duración (min)'],errors='coerce')
     _d=_d[_d['Fecha'].notna() & _d['Tipo Día'].isin(('L','S','D/F'))]
     if _d.empty: return pd.DataFrame(columns=_campos)
-    _grupo=['Fecha','Tipo de servicio','Tipo de tren','Tipo Día']
+    _d['Cohorte SFE THDR']=np.where(_d['Tipo de tren'].eq('SFE'),_d['Fecha'].map(_sfe_fase),'Material rodante existente')
+    _grupo=['Fecha','Tipo de servicio','Tipo de tren','Tipo Día','Cohorte SFE THDR']
     _a=_d.groupby(_grupo,observed=True,dropna=False).agg(**{
         'Viajes THDR':('Fecha','size'),
         'Viajes con hora válida':('Duración (min)','count'),
@@ -2877,7 +2962,7 @@ def _bi_tv_comparables(detalle, dias_previos=45, minimo_dias=6, minimo_viajes=20
     }).reset_index()
     _a=_a.sort_values('Fecha',kind='stable')
     _resultados=[]
-    _keys=['Tipo de servicio','Tipo de tren','Tipo Día']
+    _keys=['Tipo de servicio','Tipo de tren','Tipo Día','Cohorte SFE THDR']
     for _,_g in _a.groupby(_keys,sort=False,observed=True,dropna=False):
         _g=_g.sort_values('Fecha').copy()
         # Solo días anteriores con al menos un servicio de duración válida.
@@ -3219,6 +3304,7 @@ def _v28_recuperar_snapshot(_firma, _claves=None):
         if (_m.get('schema') != _V28_SCHEMA or _m.get('source_sha256') != _firma
                 or _m.get('code_sha256') not in ({_actual} | _compat)):
             return False
+        st.session_state['_bi_snapshot_sfe_antiguo'] = (_m.get('code_sha256') != _actual)
         _solicitadas = set(_V28_KEYS if _claves is None else _claves)
         if 'df_ops' not in _solicitadas:
             _solicitadas.add('df_ops')
@@ -4048,6 +4134,9 @@ def _bi_base_liviana(tabla):
     _out = _out.dropna(subset=['Fecha']).sort_values('Fecha').reset_index(drop=True)
     _out['Tipo Día'] = _out['Fecha'].dt.date.map(get_tipo_dia)
     _out['Tipo de jornada'] = _out['Tipo Día'].map(_JORNADA_TXT)
+    _out['Etapa SFE'] = _out['Fecha'].map(_sfe_fase)
+    _out['SFE habilitados comercialmente'] = _out['Etapa SFE'].map({
+        _SFE_ETAPAS[0]:0,_SFE_ETAPAS[1]:1,_SFE_ETAPAS[2]:3})
     return _out
 
 
@@ -4063,9 +4152,13 @@ def _bi_referencia_comparable(historico, visible):
     _inicio = visible['Fecha'].min()
     _previos = historico[historico['Fecha'] < _inicio].sort_values('Fecha')
     _trozos = []
-    for _jornada, _grupo in visible.groupby('Tipo Día', observed=True):
+    _claves=['Tipo Día']+(['Etapa SFE'] if 'Etapa SFE' in visible and 'Etapa SFE' in historico else [])
+    for _grupo_id, _grupo in visible.groupby(_claves, observed=True):
         _cantidad = int(_grupo['Fecha'].nunique())
-        _mismos = _previos[_previos['Tipo Día'] == _jornada].drop_duplicates('Fecha', keep='last')
+        _mismos = _previos[_previos['Tipo Día'] == _grupo['Tipo Día'].iloc[0]]
+        if 'Etapa SFE' in _claves:
+            _mismos = _mismos[_mismos['Etapa SFE'] == _grupo['Etapa SFE'].iloc[0]]
+        _mismos = _mismos.drop_duplicates('Fecha', keep='last')
         if len(_mismos) < _cantidad:
             return pd.DataFrame(columns=historico.columns), False
         _trozos.append(_mismos.tail(_cantidad))
@@ -4237,13 +4330,46 @@ def _bi_ide_km_sfe(registros):
     if _r.empty:
         return pd.DataFrame(columns=_cols)
     _es_sfe=_r['Tren'].astype(str).str.strip().str.upper().str.startswith('SFE')
-    _r['_sfe']=_r['Valor'].where(_es_sfe,0.0)
-    _r['_es_sfe']=_es_sfe.astype(int)
+    _comercial=_es_sfe & _sfe_mascara_comercial(_r['Tren'],_r['Fecha'])
+    _r['_sfe']=_r['Valor'].where(_comercial,0.0)
+    _r['_es_sfe']=_comercial.astype(int)
     return (_r.groupby('Fecha',as_index=False).agg(**{
         'Odom_SFE':('_sfe','sum'),
         'Registros UMR km':('Valor','size'),
         'Registros SFE km':('_es_sfe','sum')})[_cols])
 
+
+
+
+# ===== v35 · CRUCE DE FASES COMERCIALES SFE EN BI =====
+def _bi_sfe_cruzar(diario, km_agrupado, thdr_compacto=None):
+    """Cruce 1:1 por Fecha; THDR es movimiento registrado, no habilitación."""
+    _cols=['Fecha','Etapa SFE','SFE habilitados comercialmente',
+           'SFE-410 km comercial','SFE-411 km comercial','SFE-412 km comercial',
+           'SFE comerciales km UMR','SFE pruebas km UMR',
+           'Unidades SFE con km comercial','Viajes SFE THDR comerciales']
+    if diario is None or diario.empty: return pd.DataFrame(columns=_cols)
+    _d=diario.copy()
+    if 'Etapa SFE' not in _d:
+        _d['Etapa SFE']=_d['Fecha'].map(_sfe_fase)
+    if 'SFE habilitados comercialmente' not in _d:
+        _d['SFE habilitados comercialmente']=_d['Etapa SFE'].map({
+            _SFE_ETAPAS[0]:0,_SFE_ETAPAS[1]:1,_SFE_ETAPAS[2]:3})
+    if km_agrupado is not None and not km_agrupado.empty:
+        _d=_d.merge(km_agrupado,on='Fecha',how='left',validate='one_to_one')
+    else:
+        for _c in ['SFE-410 km comercial','SFE-411 km comercial','SFE-412 km comercial',
+                   'SFE comerciales km UMR','SFE pruebas km UMR','Unidades SFE con km comercial']:
+            _d[_c]=np.nan
+    _d['Viajes SFE THDR comerciales']=np.nan
+    if thdr_compacto is not None and not thdr_compacto.empty:
+        if {'Fecha','Unidad SFE','SFE comercial registrado THDR'}.issubset(thdr_compacto.columns):
+            _t=thdr_compacto.copy()
+            _t['Fecha']=pd.to_datetime(_t['Fecha'],errors='coerce').dt.normalize()
+            _x=_t[_t['SFE comercial registrado THDR'].fillna(False).astype(bool) & _t['Unidad SFE'].ne('')]
+            _counts=_x.groupby('Fecha').size()
+            _d['Viajes SFE THDR comerciales']=_d['Fecha'].map(_counts).fillna(0).astype(int)
+    return _d
 
 def _bi_ide_referencias(diario, linea_base, kms_sfe, ventana=45, minimo=10):
     """Fecha única, modelo LB 100/M-SFE y referencia histórica anterior de misma jornada.
@@ -4261,7 +4387,8 @@ def _bi_ide_referencias(diario, linea_base, kms_sfe, ventana=45, minimo=10):
     _valida = _tr.gt(0) & _km.gt(0)
     _t['IDE real (kWh/km)']=(_tr / _km.where(_km.gt(0))).where(_valida)
     _ide=_t['IDE real (kWh/km)']
-    _gb=_ide.groupby(_t['Tipo Día'],sort=False)
+    _t['Etapa SFE']=_t['Fecha'].map(_sfe_fase)
+    _gb=_ide.groupby([_t['Tipo Día'],_t['Etapa SFE']],sort=False)
     _t['Días previos comparables']=_gb.transform(
         lambda v:v.shift(1).rolling(ventana,min_periods=1).count()).fillna(0).astype(int)
     _t['IDE referencia histórica']=_gb.transform(
@@ -4395,7 +4522,10 @@ def _bi_ide_factores_dia(historico, fecha, ventana=45, minimo=5):
     if _fila.empty:
         return pd.DataFrame(columns=_cols)
     _tipo=_fila.iloc[0].get('Tipo Día')
-    _pasado=_h[(_h['Fecha']<_d) & (_h['Tipo Día']==_tipo)].sort_values('Fecha').tail(ventana)
+    _pasado=_h[(_h['Fecha']<_d) & (_h['Tipo Día']==_tipo)].sort_values('Fecha')
+    if 'Etapa SFE' in _h:
+        _pasado=_pasado[_pasado['Etapa SFE']==_fila.iloc[0]['Etapa SFE']]
+    _pasado=_pasado.tail(ventana)
     _indicadores=[('E_Tr','Energía de tracción (kWh)'),('Odómetro [km]','Kilometraje real (km)'),
                   ('E_Total','Energía total (kWh)'),('E_12','Energía 12 kV (kWh)'),
                   ('Tren-Km [km]','Tren-km (km)'),('UMR (%)','Utilización UMR (%)'),
@@ -4461,7 +4591,8 @@ def _bi_alertas_historicas(historico, visible, umbral_pct=30):
     if historico is None or visible is None or historico.empty or visible.empty:
         return pd.DataFrame(columns=_vacias)
     _cols = [c for c in ['E_Total','E_Tr','IDE (kWh/km)','Odómetro [km]', 'PAX','Servicios'] if c in historico]
-    _hist = historico[['Fecha','Tipo Día','Tipo de jornada']+_cols].drop_duplicates('Fecha',keep='last').sort_values('Fecha').copy()
+    _grupos=['Tipo Día']+(['Etapa SFE'] if 'Etapa SFE' in historico else [])
+    _hist = historico[['Fecha','Tipo de jornada']+_grupos+_cols].drop_duplicates('Fecha',keep='last').sort_values('Fecha').copy()
     _hist['_visible'] = _hist['Fecha'].isin(set(visible['Fecha'].dropna()))
     _registros=[]
     for _campo in ['E_Total', 'IDE (kWh/km)', 'Odómetro [km]', 'PAX', 'Servicios']:
@@ -4469,7 +4600,7 @@ def _bi_alertas_historicas(historico, visible, umbral_pct=30):
             continue
         _v = pd.to_numeric(_hist[_campo], errors='coerce')
         # .shift() ANTES del rolling, agrupado por L, S o D/F. No filtra a futuro.
-        _ref = _v.where(_v>0).groupby(_hist['Tipo Día']).transform(
+        _ref = _v.where(_v>0).groupby([_hist[c] for c in _grupos]).transform(
             lambda _serie: _serie.shift(1).rolling(45, min_periods=10).median())
         _desviacion=(_v/_ref-1)*100
         _ok = (_hist['_visible'] & _ref.gt(0) & _v.notna() &
@@ -4515,9 +4646,10 @@ def _bi_pronosticar(historico, indicador, dias=14):
     _ultima_fecha=_z['Fecha'].max()
     _z = _z[_z[indicador].gt(0)].copy()
     _z['Tipo Día'] = _z['Fecha'].dt.date.map(get_tipo_dia)
+    _z['Etapa SFE'] = _z['Fecha'].map(_sfe_fase)
     _bases={}
     for _j in ('L','S','D/F'):
-        _h=_z[_z['Tipo Día']==_j].tail(90)
+        _h=_z[(_z['Tipo Día']==_j) & (_z['Etapa SFE']==_sfe_fase(_ultima_fecha))].tail(90)
         _reciente=_h.tail(35)
         _n=len(_reciente)
         if _n<10:
@@ -4536,7 +4668,8 @@ def _bi_pronosticar(historico, indicador, dias=14):
     _registros=[]
     for _f in _fechas:
         _tipo=get_tipo_dia(_f.date())
-        _v,_n=_bases.get(_tipo,(np.nan,0))
+        _v,_n=(_bases.get(_tipo,(np.nan,0)) if _sfe_fase(_f)==_sfe_fase(_ultima_fecha)
+               else (np.nan,0))
         _registros.append({'Fecha':_f, 'Tipo de jornada':_JORNADA_TXT.get(_tipo,'No determinado'),
                            'Proyección':_v,'Indicador':indicador,'Muestra de referencia':_n})
     return pd.DataFrame(_registros, columns=_vacias)
@@ -4582,6 +4715,8 @@ def _bi_calidad(historico, errores=None, duplicados_seat=None):
 
 if _seccion == '🎯 BI Ejecutivo':
     st.caption('BI OPERACIONAL · EFE Valparaíso · La información respeta los filtros generales de arriba.')
+    if st.session_state.get('_bi_snapshot_sfe_antiguo'):
+        st.warning('Base histórica anterior a la regla SFE v35: IDE y km todavía pueden conservar la clasificación previa. GitHub Actions debe publicar el nuevo historial para resultados definitivos.')
     _bi_hist = _bi_base_liviana(st.session_state.get('df_ops',pd.DataFrame()))
     _bi_filtro = _bi_base_liviana(df_ops)
     _bi_oit_disponible = bool(listar_archivos(DATA_DIRS['oit']))
@@ -4601,6 +4736,10 @@ if _seccion == '🎯 BI Ejecutivo':
             st.session_state.pop(_k,None)
     _bi_tv_grupos=st.session_state.get('_bi_tv_grupos_v34',pd.DataFrame())
     _bi_tv_diario=st.session_state.get('_bi_tv_diario_v34',pd.DataFrame())
+    if st.session_state.get('_bi_sfe_firma_v35') != _bi_tv_firma:
+        st.session_state['_bi_sfe_km_v35']=_sfe_km_por_unidad(st.session_state.get('all_tr',[]))
+        st.session_state['_bi_sfe_firma_v35']=_bi_tv_firma
+    _bi_sfe_dia=_bi_sfe_cruzar(_bi_diario_historico,st.session_state['_bi_sfe_km_v35'],_bi_tv_data)
     _bi_diario = (_bi_diario_historico[
         _bi_diario_historico['Fecha'].isin(set(_bi_filtro['Fecha']))
     ].copy() if not _bi_diario_historico.empty else pd.DataFrame())
@@ -4609,16 +4748,16 @@ if _seccion == '🎯 BI Ejecutivo':
     elif _bi_filtro.empty:
         st.info('No existen datos para los filtros seleccionados. Cambia el período en la barra superior.')
     else:
-        _bt_res,_bt_diario,_bt_alert,_bt_ide,_bt_tv,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
+        _bt_res,_bt_diario,_bt_alert,_bt_ide,_bt_tv,_bt_sfe,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
             '📊 Resumen ejecutivo','🌙 Día a día · trenes nocturnos','🚦 Alertas',
-            '🔬 Investigación IDE','⏱️ Tiempos de viaje THDR','🔮 Proyecciones',
+            '🔬 Investigación IDE','⏱️ Tiempos de viaje THDR','🚆 Incorporación SFE','🔮 Proyecciones',
             '🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
         with _bt_res:
             _ini=_bi_filtro['Fecha'].min(); _fin=_bi_filtro['Fecha'].max()
             _prev,_tiene_comparable = _bi_referencia_comparable(_bi_hist,_bi_filtro)
             st.markdown('#### Indicadores de desempeño')
             st.caption('Los totales incluyen únicamente las jornadas seleccionadas. La referencia usa '
-                       'el mismo número de días anteriores por tipo (laboral, sábado y domingo/festivo); '
+                       'el mismo número de días anteriores por jornada y etapa SFE comercial; '
                        'si faltan jornadas equivalentes no se calcula variación.')
             _kpis=[('E_Total','Energía total','kWh',0),
                    ('E_Tr','Energía tracción','kWh',0),
@@ -4645,6 +4784,10 @@ if _seccion == '🎯 BI Ejecutivo':
                 st.caption(f'🌙 Cruce diario con OIT: {_dias_oit} día(s) con órdenes SFE cerradas '
                            f'de madrugada · {_ordenes_oit} orden(es) detectadas en el período. '
                            'Ver pestaña «Día a día · trenes nocturnos» para fechas y detalles.')
+            _etapas_vis=_bi_filtro['Etapa SFE'].value_counts()
+            st.caption('🚆 Etapas SFE del período: '+ ' · '.join(
+                f'{et}: {n} día(s)' for et,n in _etapas_vis.items()) +
+                '. La fecha comercial no demuestra circulación: ver pestaña Incorporación SFE.')
             st.markdown('**Resultados separados por tipo de jornada**')
             _tabla_jornadas = _bi_resumen_por_jornada(_bi_filtro)
             if not _tabla_jornadas.empty:
@@ -4774,7 +4917,7 @@ if _seccion == '🎯 BI Ejecutivo':
             st.caption('Las alertas muestran si hubo órdenes OIT SFE de madrugada cerradas ese día, '
                        'sin atribuirles automáticamente la desviación. Método: mediana de hasta 45 '
                        'antecedentes anteriores de la MISMA jornada (L/S/D-F), '
-                       'con al menos 10 datos válidos por jornada. Un festivo sábado se compara con domingo/festivo. '
+                       'con al menos 10 datos válidos por jornada y etapa SFE. Un festivo sábado se compara con domingo/festivo. '
                        'Los avisos no son fallas confirmadas ni notificaciones externas.')
             if _alertas.empty:
                 st.success('No se detectan desviaciones que cumplan el umbral elegido.')
@@ -4802,6 +4945,11 @@ if _seccion == '🎯 BI Ejecutivo':
                 _sfe_dia=st.session_state['_bi_km_sfe_v33']
             _ide_historico=_bi_ide_referencias(
                 _bi_diario_historico,st.session_state.get('df_ide_lb',pd.DataFrame()),_sfe_dia)
+            _ide_historico=_ide_historico.merge(
+                _bi_sfe_dia[['Fecha','SFE-410 km comercial','SFE-411 km comercial',
+                    'SFE-412 km comercial','SFE comerciales km UMR','SFE pruebas km UMR',
+                    'Unidades SFE con km comercial','Viajes SFE THDR comerciales']],
+                on='Fecha',how='left',validate='one_to_one')
             _ide_historico=_bi_ide_cruzar_fuentes(
                 _ide_historico,st.session_state.get('df_incid_full',pd.DataFrame()),
                 st.session_state.get('df_incid',pd.DataFrame()),
@@ -4813,7 +4961,7 @@ if _seccion == '🎯 BI Ejecutivo':
                 st.info('No hay fechas con datos operacionales para estos filtros.')
             else:
                 _hay_lb=bool(_ide_periodo['Línea base calculable'].any())
-                _opciones_ide=['Línea base IDE (100/M + SFE)','Histórico: misma jornada (L / S / D-F)']
+                _opciones_ide=['Línea base IDE (100/M + SFE)','Histórico: jornada + etapa SFE comercial']
                 _idx_ide=0 if _hay_lb else 1
                 _ci,_cj=st.columns([3,2])
                 _modo_ide=_ci.selectbox('Referencia para detectar desvíos',_opciones_ide,
@@ -4852,7 +5000,10 @@ if _seccion == '🎯 BI Ejecutivo':
                     st.info('No se detectaron días que superen el umbral con la referencia seleccionada. '
                             'Prueba otro período o revisa la disponibilidad de la línea base.')
                 else:
-                    _vista_cols=['Fecha','Tipo de jornada','IDE real (kWh/km)','Referencia IDE','Exceso %',
+                    _vista_cols=['Fecha','Tipo de jornada','Etapa SFE','SFE habilitados comercialmente',
+                                  'SFE comerciales km UMR','SFE pruebas km UMR',
+                                  'Unidades SFE con km comercial','Viajes SFE THDR comerciales',
+                                  'IDE real (kWh/km)','Referencia IDE','Exceso %',
                                  'E_Tr','Odómetro [km]','Servicios','PAX','Tren-Km [km]',
                                  'Incidentes PCC','Incidentes con afectación','Acoples registrados',
                                  'Desacoples registrados','Órdenes OIT madrugada','OIT cierre madrugada siguiente',
@@ -4871,7 +5022,7 @@ if _seccion == '🎯 BI Ejecutivo':
                 if not _graf.empty:
                     _graf['Estado'] = np.where(_graf['Fuera de referencia'],'IDE excedido','Dentro de referencia / sin base')
                     _fig=px.scatter(_graf,x='Fecha',y='IDE real (kWh/km)',color='Estado',
-                        hover_data=['Tipo de jornada','Exceso %','Incidentes PCC','Órdenes OIT madrugada'],
+                        hover_data=['Tipo de jornada','Etapa SFE','Exceso %','Incidentes PCC','Órdenes OIT madrugada'],
                         title='IDE por día · detectar, seleccionar e investigar')
                     if _graf['Referencia IDE'].notna().any():
                         _fig.add_trace(go.Scatter(x=_graf.sort_values('Fecha')['Fecha'],
@@ -4894,6 +5045,10 @@ if _seccion == '🎯 BI Ejecutivo':
                     st.markdown('##### Expediente operacional · '+_fecha_ide.strftime('%d-%m-%Y'))
                     _i1,_i2,_i3,_i4=st.columns(4)
                     _i1.metric('Jornada',str(_dia['Tipo de jornada']))
+                    st.caption('🚆 Etapa SFE: '+str(_dia.get('Etapa SFE','Sin dato'))+
+                        ' · habilitados comercialmente: '+str(_dia.get('SFE habilitados comercialmente','—'))+
+                        ' · unidades SFE con km UMR: '+(str(int(_dia['Unidades SFE con km comercial']))
+                         if pd.notna(_dia.get('Unidades SFE con km comercial',np.nan)) else 'sin cobertura UMR'))
                     _i2.metric('IDE real',f"{_ncl(_dia['IDE real (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE real (kWh/km)']) else 'Sin dato')
                     _i3.metric('IDE de línea base',f"{_ncl(_dia['IDE_LB (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE_LB (kWh/km)']) else 'Sin dato')
                     _i4.metric('Desviación línea base',f"{_ncl(_dia['Sobreconsumo LB %'],1)} %" if pd.notna(_dia['Sobreconsumo LB %']) else 'No calculable')
@@ -4902,7 +5057,7 @@ if _seccion == '🎯 BI Ejecutivo':
                         st.markdown('**Indicadores relacionados con el día y el mismo tipo de jornada**')
                         _compar=_bi_ide_factores_dia(_ide_historico,_f)
                         st.dataframe(_compar,hide_index=True,width='stretch')
-                        st.caption('Medianas calculadas con hasta 45 fechas PREVIAS de la misma jornada. '
+                        st.caption('Medianas calculadas con hasta 45 fechas PREVIAS de la misma jornada Y etapa comercial SFE. '
                                    'Las variaciones son indicios descriptivos, no porcentajes de causalidad.')
                     with _ib:
                         st.markdown('**Condiciones observadas**')
@@ -4948,7 +5103,9 @@ if _seccion == '🎯 BI Ejecutivo':
                     st.markdown('**Línea base aplicada y procedencia del dato energético**')
                     _trazabilidad=pd.DataFrame([{'Indicador':_col,'Valor':_dia.get(_col,np.nan)} for _col in [
                         'Intercepcion','IDE_LB_100M','IDE_LB_SFE','Odom_SFE','Odom_100M',
-                        'Registros UMR km','E_LB (kWh)','Exceso LB (kWh)',
+                        'Registros UMR km','SFE-410 km comercial','SFE-411 km comercial',
+                        'SFE-412 km comercial','SFE pruebas km UMR','Viajes SFE THDR comerciales',
+                        'E_LB (kWh)','Exceso LB (kWh)',
                         'E_Fact','E_Prmte','E_Seat_T','E_Seat_Tr','E_Seat_12']])
                     st.dataframe(_trazabilidad,hide_index=True,width='stretch')
                     st.caption('Factura, PRMTE y SEAT son fuentes alternativas priorizadas, NO sumables. '
@@ -5077,6 +5234,79 @@ if _seccion == '🎯 BI Ejecutivo':
                            'Solo se calcula referencia cuando hay al menos 6 fechas anteriores '
                            'y 20 viajes en el mismo O-D, tipo de tren y jornada. '
                            'Comparaciones sin antecedentes suficientes aparecen sin referencia.')
+
+        with _bt_sfe:
+            st.markdown('#### Incorporación comercial de trenes SFE: 412, 410 y 411')
+            st.caption('Cronología establecida para análisis: SFE-412 desde 22-04-2026; '
+                       'SFE-410 y SFE-411 desde 25-09-2026. '
+                       'La fecha indica habilitación comercial, NO que la unidad hizo viajes ese día. '
+                       'UMR indica km registrados; THDR identifica servicios cuando existe motriz.')
+            _cron=pd.DataFrame([
+                {'Unidad':'SFE-412','Desde':'22-04-2026','Fuente':'Inicio comercial informado oficialmente'},
+                {'Unidad':'SFE-410','Desde':'25-09-2026','Fuente':'Fecha operacional indicada por usuario'},
+                {'Unidad':'SFE-411','Desde':'25-09-2026','Fuente':'Fecha operacional indicada por usuario'},
+            ])
+            st.dataframe(_cron,hide_index=True,width='stretch')
+            _sfe_vis=_bi_sfe_dia[_bi_sfe_dia['Fecha'].isin(set(_bi_filtro['Fecha']))].copy()
+            if _sfe_vis.empty:
+                st.info('No hay datos diarios para el período actual.')
+            else:
+                _etapas=st.multiselect('Etapas comerciales a comparar',list(_SFE_ETAPAS),
+                           default=list(_SFE_ETAPAS),key='_bi_sfe_etapas_v35')
+                _sfe_vis=_sfe_vis[_sfe_vis['Etapa SFE'].isin(_etapas)]
+                if _sfe_vis.empty:
+                    st.info('Sin fechas para las etapas seleccionadas.')
+                else:
+                    _bloques=[]
+                    for (_fase,_jornada),_b in _sfe_vis.groupby(['Etapa SFE','Tipo de jornada'],observed=True):
+                        _km=pd.to_numeric(_b['SFE comerciales km UMR'],errors='coerce')
+                        _ide=_bi_valor_kpi(_b,'IDE (kWh/km)')
+                        _bloques.append({'Etapa SFE':_fase,'Jornada':_jornada,'Días':int(_b['Fecha'].nunique()),
+                            'IDE ponderado (kWh/km)':_ide,
+                            'Energía tracción (kWh)':_bi_valor_kpi(_b,'E_Tr'),
+                            'Odómetro flota (km)':_bi_valor_kpi(_b,'Odómetro [km]'),
+                            'Km SFE comerciales UMR':_km.sum(min_count=1),
+                            'Días con km SFE observado':int(_km.gt(0).sum()),
+                            'Viajes SFE THDR observados':pd.to_numeric(_b['Viajes SFE THDR comerciales'],errors='coerce').sum(min_count=1)})
+                    st.markdown('**Comparación por etapa y jornada**')
+                    st.dataframe(pd.DataFrame(_bloques),hide_index=True,width='stretch')
+                    _cols=['Fecha','Tipo de jornada','Etapa SFE','SFE habilitados comercialmente',
+                           'SFE-412 km comercial','SFE-410 km comercial','SFE-411 km comercial',
+                           'SFE comerciales km UMR','SFE pruebas km UMR',
+                           'Unidades SFE con km comercial','Viajes SFE THDR comerciales',
+                           'E_Tr','Odómetro [km]','IDE (kWh/km)','Servicios','PAX']
+                    st.markdown('**Seguimiento por día y unidad**')
+                    st.dataframe(_sfe_vis[[c for c in _cols if c in _sfe_vis]].sort_values('Fecha',ascending=False),
+                                 hide_index=True,width='stretch')
+                    st.download_button('⬇️ Exportar cronología y rendimiento SFE (CSV)',
+                         data=_sfe_vis[[c for c in _cols if c in _sfe_vis]].to_csv(
+                             index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                         file_name='bi_incorporacion_sfe_2026.csv',mime='text/csv',
+                         key='_bi_sfe_descargar_v35')
+                    _draw=_sfe_vis.sort_values('Fecha').copy()
+                    if _draw['SFE comerciales km UMR'].notna().any():
+                        st.plotly_chart(px.bar(_draw,x='Fecha',
+                            y=['SFE-412 km comercial','SFE-410 km comercial','SFE-411 km comercial'],
+                            title='Kilometraje diario SFE por unidad (solo UMR registrado)'),
+                            width='stretch',key='_bi_sfe_graf_v35')
+                    _thdr_disponible=bool(_bi_tv_data is not None and not _bi_tv_data.empty and
+                            {'Unidad SFE','SFE comercial registrado THDR'}.issubset(_bi_tv_data.columns))
+                    if not _thdr_disponible:
+                        st.info('El historial todavía no incorpora la identificación individual de SFE en THDR. '
+                                'GitHub Actions debe publicar la nueva versión para completar este cruce.')
+                    else:
+                        _mov=_bi_tv_data[
+                            _bi_tv_data['Fecha'].isin(set(_sfe_vis['Fecha'])) &
+                            _bi_tv_data['Unidad SFE'].ne('')].copy()
+                        if not _mov.empty:
+                            st.markdown('**Circulaciones SFE identificadas en THDR (con y sin habilitación)**')
+                            st.dataframe(_mov[[c for c in ['Fecha','Vía','Unidad SFE',
+                                'SFE comercial registrado THDR','Tipo de servicio',
+                                'Servicio THDR','Duración (min)'] if c in _mov]].sort_values('Fecha',ascending=False).head(300),
+                                hide_index=True,width='stretch')
+            st.caption('Comparaciones descriptivas: la disponibilidad de una unidad y el cambio de oferta '
+                       'no prueban por sí solos un efecto causal sobre el IDE. Días sin registro UMR '
+                       'no se interpretan como cero km si no hay cobertura suficiente.')
 
         with _bt_pred:
             st.markdown('#### Proyección operativa orientativa')
@@ -5665,12 +5895,9 @@ if _seccion == _SECCIONES[1]:
                             if 28 <= _n <= 35: return f"XM{_n}"
                             return f"SFE {_n}"
                         _lt['TrenTHDR'] = _lt['NMot'].map(_nom_mot)
-                        # Excluir SFE en pruebas: hasta 20-abr todos aparte; desde 21-abr solo el 412 cuenta
-                        _SFE_CT = pd.Timestamp(2026, 4, 21)
+                        # SFE comercial según su unidad y fecha de entrada real.
                         _es_sfe_l = _lt['TrenTHDR'].str.upper().str.startswith('SFE')
-                        _es_412_l = _lt['NMot'] == 412
-                        _fe_ok = pd.to_datetime(_lt['Fecha'], errors='coerce')
-                        _cuenta_l = (~_es_sfe_l) | (_es_412_l & (_fe_ok >= _SFE_CT))
+                        _cuenta_l = (~_es_sfe_l) | _sfe_mascara_comercial(_lt['NMot'],_lt['Fecha'])
                         _lt = _lt[_cuenta_l]
                         _lt['_key'] = _lt['TrenTHDR'].str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
                         _tk_tren = _lt.groupby(['_key', 'TrenTHDR'], as_index=False)['Km'].sum().rename(columns={'Km': 'Tren-Km THDR'})
@@ -9358,8 +9585,7 @@ def _rca_conclusiones(pasos, total):
 
 
 def _km_sfe_pruebas(all_tr):
-    """Km por día de los trenes SFE en pruebas, que no cuentan en el Odómetro del UMR (misma regla que _armar_df_ops:
-    hasta el 20-04-2026 todos los SFE; desde el 21-04-2026, todos menos el SFE 412, que pasó a servicio)."""
+    """Km SFE en pruebas: excluye 412 desde 22-04 y 410/411 desde 25-09 de 2026."""
     if not all_tr:
         return pd.Series(dtype=float)
     _t = pd.DataFrame(all_tr)
@@ -9369,7 +9595,7 @@ def _km_sfe_pruebas(all_tr):
     _t['Valor'] = pd.to_numeric(_t['Valor'], errors='coerce')
     _t = _t[_t['Clase'] == 'km'] if ('Clase' in _t.columns and (_t['Clase'] == 'km').any()) else _t[_t['Valor'] < 50000]
     _tren = _t['Tren'].astype(str).str.upper()
-    _s = _t[_tren.str.startswith('SFE') & ~(_tren.str.contains(r'\b412\b') & (_t['Fecha'] >= pd.Timestamp(2026, 4, 21)))]
+    _s = _t[_tren.str.startswith('SFE') & ~_sfe_mascara_comercial(_t['Tren'],_t['Fecha'])]
     _s = _s[_s['Valor'].between(0, 2000)]  # descarta saltos del odómetro (cambio de equipo o error de registro)
     return _s.groupby('Fecha')['Valor'].sum()
 
