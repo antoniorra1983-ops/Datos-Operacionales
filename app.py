@@ -44,6 +44,65 @@ div[data-testid="stMetricValue"] {
 .stDataFrame { overflow-x: auto; }
 </style>""", unsafe_allow_html=True)
 
+# ===== v36 · TARJETAS RESPONSIVAS CON DOS DECIMALES =====
+# Los estilos se aplican globalmente a todas las secciones y pestañas.
+# Evita truncar cifras largas; permite que la cifra pase a dos líneas.
+st.markdown("""<style>
+[data-testid="stMetric"] {
+    box-sizing: border-box !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    overflow: visible !important;
+}
+[data-testid="stMetric"] [data-testid="stMetricLabel"],
+[data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow-wrap: anywhere !important;
+    white-space: normal !important;
+    line-height: 1.25 !important;
+}
+[data-testid="stMetric"] [data-testid="stMetricValue"],
+[data-testid="stMetric"] [data-testid="stMetricValue"] > div,
+[data-testid="stMetric"] [data-testid="stMetricValue"] p {
+    font-size: clamp(0.98rem, 1.7vw, 1.62rem) !important;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    line-height: 1.22 !important;
+    letter-spacing: -0.015em;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+}
+[data-testid="stMetric"] [data-testid="stMetricDelta"],
+[data-testid="stMetric"] [data-testid="stMetricDelta"] > div {
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    line-height: 1.25 !important;
+}
+[data-testid="stColumn"], [data-testid="column"] { min-width: 0; }
+@media (max-width: 900px) {
+    [data-testid="stMetric"] [data-testid="stMetricValue"],
+    [data-testid="stMetric"] [data-testid="stMetricValue"] > div,
+    [data-testid="stMetric"] [data-testid="stMetricValue"] p {
+        font-size: clamp(0.94rem, 2.35vw, 1.45rem) !important;
+    }
+}
+@media (max-width: 540px) {
+    [data-testid="stMetric"] [data-testid="stMetricValue"],
+    [data-testid="stMetric"] [data-testid="stMetricValue"] > div,
+    [data-testid="stMetric"] [data-testid="stMetricValue"] p {
+        font-size: clamp(0.92rem, 4.4vw, 1.4rem) !important;
+    }
+}
+</style>""", unsafe_allow_html=True)
+
 # --- 2. CONSTANTES DE RED Y CONFIGURACIONES ---
 ESTACIONES = [
     'Puerto','Bellavista','Francia','Baron','Portales','Recreo','Miramar',
@@ -630,6 +689,88 @@ def _ncl(x, dec=0):
     ent = ent + grp
     out = ent + ("," + frac if frac else "")
     return ("-" if neg else "") + out
+
+# ===== v36 · FORMATO CENTRALIZADO DE TARJETAS =====
+# Sólo se modifica la representación visual. Las tablas, CSV, cálculos e índices
+# mantienen sus valores originales (ninguna columna se redondea al calcular).
+def _v36_numero_de_texto(_txt):
+    """Convierte un número visible en español/inglés sin tocar la unidad."""
+    if not isinstance(_txt, str):
+        return None
+    _m = re.fullmatch(
+        r'(?P<pre>\s*(?:\$\s*|USD\s+|CLP\s+)?)'
+        r'(?P<sgn>[+\-−]?)'
+        r'(?P<num>\d[\d.,]*)'
+        r'(?P<pos>(?:\s.*|[%‰](?:\s.*)?|))', _txt, flags=re.IGNORECASE,
+    )
+    if not _m:
+        return None
+    _num = _m.group('num')
+    # Evita interpretar como cifra fechas, versiones y códigos con varios puntos.
+    if not re.fullmatch(r'\d+(?:[.,]\d+)*', _num):
+        return None
+    if ',' in _num and '.' in _num:
+        if _num.rfind(',') > _num.rfind('.'):
+            _raw = _num.replace('.', '').replace(',', '.')
+        else:
+            _raw = _num.replace(',', '')
+    elif ',' in _num:
+        _raw = _num.replace('.', '').replace(',', '.') if not re.fullmatch(r'\d{1,3}(?:,\d{3})+', _num) else _num.replace(',', '')
+    elif '.' in _num:
+        _raw = _num.replace('.', '') if re.fullmatch(r'\d{1,3}(?:\.\d{3})+', _num) else _num
+    else:
+        _raw = _num
+    try:
+        _v = float(_raw)
+    except (ValueError, OverflowError):
+        return None
+    if not np.isfinite(_v):
+        return None
+    _signo = '-' if _m.group('sgn') in ('-', '−') else ('+' if _m.group('sgn') == '+' else '')
+    return f"{_m.group('pre')}{_signo}{_ncl(_v, 2)}{_m.group('pos')}"
+
+
+def _v36_texto_tarjeta(_valor, _etiqueta='', _es_delta=False):
+    """Siempre dos decimales para importes, magnitudes y conteos de tarjetas.
+
+    Las horas, fechas, categorías y los códigos de unidad/tren son identificadores,
+    no magnitudes: no se alteran (ej. 410, 411, 412, 07:00).
+    """
+    if _valor is None or isinstance(_valor, (bool, np.bool_)):
+        return _valor
+    _lab = str(_etiqueta).lower()
+    if (not _es_delta and any(_x in _lab for _x in (
+        'tren más usado', 'tren con más servicio', 'unidad identificada',
+        'identificador', 'número de tren', 'número de unidad', 'código de tren'
+    ))):
+        return str(_valor)
+    if isinstance(_valor, (int, float, np.integer, np.floating)):
+        if not np.isfinite(float(_valor)):
+            return '—'
+        return _ncl(_valor, 2)
+    if isinstance(_valor, str):
+        _convertido = _v36_numero_de_texto(_valor)
+        return _valor if _convertido is None else _convertido
+    return _valor
+
+
+def _v36_tarjeta(_destino, *args, **kwargs):
+    """Presentación unificada de todas las llamadas st.metric / column.metric.
+
+    Reenvía intactos delta_color, help, border y el resto de parámetros Streamlit.
+    """
+    _args = list(args)
+    _et = _args[0] if _args else kwargs.get('label', '')
+    if len(_args) >= 2:
+        _args[1] = _v36_texto_tarjeta(_args[1], _et)
+    elif 'value' in kwargs:
+        kwargs['value'] = _v36_texto_tarjeta(kwargs['value'], _et)
+    if len(_args) >= 3 and _args[2] is not None:
+        _args[2] = _v36_texto_tarjeta(_args[2], _et, True)
+    elif kwargs.get('delta') is not None:
+        kwargs['delta'] = _v36_texto_tarjeta(kwargs['delta'], _et, True)
+    return _destino.metric(*_args, **kwargs)
+
 
 def _st_df(_df, **kw):
     """Reemplazo de st.dataframe que muestra los números en formato chileno (punto = miles,
@@ -4772,7 +4913,7 @@ if _seccion == '🎯 BI Ejecutivo':
                 _variacion=_bi_var_pct(_actual,_anterior)
                 _val='Sin datos' if not np.isfinite(_actual) else f'{_ncl(_actual,_dec)} {_unidad}'
                 _delta=f'{_variacion:+.1f}% vs anterior' if _variacion is not None else None
-                _kcols[_ki%3].metric(_titulo,_val,delta=_delta,delta_color='off',
+                _v36_tarjeta(_kcols[_ki%3], _titulo,_val,delta=_delta,delta_color='off',
                                      help='El cambio no indica por sí solo mejoría o deterioro.')
             st.caption(f'Período visible: {_ini:%d/%m/%Y} — {_fin:%d/%m/%Y} · '
                        f'{len(_bi_filtro):,} registros diarios · '
@@ -4838,10 +4979,10 @@ if _seccion == '🎯 BI Ejecutivo':
                 if _tipo_dia_d!='Todas las jornadas':
                     _d=_d[_d['Tipo de jornada']==_tipo_dia_d]
                 _c1,_c2,_c3,_c4=st.columns(4)
-                _c1.metric('Días visualizados',_ncl(_d['Fecha'].nunique()))
-                _c2.metric('Días con orden OIT SFE',_ncl(int(_d['Órdenes OIT madrugada'].gt(0).sum())))
-                _c3.metric('Órdenes OIT de madrugada',_ncl(int(_d['Órdenes OIT madrugada'].sum())))
-                _c4.metric('Energía total de los días visibles',f'{_ncl(_bi_valor_kpi(_d,"E_Total"),0)} kWh')
+                _v36_tarjeta(_c1, 'Días visualizados',_ncl(_d['Fecha'].nunique()))
+                _v36_tarjeta(_c2, 'Días con orden OIT SFE',_ncl(int(_d['Órdenes OIT madrugada'].gt(0).sum())))
+                _v36_tarjeta(_c3, 'Órdenes OIT de madrugada',_ncl(int(_d['Órdenes OIT madrugada'].sum())))
+                _v36_tarjeta(_c4, 'Energía total de los días visibles',f'{_ncl(_bi_valor_kpi(_d,"E_Total"),0)} kWh')
                 _ver_cols=['Fecha','Tipo de jornada','Registro OIT nocturno',
                            'Órdenes OIT madrugada','Unidades SFE OIT','Horas cierre OIT',
                            'E_Total','E_Tr','Odómetro [km]','IDE (kWh/km)',
@@ -4911,9 +5052,9 @@ if _seccion == '🎯 BI Ejecutivo':
                     'Órdenes OIT madrugada','Unidades SFE OIT']].drop_duplicates('Fecha'),
                     on='Fecha',how='left',validate='many_to_one')
             _col_a,_col_b,_col_c=st.columns(3)
-            _col_a.metric('Hallazgos en período',_ncl(len(_alertas)))
-            _col_b.metric('Días con hallazgos',_ncl(_alertas['Fecha'].nunique() if not _alertas.empty else 0))
-            _col_c.metric('Archivos con error',_ncl(len(st.session_state.get('_errores_proc',{}))))
+            _v36_tarjeta(_col_a, 'Hallazgos en período',_ncl(len(_alertas)))
+            _v36_tarjeta(_col_b, 'Días con hallazgos',_ncl(_alertas['Fecha'].nunique() if not _alertas.empty else 0))
+            _v36_tarjeta(_col_c, 'Archivos con error',_ncl(len(st.session_state.get('_errores_proc',{}))))
             st.caption('Las alertas muestran si hubo órdenes OIT SFE de madrugada cerradas ese día, '
                        'sin atribuirles automáticamente la desviación. Método: mediana de hasta 45 '
                        'antecedentes anteriores de la MISMA jornada (L/S/D-F), '
@@ -4980,14 +5121,14 @@ if _seccion == '🎯 BI Ejecutivo':
                 _fuera=_ide_periodo[_ide_periodo['Fuera de referencia']].copy().sort_values(
                     ['Exceso %','Fecha'],ascending=[False,False])
                 _ks=st.columns(4)
-                _ks[0].metric('Días evaluables',_ncl(_validos))
-                _ks[1].metric('Días con IDE excedido',_ncl(len(_fuera)))
-                _ks[2].metric('Mayor desvío',f"+{_ncl(_fuera['Exceso %'].max(),1)} %" if not _fuera.empty else '—')
+                _v36_tarjeta(_ks[0], 'Días evaluables',_ncl(_validos))
+                _v36_tarjeta(_ks[1], 'Días con IDE excedido',_ncl(len(_fuera)))
+                _v36_tarjeta(_ks[2], 'Mayor desvío',f"+{_ncl(_fuera['Exceso %'].max(),1)} %" if not _fuera.empty else '—')
                 if _lb_elegida:
-                    _ks[3].metric('Exceso energético (solo días excedidos)',
+                    _v36_tarjeta(_ks[3], 'Exceso energético (solo días excedidos)',
                         f"{_ncl(_fuera['Exceso LB (kWh)'].sum(),0)} kWh" if not _fuera.empty else '0 kWh')
                 else:
-                    _ks[3].metric('Días sin referencia',_ncl(len(_ide_periodo)-_validos))
+                    _v36_tarjeta(_ks[3], 'Días sin referencia',_ncl(len(_ide_periodo)-_validos))
                 if _lb_elegida and _validos<len(_ide_periodo):
                     st.warning(f'{len(_ide_periodo)-_validos} fecha(s) sin línea base calculable: '
                                'se necesitan coeficientes IDE, odómetro UMR por tren y tracción válidos. '
@@ -5044,14 +5185,14 @@ if _seccion == '🎯 BI Ejecutivo':
                     _dia=_ide_historico[_ide_historico['Fecha'].eq(_f)].iloc[0]
                     st.markdown('##### Expediente operacional · '+_fecha_ide.strftime('%d-%m-%Y'))
                     _i1,_i2,_i3,_i4=st.columns(4)
-                    _i1.metric('Jornada',str(_dia['Tipo de jornada']))
+                    _v36_tarjeta(_i1, 'Jornada',str(_dia['Tipo de jornada']))
                     st.caption('🚆 Etapa SFE: '+str(_dia.get('Etapa SFE','Sin dato'))+
                         ' · habilitados comercialmente: '+str(_dia.get('SFE habilitados comercialmente','—'))+
                         ' · unidades SFE con km UMR: '+(str(int(_dia['Unidades SFE con km comercial']))
                          if pd.notna(_dia.get('Unidades SFE con km comercial',np.nan)) else 'sin cobertura UMR'))
-                    _i2.metric('IDE real',f"{_ncl(_dia['IDE real (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE real (kWh/km)']) else 'Sin dato')
-                    _i3.metric('IDE de línea base',f"{_ncl(_dia['IDE_LB (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE_LB (kWh/km)']) else 'Sin dato')
-                    _i4.metric('Desviación línea base',f"{_ncl(_dia['Sobreconsumo LB %'],1)} %" if pd.notna(_dia['Sobreconsumo LB %']) else 'No calculable')
+                    _v36_tarjeta(_i2, 'IDE real',f"{_ncl(_dia['IDE real (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE real (kWh/km)']) else 'Sin dato')
+                    _v36_tarjeta(_i3, 'IDE de línea base',f"{_ncl(_dia['IDE_LB (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE_LB (kWh/km)']) else 'Sin dato')
+                    _v36_tarjeta(_i4, 'Desviación línea base',f"{_ncl(_dia['Sobreconsumo LB %'],1)} %" if pd.notna(_dia['Sobreconsumo LB %']) else 'No calculable')
                     _ia,_ib=st.columns([2,1])
                     with _ia:
                         st.markdown('**Indicadores relacionados con el día y el mismo tipo de jornada**')
@@ -5085,11 +5226,11 @@ if _seccion == '🎯 BI Ejecutivo':
                         _t1,_t2,_t3=st.columns(3)
                         _vref=_dia.get('Viajes con referencia',np.nan)
                         _ds=_dia.get('Desvío tiempo comparable (%)',np.nan)
-                        _t1.metric('Viajes con hora válida',
+                        _v36_tarjeta(_t1, 'Viajes con hora válida',
                                    _ncl(_dia.get('Viajes con duración válida',0)))
-                        _t2.metric('Viajes con referencia histórica',
+                        _v36_tarjeta(_t2, 'Viajes con referencia histórica',
                                    _ncl(_vref) if pd.notna(_vref) else 'Sin referencia')
-                        _t3.metric('Variación viaje por OD',
+                        _v36_tarjeta(_t3, 'Variación viaje por OD',
                                    f'{_ds:+.1f} %' if pd.notna(_ds) else 'Sin referencia')
                         _tcols=['Tipo de servicio','Tipo de tren','Viajes THDR','Viajes con hora válida',
                                 'Mediana viaje (min)','Referencia por OD (min)',
@@ -5171,10 +5312,10 @@ if _seccion == '🎯 BI Ejecutivo':
                     _n_ref=int(_tv_vis['Viajes con referencia'].sum())
                     _m=_tv_vis['Desvío tiempo comparable (%)'].dropna()
                     _c1,_c2,_c3,_c4=st.columns(4)
-                    _c1.metric('Días con THDR',_ncl(len(_tv_vis)))
-                    _c2.metric('Viajes con duración',_ncl(_n_tv))
-                    _c3.metric('Viajes comparables',_ncl(_n_ref))
-                    _c4.metric('Días con sobretiempo +15 %',_ncl(int(_m.gt(15).sum())))
+                    _v36_tarjeta(_c1, 'Días con THDR',_ncl(len(_tv_vis)))
+                    _v36_tarjeta(_c2, 'Viajes con duración',_ncl(_n_tv))
+                    _v36_tarjeta(_c3, 'Viajes comparables',_ncl(_n_ref))
+                    _v36_tarjeta(_c4, 'Días con sobretiempo +15 %',_ncl(int(_m.gt(15).sum())))
                     _tv_cruce=_bi_filtro[['Fecha','Tipo de jornada','IDE (kWh/km)','E_Tr',
                                           'Odómetro [km]','PAX','Servicios']].merge(
                         _tv_vis,on='Fecha',how='inner',validate='one_to_one')
@@ -5336,7 +5477,7 @@ if _seccion == '🎯 BI Ejecutivo':
                 if _pendientes:
                     st.warning(f'{_pendientes} día(s) sin proyección por falta de antecedentes de su propia jornada. '
                                'El total mostrado es parcial y no debe tratarse como proyección completa.')
-                st.metric('Total proyectado del horizonte' if not _pendientes else 'Total parcial proyectado',
+                _v36_tarjeta(st, 'Total proyectado del horizonte' if not _pendientes else 'Total parcial proyectado',
                           f'{_ncl(_total,1)}' if pd.notna(_total) else 'Sin dato')
                 _det=_proy.rename(columns={'Proyección':'Valor proyectado'}).copy()
                 _det['Fecha']=_det['Fecha'].dt.strftime('%d-%m-%Y')
@@ -5366,7 +5507,7 @@ if _seccion == '🎯 BI Ejecutivo':
                                           (_mc3,'Odómetro [km]','Kilómetros',0),
                                           (_mc4,'IDE (kWh/km)','IDE',2)]:
                     _v=_r.get(_key,np.nan)
-                    _mc.metric(_nom,_ncl(_v,_dec) if pd.notna(_v) else 'Sin dato')
+                    _v36_tarjeta(_mc, _nom,_ncl(_v,_dec) if pd.notna(_v) else 'Sin dato')
                 _dato_noche=_bi_diario[_bi_diario['Fecha'].eq(pd.Timestamp(_fecha_sel))]
                 if not _dato_noche.empty:
                     _cierre=_dato_noche.iloc[0]
@@ -5463,9 +5604,9 @@ if _seccion == '🎯 BI Ejecutivo':
             _issues=st.session_state.get('_errores_proc',{})
             _qc=_bi_calidad(_bi_hist,_issues,st.session_state.get('_seat_dups'))
             _q1,_q2,_q3=st.columns(3)
-            _q1.metric('Días en base operacional',_ncl(len(_bi_hist)))
-            _q2.metric('Controles con hallazgos',_ncl(int((_qc['Hallazgos']>0).sum())))
-            _q3.metric('Fuentes físicas declaradas',_ncl(st.session_state.get('_historial_archivos_procesados',0)))
+            _v36_tarjeta(_q1, 'Días en base operacional',_ncl(len(_bi_hist)))
+            _v36_tarjeta(_q2, 'Controles con hallazgos',_ncl(int((_qc['Hallazgos']>0).sum())))
+            _v36_tarjeta(_q3, 'Fuentes físicas declaradas',_ncl(st.session_state.get('_historial_archivos_procesados',0)))
             st.dataframe(_qc,hide_index=True,width='stretch')
             if _issues:
                 with st.expander(f'Archivos con errores detectados ({len(_issues)})'):
@@ -5585,7 +5726,7 @@ if _seccion == _SECCIONES[0]:
                 _u = ("<span style='font-size:.68rem;font-weight:600;color:#94a3b8;'>&nbsp;" + str(_unit) + "</span>") if _unit else ""
                 _html = ("<div style='padding:2px 8px 4px 2px;' title='" + str(_tip) + "'>"
                          "<div style='font-size:.72rem;color:#64748b;font-weight:600;line-height:1.18;white-space:normal;word-break:break-word;min-height:2.4em;display:flex;align-items:flex-end;'>" + str(_label) + "</div>"
-                         "<div style='font-size:1.15rem;font-weight:700;color:#0f172a;line-height:1.2;white-space:nowrap;'>" + str(_value) + _u + "</div></div>")
+                         "<div style='font-size:clamp(.94rem,1.55vw,1.15rem);font-weight:700;color:#0f172a;line-height:1.2;white-space:normal;overflow-wrap:anywhere;min-width:0;max-width:100%;'>" + str(_v36_texto_tarjeta(_value)) + _u + "</div></div>")
                 _col.markdown(_html, unsafe_allow_html=True)
             def _tarjeta_por_via(_df, _col, _fmt, _label_total, _unit=""):
                 _serie = _df.groupby('Tipo_Servicio')[_col].sum() if (not _df.empty and _col in _df.columns) else None
@@ -5630,9 +5771,9 @@ if _seccion == _SECCIONES[0]:
             else:
                 _pv_s = pd.Series(dtype=float)
             _mc = st.columns(4)
-            _mc[0].metric("Total Servicios", _fmt_int(_st['Servicios'].sum() if not _st.empty else 0))
-            _mc[1].metric("Vía 1", _fmt_int(_pv_s.get('Vía 1', 0)))
-            _mc[2].metric("Vía 2", _fmt_int(_pv_s.get('Vía 2', 0)))
+            _v36_tarjeta(_mc[0], "Total Servicios", _fmt_int(_st['Servicios'].sum() if not _st.empty else 0))
+            _v36_tarjeta(_mc[1], "Vía 1", _fmt_int(_pv_s.get('Vía 1', 0)))
+            _v36_tarjeta(_mc[2], "Vía 2", _fmt_int(_pv_s.get('Vía 2', 0)))
             if not _stv.empty:
                 _stg = _stv.groupby(['Fecha', 'Vía'], as_index=False)['Servicios'].sum()
                 _stg = _agr_mes(_stg, ['Servicios'], _extra_group=['Vía'])
@@ -5653,8 +5794,8 @@ if _seccion == _SECCIONES[0]:
                 _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
                 _dias_vj = int(_vd['Fecha'].nunique())
                 _mc = st.columns(4)
-                _mc[0].metric("Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
-                _mc[1].metric("Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
+                _v36_tarjeta(_mc[0], "Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
+                _v36_tarjeta(_mc[1], "Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
                 _vd_g = _agr_mes(_vd, ['Total Viajes'])
                 fig_pax = px.bar(_vd_g, x='Fecha', y='Total Viajes')
                 fig_pax.update_traces(marker_color='#2563eb', texttemplate='%{y:,.0f}', textposition='inside', textangle=-90, textfont=dict(color='white', size=10), hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
@@ -5676,10 +5817,10 @@ if _seccion == _SECCIONES[0]:
             _tot_tk = float(_df_ot['Tren-Km [km]'].sum()) if _tiene_tk else 0.0
             _dif_ot = _tot_od - _tot_tk
             _mc = st.columns(4)
-            _mc[0].metric("Odómetro Total", f"{_ncl(_tot_od, 0)} km")
-            _mc[1].metric("Tren-Km Total", f"{_ncl(_tot_tk, 0)} km")
-            _mc[2].metric("UMR Global", f"{_ncl(_tot_tk / _tot_od * 100 if _tot_od > 0 else 0, 1)} %")
-            _mc[3].metric("Vacío / maniobras", f"{_ncl(_dif_ot, 0)} km")
+            _v36_tarjeta(_mc[0], "Odómetro Total", f"{_ncl(_tot_od, 0)} km")
+            _v36_tarjeta(_mc[1], "Tren-Km Total", f"{_ncl(_tot_tk, 0)} km")
+            _v36_tarjeta(_mc[2], "UMR Global", f"{_ncl(_tot_tk / _tot_od * 100 if _tot_od > 0 else 0, 1)} %")
+            _v36_tarjeta(_mc[3], "Vacío / maniobras", f"{_ncl(_dif_ot, 0)} km")
             if not _df_ot.empty and (_tiene_od or _tiene_tk):
                 _cols_ot = [c for c in ['Odómetro [km]', 'Tren-Km [km]'] if c in _df_ot.columns]
                 _df_ot_g = _agr_mes(_df_ot, _cols_ot)
@@ -5705,7 +5846,7 @@ if _seccion == _SECCIONES[0]:
             _tot_tk_umr = df_resumen['Tren-Km [km]'].sum(); _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
             umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
             _mc = st.columns(4)
-            _mc[0].metric("Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
+            _v36_tarjeta(_mc[0], "Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
             _df_umr_g = _agr_mes(df_resumen, ['Tren-Km [km]', 'Odómetro [km]'], _ratios={'UMR (%)': ('Tren-Km [km]', 'Odómetro [km]', 100)})
             fig_umr = px.bar(_df_umr_g, x='Fecha', y='UMR (%)', color_discrete_sequence=["#E85500"],
                              hover_data=_hov(_df_umr_g), title="Tasa de Acoplamiento (UMR %)")
@@ -5732,9 +5873,9 @@ if _seccion == _SECCIONES[0]:
             df_ener_src['Baja Tensión'] = df_ener_src['Total E'] * df_ener_src['% 12 kV'] / 100
             _tot_e = df_ener_src['Total E'].sum(); _tot_tr_e = df_ener_src['Tracción'].sum(); _tot_12_e = df_ener_src['Baja Tensión'].sum()
             _mc = st.columns(4)
-            _mc[0].metric("Total Energía", f"{_ncl(_tot_e, 1)} kWh")
-            _mc[1].metric("Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
-            _mc[2].metric("Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
+            _v36_tarjeta(_mc[0], "Total Energía", f"{_ncl(_tot_e, 1)} kWh")
+            _v36_tarjeta(_mc[1], "Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
+            _v36_tarjeta(_mc[2], "Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
             _de_g = _agr_mes(df_ener_src, ['Tracción', 'Baja Tensión'])
             fig_ener = px.bar(_de_g, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
                               color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
@@ -5756,7 +5897,7 @@ if _seccion == _SECCIONES[0]:
             _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
             ide_global = (_tot_tr_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
             _mc = st.columns(4)
-            _mc[0].metric(f"kWh/km tracción {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
+            _v36_tarjeta(_mc[0], f"kWh/km tracción {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
             _de_ide_g = _agr_mes(df_ener_src, ['Tracción', 'Odómetro [km]'], _ratios={'kWh/km': ('Tracción', 'Odómetro [km]', 1)})
             fig_ide_bar = px.bar(_de_ide_g, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
                                  hover_data=_hov(_de_ide_g), title=f"Desempeño Energético — Tracción {_fuente_e} (kWh/km)")
@@ -5796,10 +5937,10 @@ if _seccion == _SECCIONES[0]:
                 else:
                     _pax_t = float(_de_px['Pasajeros'].sum()); _e_px_t = float(_de_px['Total E'].sum()); _tr_px_t = float(_de_px['Tracción'].sum())
                     _mc = st.columns(4)
-                    _mc[0].metric("Pax/kWh total", _ncl(_pax_t / _e_px_t, 2))
-                    _mc[1].metric("Pax/kWh tracción", _ncl(_pax_t / _tr_px_t, 2) if _tr_px_t > 0 else "—")
-                    _mc[2].metric("Pasajeros", _fmt_int(_pax_t))
-                    _mc[3].metric("Energía total (kWh)", _fmt_int(_e_px_t))
+                    _v36_tarjeta(_mc[0], "Pax/kWh total", _ncl(_pax_t / _e_px_t, 2))
+                    _v36_tarjeta(_mc[1], "Pax/kWh tracción", _ncl(_pax_t / _tr_px_t, 2) if _tr_px_t > 0 else "—")
+                    _v36_tarjeta(_mc[2], "Pasajeros", _fmt_int(_pax_t))
+                    _v36_tarjeta(_mc[3], "Energía total (kWh)", _fmt_int(_e_px_t))
                     _de_px['Pax/kWh'] = _de_px['Pasajeros'] / _de_px['Total E']
                     _de_px_g = _agr_mes(_de_px, ['Pasajeros', 'Total E'], _ratios={'Pax/kWh': ('Pasajeros', 'Total E', 1)})
                     fig_pax_kwh = px.bar(_de_px_g, x='Fecha', y='Pax/kWh', custom_data=['Pasajeros', 'Total E'],
@@ -5835,9 +5976,9 @@ if _seccion == _SECCIONES[0]:
                 else:
                     _pk_t, _tr_pk_t = float(_de_pk['Pax-km'].sum()), float(_de_pk['Tracción'].sum())
                     _mk = st.columns(4)
-                    _mk[0].metric("Pax-km/kWh", _ncl(_pk_t / _tr_pk_t, 2))
-                    _mk[1].metric("Pax-km (millones)", _ncl(_pk_t / 1e6, 2))
-                    _mk[2].metric("Tracción (kWh)", _fmt_int(_tr_pk_t))
+                    _v36_tarjeta(_mk[0], "Pax-km/kWh", _ncl(_pk_t / _tr_pk_t, 2))
+                    _v36_tarjeta(_mk[1], "Pax-km (millones)", _ncl(_pk_t / 1e6, 2))
+                    _v36_tarjeta(_mk[2], "Tracción (kWh)", _fmt_int(_tr_pk_t))
                     _de_pk['Pax-km/kWh'] = _de_pk['Pax-km'] / _de_pk['Tracción']
                     _de_pk_g = _agr_mes(_de_pk, ['Pax-km', 'Tracción'], _ratios={'Pax-km/kWh': ('Pax-km', 'Tracción', 1)})
                     fig_pk_kwh = px.bar(_de_pk_g, x='Fecha', y='Pax-km/kWh', custom_data=['Pax-km', 'Tracción'],
@@ -6039,10 +6180,10 @@ if _seccion == _SECCIONES[1]:
             _act_tr = _res_tr[_res_tr['Km recorridos'] > 0]
             _n_act = int(len(_act_tr))
             _c1, _c2, _c3, _c4 = st.columns(4)
-            _c1.metric("Trenes con actividad", _ncl(_n_act, 0))
-            _c2.metric("Km total flota", f"{_ncl(_km_tot_tr, 0)} km")
-            _c3.metric("Km promedio/tren", f"{_ncl(_km_tot_tr / _n_act if _n_act else 0, 0)} km")
-            _c4.metric("Tren más usado", str(_res_tr.iloc[0]['Tren']), f"{_ncl(_res_tr.iloc[0]['Km recorridos'], 0)} km")
+            _v36_tarjeta(_c1, "Trenes con actividad", _ncl(_n_act, 0))
+            _v36_tarjeta(_c2, "Km total flota", f"{_ncl(_km_tot_tr, 0)} km")
+            _v36_tarjeta(_c3, "Km promedio/tren", f"{_ncl(_km_tot_tr / _n_act if _n_act else 0, 0)} km")
+            _v36_tarjeta(_c4, "Tren más usado", str(_res_tr.iloc[0]['Tren']), f"{_ncl(_res_tr.iloc[0]['Km recorridos'], 0)} km")
             _por_tipo = _res_tr.groupby('Tipo').agg(**{'Trenes': ('Tren', 'count'), 'Km total': ('Km recorridos', 'sum')}).reset_index()
             _tot_km_tp = float(_por_tipo['Km total'].sum())
             _por_tipo['% uso'] = (_por_tipo['Km total'] / _tot_km_tp * 100).round(1) if _tot_km_tp > 0 else 0.0
@@ -6098,16 +6239,16 @@ if _seccion == _SECCIONES[1]:
                 except Exception:
                     pass
                 _k1, _k2, _k3, _k4, _k5 = st.columns(5)
-                _k1.metric("Trenes con servicio", _ncl(_n_srv, 0))
-                _k2.metric("Tren-Km total flota", f"{_ncl(_tkm_tot, 0)} km",
+                _v36_tarjeta(_k1, "Trenes con servicio", _ncl(_n_srv, 0))
+                _v36_tarjeta(_k2, "Tren-Km total flota", f"{_ncl(_tkm_tot, 0)} km",
                            (f"por motriz (doble ×2)"),
                            delta_color="off")
-                _k3.metric("KmTrenR (UMR)", f"{_ncl(_kmtren_r_ref, 0)} km" if pd.notna(_kmtren_r_ref) and _kmtren_r_ref > 0 else "—",
+                _v36_tarjeta(_k3, "KmTrenR (UMR)", f"{_ncl(_kmtren_r_ref, 0)} km" if pd.notna(_kmtren_r_ref) and _kmtren_r_ref > 0 else "—",
                            "malla de servicios (ida+vuelta = 1)", delta_color="off")
-                _k4.metric("Descuento corte/acople", f"{_ncl(_desc_tot, 0)} km",
+                _v36_tarjeta(_k4, "Descuento corte/acople", f"{_ncl(_desc_tot, 0)} km",
                            (f"UMR (KmTrenP−R): {_ncl(_km_perd_umr, 0)} km" if pd.notna(_km_perd_umr) and _km_perd_umr > 0 else None),
                            delta_color="off")
-                _k5.metric("Tren con más servicio", str(_top_tk['Tren']) if _top_tk is not None else "—",
+                _v36_tarjeta(_k5, "Tren con más servicio", str(_top_tk['Tren']) if _top_tk is not None else "—",
                            f"{_ncl(_top_tk['Tren-Km THDR'], 0)} km" if _top_tk is not None else None)
                 _tkg = _res_tr[_res_tr['Tren-Km THDR'] > 0].sort_values('Tren-Km THDR', ascending=False)
                 _fig_cmp = px.bar(_tkg, x='Tren-Km THDR', y='Tren', orientation='h', text='Tren-Km THDR',
@@ -6186,9 +6327,9 @@ if _seccion == _SECCIONES[1]:
                                 _st_df(_tab_od[[c for c in _cols_od if c in _tab_od.columns]], use_container_width=True, hide_index=True)
                                 _dsrv = int(_cmp_od['Δ servicios'].sum()); _dtre = int(_cmp_od['Δ trenes'].sum())
                                 _o1, _o2, _o3 = st.columns(3)
-                                _o1.metric("Servicios UMR", _ncl(int(_cmp_od['Servicios UMR'].sum()), 0))
-                                _o2.metric("Servicios THDR", _ncl(int(_cmp_od['Servicios THDR'].sum()), 0))
-                                _o3.metric("Δ (THDR − UMR)", _ncl(_dsrv, 0),
+                                _v36_tarjeta(_o1, "Servicios UMR", _ncl(int(_cmp_od['Servicios UMR'].sum()), 0))
+                                _v36_tarjeta(_o2, "Servicios THDR", _ncl(int(_cmp_od['Servicios THDR'].sum()), 0))
+                                _v36_tarjeta(_o3, "Δ (THDR − UMR)", _ncl(_dsrv, 0),
                                            "coinciden" if _dsrv == 0 else "revisar tipos con Δ ≠ 0", delta_color="off")
                                 _mal = _cmp_od[_cmp_od['Δ servicios'] != 0]
                                 if not _mal.empty:
@@ -6252,10 +6393,10 @@ if _seccion == _SECCIONES[1]:
                             _sd_i = float(_dcmp['Desc. total'].sum()); _sd_u = float(_dcmp['Km perdido UMR'].sum())
                             _sa_i = float(_dcmp['Desc. acoples'].sum())
                             _c1c, _c2c, _c3c, _c4c = st.columns(4)
-                            _c1c.metric("Desc. por cortes", f"{_ncl(float(_dcmp['Desc. cortes'].sum()), 1)} km")
-                            _c2c.metric("Desc. por acoples", f"{_ncl(_sa_i, 1)} km")
-                            _c3c.metric("Km perdido UMR", f"{_ncl(_sd_u, 1)} km")
-                            _c4c.metric("Δ (app − UMR)", f"{_ncl(_sd_i - _sd_u, 1)} km",
+                            _v36_tarjeta(_c1c, "Desc. por cortes", f"{_ncl(float(_dcmp['Desc. cortes'].sum()), 1)} km")
+                            _v36_tarjeta(_c2c, "Desc. por acoples", f"{_ncl(_sa_i, 1)} km")
+                            _v36_tarjeta(_c3c, "Km perdido UMR", f"{_ncl(_sd_u, 1)} km")
+                            _v36_tarjeta(_c4c, "Δ (app − UMR)", f"{_ncl(_sd_i - _sd_u, 1)} km",
                                         "coinciden" if abs(_sd_i - _sd_u) < 0.5 else "revisar días con Δ ≠ 0", delta_color="off")
                             # Diagnóstico automático de la causa
                             _dprob = _dcmp[_dcmp['Δ km'].abs() > 0.5]
@@ -6461,9 +6602,9 @@ if _seccion == _SECCIONES[1]:
         st.markdown("### 📏 Km por servicio: teórico vs real (KM-Servicio UMR)")
         _kt1 = float(_agg_ks['Kms.xTrenes'].sum()); _kt2 = float(_agg_ks['KmTren R'].sum()); _ktd = _kt1 - _kt2
         _mk1, _mk2, _mk3 = st.columns(3)
-        _mk1.metric("Kms.xTrenes (total)", f"{_ncl(_kt1, 0)} km")
-        _mk2.metric("KmTren R (total)", f"{_ncl(_kt2, 0)} km")
-        _mk3.metric("Diferencia (no realizado)", f"{_ncl(_ktd, 0)} km", f"{_ncl(_ktd / _kt1 * 100 if _kt1 else 0, 2)} %")
+        _v36_tarjeta(_mk1, "Kms.xTrenes (total)", f"{_ncl(_kt1, 0)} km")
+        _v36_tarjeta(_mk2, "KmTren R (total)", f"{_ncl(_kt2, 0)} km")
+        _v36_tarjeta(_mk3, "Diferencia (no realizado)", f"{_ncl(_ktd, 0)} km", f"{_ncl(_ktd / _kt1 * 100 if _kt1 else 0, 2)} %")
         _aml = _agg_ks.melt(id_vars='Fecha', value_vars=['Kms.xTrenes', 'KmTren R'], var_name='Métrica', value_name='Km')
         _fig_ks = px.bar(_aml, x='Fecha', y='Km', color='Métrica', barmode='group',
                          color_discrete_map={'Kms.xTrenes': '#005195', 'KmTren R': '#E85500'})
@@ -6486,9 +6627,9 @@ if _seccion == _SECCIONES[2]:
         _ptr = (_etr / _et * 100) if _et > 0 else 0.0
         _p12 = (_e12 / _et * 100) if _et > 0 else 0.0
         _k1, _k2, _k3 = st.columns(3)
-        _k1.metric("Energía Total", f"{_ncl(_et, 0)} kWh")
-        _k2.metric("Tracción", f"{_ncl(_etr, 0)} kWh", f"{_ncl(_ptr, 1)} % del total")
-        _k3.metric("12 kV (auxiliares)", f"{_ncl(_e12, 0)} kWh", f"{_ncl(_p12, 1)} % del total")
+        _v36_tarjeta(_k1, "Energía Total", f"{_ncl(_et, 0)} kWh")
+        _v36_tarjeta(_k2, "Tracción", f"{_ncl(_etr, 0)} kWh", f"{_ncl(_ptr, 1)} % del total")
+        _v36_tarjeta(_k3, "12 kV (auxiliares)", f"{_ncl(_e12, 0)} kWh", f"{_ncl(_p12, 1)} % del total")
         _cc1, _cc2 = st.columns([1, 2])
         with _cc1:
             _fcomp = px.pie(names=['Tracción', '12 kV'], values=[_etr, _e12], hole=0.55,
@@ -6661,7 +6802,7 @@ if _seccion == _SECCIONES[2]:
             for _i, _s in enumerate(_srcs):
                 _tot = float(_cmp[_s].sum()); _dias = int((_cmp[_s] > 0).sum())
                 _prom = (_tot / _dias) if _dias > 0 else 0.0
-                _kc[_i].metric(_s, f"{_ncl(_tot, 0)} kWh", f"{_dias} días · prom {_ncl(_prom, 0)} kWh/día", delta_color="off")
+                _v36_tarjeta(_kc[_i], _s, f"{_ncl(_tot, 0)} kWh", f"{_dias} días · prom {_ncl(_prom, 0)} kWh/día", delta_color="off")
             _g1, _g2 = st.columns([1, 2])
             with _g1:
                 _tot_df = pd.DataFrame({'Fuente': _srcs, 'kWh': [float(_cmp[_s].sum()) for _s in _srcs]})
@@ -6726,7 +6867,7 @@ if _seccion == _SECCIONES[3]:
             st.markdown("#### Mediana del consumo nocturno total por día")
             _cm = st.columns(max(1, len(_orden_td)))
             for _i, _t in enumerate(_orden_td):
-                _cm[_i].metric(_t, f"{_ncl(_med_tot.get(_t, 0), 0)} kWh")
+                _v36_tarjeta(_cm[_i], _t, f"{_ncl(_med_tot.get(_t, 0), 0)} kWh")
             st.caption("Mediana del total acumulado en la ventana nocturna de cada día (kWh/noche).")
 
             st.divider()
@@ -6746,9 +6887,9 @@ if _seccion == _SECCIONES[3]:
                 _CJ = {'Laboral': '#005195', 'Sábado': '#E85500', 'Domingo/Festivo': '#2CA02C'}
                 _jor_pres = [_j for _j in _JOR if _j in set(_med_j25['Jornada'])]
                 _b1, _b2, _b3 = st.columns(3)
-                _b1.metric("Ventana", "00:00 – 05:00", "5 franjas · todas las jornadas", delta_color="off")
-                _b2.metric(f"Base nocturna ({_suf})", f"{_ncl(_base_global, 0)} kWh/h")
-                _b3.metric("Días en la base", _ncl(int(_hd25['Fecha'].nunique()), 0), f"{len(_hd25)} franjas medidas", delta_color="off")
+                _v36_tarjeta(_b1, "Ventana", "00:00 – 05:00", "5 franjas · todas las jornadas", delta_color="off")
+                _v36_tarjeta(_b2, f"Base nocturna ({_suf})", f"{_ncl(_base_global, 0)} kWh/h")
+                _v36_tarjeta(_b3, "Días en la base", _ncl(int(_hd25['Fecha'].nunique()), 0), f"{len(_hd25)} franjas medidas", delta_color="off")
                 if _hay_2025:
                     st.success(f"**Línea base nocturna (2025): {_ncl(_base_global, 0)} kWh/hora** — mediana de las franjas 00–01, 01–02, 02–03, 03–04 y 04–05 de todos los días del año base.")
                 else:
@@ -6902,11 +7043,11 @@ if _seccion == _SECCIONES[3]:
         _n_noches = int(_oit['Fecha'].nunique())
         _n_ot = len(_oit)
         _o1, _o2, _o3, _o4 = st.columns(4)
-        _o1.metric("Órdenes SFE de madrugada", _ncl(_n_ot, 0))
-        _o2.metric("Noches con SFE", _ncl(_n_noches, 0))
-        _o3.metric("Ventana", "00:00 – 07:00", "por fecha de cierre", delta_color="off")
+        _v36_tarjeta(_o1, "Órdenes SFE de madrugada", _ncl(_n_ot, 0))
+        _v36_tarjeta(_o2, "Noches con SFE", _ncl(_n_noches, 0))
+        _v36_tarjeta(_o3, "Ventana", "00:00 – 07:00", "por fecha de cierre", delta_color="off")
         _uni_sfe = sorted(_oit.loc[_oit['N_SFE'].notna(), 'N_SFE'].astype(int).unique().tolist())
-        _o4.metric("Unidades SFE", _ncl(len(_uni_sfe), 0), ", ".join(str(_u) for _u in _uni_sfe) if _uni_sfe else "sin número", delta_color="off")
+        _v36_tarjeta(_o4, "Unidades SFE", _ncl(len(_uni_sfe), 0), ", ".join(str(_u) for _u in _uni_sfe) if _uni_sfe else "sin número", delta_color="off")
 
         # Desglose por área (registro de a qué área pertenece cada orden)
         _por_area = _oit.groupby('Área', as_index=False).agg(**{'Órdenes': ('Área', 'size'), 'Noches': ('Fecha', 'nunique')}).sort_values('Órdenes', ascending=False)
@@ -6955,9 +7096,9 @@ if _seccion == _SECCIONES[3]:
                     _dif = _md_con - _md_sin
                     st.markdown("**¿Las noches con SFE circulando consumen más?**")
                     _x1, _x2, _x3 = st.columns(3)
-                    _x1.metric("Mediana noches CON SFE", f"{_ncl(_md_con, 0)} kWh", f"{len(_con)} noches", delta_color="off")
-                    _x2.metric("Mediana noches SIN SFE", f"{_ncl(_md_sin, 0)} kWh", f"{len(_sin)} noches", delta_color="off")
-                    _x3.metric("Diferencia", f"{_ncl(_dif, 0)} kWh",
+                    _v36_tarjeta(_x1, "Mediana noches CON SFE", f"{_ncl(_md_con, 0)} kWh", f"{len(_con)} noches", delta_color="off")
+                    _v36_tarjeta(_x2, "Mediana noches SIN SFE", f"{_ncl(_md_sin, 0)} kWh", f"{len(_sin)} noches", delta_color="off")
+                    _v36_tarjeta(_x3, "Diferencia", f"{_ncl(_dif, 0)} kWh",
                                "más consumo con SFE" if _dif > 0 else "sin sobreconsumo aparente", delta_color="off")
                     _bx = _noche.copy()
                     _bx['Tipo de noche'] = np.where(_bx['Con SFE'], 'Con SFE', 'Sin SFE')
@@ -7039,9 +7180,9 @@ if _seccion == _SECCIONES[3]:
                 _tot_trac = float(pd.to_numeric(_tab_o['Tracción SFE'], errors='coerce').clip(lower=0).sum())
                 _n_con = int((pd.to_numeric(_tab_o['Consumo (00–05)'], errors='coerce').notna()).sum())
                 _tt1, _tt2, _tt3 = st.columns(3)
-                _tt1.metric(f"Mediana nocturna {_src_lb} (00–05)", f"{_ncl(_mediana_lb, 1)} kWh", "línea base", delta_color="off")
-                _tt2.metric("Tracción SFE total", f"{_ncl(_tot_trac, 0)} kWh", f"{_n_con} de {_n_noches_cons} noches con dato", delta_color="off")
-                _tt3.metric("Tracción SFE promedio/noche", f"{_ncl(_tot_trac / max(_n_con, 1), 0)} kWh", delta_color="off")
+                _v36_tarjeta(_tt1, f"Mediana nocturna {_src_lb} (00–05)", f"{_ncl(_mediana_lb, 1)} kWh", "línea base", delta_color="off")
+                _v36_tarjeta(_tt2, "Tracción SFE total", f"{_ncl(_tot_trac, 0)} kWh", f"{_n_con} de {_n_noches_cons} noches con dato", delta_color="off")
+                _v36_tarjeta(_tt3, "Tracción SFE promedio/noche", f"{_ncl(_tot_trac / max(_n_con, 1), 0)} kWh", delta_color="off")
                 if _src_lb != "2025":
                     st.warning("No hay PRMTE de **2025** cargado: la línea base usa la mediana del período cargado. Sube el PRMTE de 2025 para anclar la tracción SFE a tu año base.")
                 if _n_con < _n_noches_cons:
@@ -7081,9 +7222,9 @@ if _seccion == _SECCIONES[4]:
         _det = detalle_servicios(df_thdr_v1, df_thdr_v2)
         _tv = tiempos_servicios(df_thdr_v1, df_thdr_v2)
         _k1, _k2, _k3 = st.columns(3)
-        _k1.metric("Servicios totales", f"{_ncl(len(_det), 0)}")
-        _k2.metric("Dobles", f"{_ncl(int((_det['Composicion'] == 'Doble').sum()), 0)}" if not _det.empty else "0")
-        _k3.metric("Simples", f"{_ncl(int((_det['Composicion'] == 'Simple').sum()), 0)}" if not _det.empty else "0")
+        _v36_tarjeta(_k1, "Servicios totales", f"{_ncl(len(_det), 0)}")
+        _v36_tarjeta(_k2, "Dobles", f"{_ncl(int((_det['Composicion'] == 'Doble').sum()), 0)}" if not _det.empty else "0")
+        _v36_tarjeta(_k3, "Simples", f"{_ncl(int((_det['Composicion'] == 'Simple').sum()), 0)}" if not _det.empty else "0")
         if _tv.empty:
             st.info("No se pudieron calcular tiempos de viaje (faltan horas de salida/llegada en la THDR).")
         else:
@@ -7141,9 +7282,9 @@ if _seccion == _SECCIONES[4]:
                         _por_hora = _dfc.groupby('hora_h').size().sort_values(ascending=False)
                         st.markdown("##### 📊 Resumen de cruzamientos del día")
                         _rm1, _rm2, _rm3 = st.columns(3)
-                        _rm1.metric("Total de cruzamientos", _ncl(len(_dfc), 0))
-                        _rm2.metric("Tramo con más cruces", _por_tramo.index[0], f"{_ncl(int(_por_tramo.iloc[0]), 0)} cruces")
-                        _rm3.metric("Hora con más cruces", f"{int(_por_hora.index[0]):02d}:00 h", f"{_ncl(int(_por_hora.iloc[0]), 0)} cruces")
+                        _v36_tarjeta(_rm1, "Total de cruzamientos", _ncl(len(_dfc), 0))
+                        _v36_tarjeta(_rm2, "Tramo con más cruces", _por_tramo.index[0], f"{_ncl(int(_por_tramo.iloc[0]), 0)} cruces")
+                        _v36_tarjeta(_rm3, "Hora con más cruces", f"{int(_por_hora.index[0]):02d}:00 h", f"{_ncl(int(_por_hora.iloc[0]), 0)} cruces")
                         _bt = _por_tramo.reset_index(); _bt.columns = ['Tramo', 'Cruces']
                         _figb = px.bar(_bt, x='Cruces', y='Tramo', orientation='h', text='Cruces', color_discrete_sequence=['#15803d'])
                         _figb.update_layout(height=max(280, 24 * len(_bt)), margin=dict(t=10, b=0, l=0, r=0), yaxis=dict(autorange='reversed', title=''))
@@ -7182,10 +7323,10 @@ if _seccion == _SECCIONES[4]:
         _hh['Promedio diario'] = _hh[_cval] / max(_ndias_h, 1)
         _pico = _hh.loc[_hh['Promedio diario'].idxmax()]
         _k1h, _k2h, _k3h, _k4h = st.columns(4)
-        _k1h.metric("Total del período", f"{_ncl(_tot_h, 0)} km")
-        _k2h.metric("Promedio por día", f"{_ncl(_tot_h / max(_ndias_h, 1), 0)} km", f"{_ndias_h} días", delta_color="off")
-        _k3h.metric("Hora punta", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 0)} km/día", delta_color="off")
-        _k4h.metric("Descuento por cortes/acoples", f"{_ncl(_desc_h, 0)} km",
+        _v36_tarjeta(_k1h, "Total del período", f"{_ncl(_tot_h, 0)} km")
+        _v36_tarjeta(_k2h, "Promedio por día", f"{_ncl(_tot_h / max(_ndias_h, 1), 0)} km", f"{_ndias_h} días", delta_color="off")
+        _v36_tarjeta(_k3h, "Hora punta", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 0)} km/día", delta_color="off")
+        _v36_tarjeta(_k4h, "Descuento por cortes/acoples", f"{_ncl(_desc_h, 0)} km",
                     "Tren-Km bruto − neto" if _desc_h > 0 else "sin eventos en ruta", delta_color="off")
         _fkh = px.bar(_hh, x='Hora', y='Promedio diario', color_discrete_sequence=['#005195'])
         _fkh.update_traces(hovertemplate='%{x}:00 — %{y:,.1f} km<extra></extra>')
@@ -7266,9 +7407,9 @@ if _seccion == _SECCIONES[5]:
             _prom_vj = (_tot_vj / _dias_vj) if _dias_vj > 0 else 0.0
             st.markdown("#### 🎫 Viajes por Contrato (total del período)")
             _vk1, _vk2, _vk3 = st.columns(3)
-            _vk1.metric("Total de viajes", f"{_ncl(_tot_vj, 0)}")
-            _vk2.metric("Días con dato", f"{_dias_vj}")
-            _vk3.metric("Promedio diario", f"{_ncl(_prom_vj, 0)} viajes/día")
+            _v36_tarjeta(_vk1, "Total de viajes", f"{_ncl(_tot_vj, 0)}")
+            _v36_tarjeta(_vk2, "Días con dato", f"{_dias_vj}")
+            _v36_tarjeta(_vk3, "Promedio diario", f"{_ncl(_prom_vj, 0)} viajes/día")
             _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
             _fvj = px.bar(_vd, x='Fecha', y='Total Viajes', color_discrete_sequence=['#0a7c6e'])
             _fvj.update_traces(hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
@@ -7366,11 +7507,11 @@ if _seccion == _SECCIONES[5]:
                     _nd = _v['Fecha'].nunique()
                     _E_v, _P_v = float(_v['kWh'].sum()), float(_v['Pasajeros'].sum())
                     _kp = st.columns(4)
-                    _kp[0].metric("Viajes", _ncl(len(_v), 0), help=f"{_ncl(_nd, 0)} días de tipo {_jp.lower()} con Carga de pasajeros.")
-                    _kp[1].metric("Pasajeros/viaje", _ncl(_v['Pasajeros'].mean(), 0), help="Pasajeros transportados en cada viaje (Total a bordo del export de Carga).")
-                    _kp[2].metric("Ocupación", f"{_ncl(_v['Ocupación'].mean(), 0)} %",
+                    _v36_tarjeta(_kp[0], "Viajes", _ncl(len(_v), 0), help=f"{_ncl(_nd, 0)} días de tipo {_jp.lower()} con Carga de pasajeros.")
+                    _v36_tarjeta(_kp[1], "Pasajeros/viaje", _ncl(_v['Pasajeros'].mean(), 0), help="Pasajeros transportados en cada viaje (Total a bordo del export de Carga).")
+                    _v36_tarjeta(_kp[2], "Ocupación", f"{_ncl(_v['Ocupación'].mean(), 0)} %",
                                   help="Promedio de los viajes: pasajeros en el tramo más cargado dividido por la capacidad del tren (un doble = 2 unidades).")
-                    _kp[3].metric("kWh/pasajero", _ncl(_E_v / _P_v, 2) if _P_v > 0 else "—",
+                    _v36_tarjeta(_kp[3], "kWh/pasajero", _ncl(_E_v / _P_v, 2) if _P_v > 0 else "—",
                                   help="Energía estimada de los viajes dividida por los pasajeros transportados.")
 
                     # --- Resumen por servicio ---
@@ -7448,13 +7589,13 @@ if _seccion == _SECCIONES[5]:
                     else:
                         _op = pd.DataFrame(columns=['kWh2'])
                     _ko = st.columns(3)
-                    _ko[0].metric("Dobles que cabían", f"{_ncl(len(_cabe), 0)} de {_ncl(len(_dob), 0)}",
+                    _v36_tarjeta(_ko[0], "Dobles que cabían", f"{_ncl(len(_cabe), 0)} de {_ncl(len(_dob), 0)}",
                                   help=f"Viajes en doble cuya carga máxima no pasó del {_umb} % de la capacidad de una unidad (de todos los viajes en doble).")
-                    _ko[1].metric("Ahorro máximo al año", f"{_ncl(_cabe['kWh'].sum() / 2 / 1000 * _fac, 0)} MWh",
+                    _v36_tarjeta(_ko[1], "Ahorro máximo al año", f"{_ncl(_cabe['kWh'].sum() / 2 / 1000 * _fac, 0)} MWh",
                                   help=("Si todos esos viajes hubieran ido en simple: la energía de su segunda unidad (la mitad de la del viaje), "
                                         f"llevada a los {_dias_anio} días de tipo {_jp.lower()} de {_anio_ps} ({_nd} analizados). Es un techo: "
                                         "supone saber de antemano qué días un servicio va a ir con poca gente."))
-                    _ko[2].metric("Ahorro realista al año", f"{_ncl(_op['kWh2'].sum() / 1000 * _fac, 0)} MWh",
+                    _v36_tarjeta(_ko[2], "Ahorro realista al año", f"{_ncl(_op['kWh2'].sum() / 1000 * _fac, 0)} MWh",
                                   help="Servicios que casi siempre caben en una unidad (90 % de sus viajes en doble): se pueden programar en simple.")
                     if _op.empty:
                         st.caption("Ningún servicio en doble cabe normalmente en una unidad con el criterio actual.")
@@ -7563,11 +7704,11 @@ if _seccion == _SECCIONES[6]:
             _n_s2d = _cmp['Qué cambió'].str.contains('de simple a doble').sum()
             _n_d2s = _cmp['Qué cambió'].str.contains('de doble a simple').sum()
             _k1, _k2, _k3, _k4 = st.columns(4)
-            _k1.metric("Tramos-día con cambios", f"{_ncl(_n_cambios, 0)}", f"de {len(_cmp)} evaluados", delta_color="off")
-            _k2.metric("Δ Servicios (Real − Prog)", f"{_ncl(int(_cmp['Δ Servicios'].sum()), 0)}",
+            _v36_tarjeta(_k1, "Tramos-día con cambios", f"{_ncl(_n_cambios, 0)}", f"de {len(_cmp)} evaluados", delta_color="off")
+            _v36_tarjeta(_k2, "Δ Servicios (Real − Prog)", f"{_ncl(int(_cmp['Δ Servicios'].sum()), 0)}",
                        "más realizados" if _cmp['Δ Servicios'].sum() >= 0 else "menos realizados", delta_color="off")
-            _k3.metric("Simple → Doble", f"{_ncl(int(_n_s2d), 0)}", "tramos-día", delta_color="off")
-            _k4.metric("Doble → Simple", f"{_ncl(int(_n_d2s), 0)}", "tramos-día", delta_color="off")
+            _v36_tarjeta(_k3, "Simple → Doble", f"{_ncl(int(_n_s2d), 0)}", "tramos-día", delta_color="off")
+            _v36_tarjeta(_k4, "Doble → Simple", f"{_ncl(int(_n_d2s), 0)}", "tramos-día", delta_color="off")
 
             _solo_cambios = st.checkbox("Mostrar solo los tramos-día con cambios", value=True)
             _vista = _cmp[_cmp['Qué cambió'] != 'sin cambios'] if _solo_cambios else _cmp
@@ -7631,10 +7772,10 @@ if _seccion == _SECCIONES[6]:
             _fac = pd.DataFrame(_factores).sort_values(['Fecha', 'Factor']).reset_index(drop=True)
             _n_dias_fac = int(_fac['Fecha'].nunique())
             _f1, _f2, _f3 = st.columns(3)
-            _f1.metric("Factores de afectación", _ncl(len(_fac), 0))
-            _f2.metric("Días afectados", _ncl(_n_dias_fac, 0))
+            _v36_tarjeta(_f1, "Factores de afectación", _ncl(len(_fac), 0))
+            _v36_tarjeta(_f2, "Días afectados", _ncl(_n_dias_fac, 0))
             _imp_tot = pd.to_numeric(_fac['Impacto (min)'], errors='coerce').fillna(0).sum()
-            _f3.metric("Tiempo de impacto total", f"{_ncl(float(_imp_tot), 0)} min", "incidentes con dato", delta_color="off")
+            _v36_tarjeta(_f3, "Tiempo de impacto total", f"{_ncl(float(_imp_tot), 0)} min", "incidentes con dato", delta_color="off")
             # Resumen por día
             _resumen_dia = _fac.groupby(['Fecha', 'Factor']).size().unstack(fill_value=0)
             _resumen_dia['Total'] = _resumen_dia.sum(axis=1)
@@ -7668,9 +7809,9 @@ if _seccion == _SECCIONES[6]:
         _n_simp = int((_det_sv['Composicion'] == 'Simple').sum())
         _n_dob = int((_det_sv['Composicion'] == 'Doble').sum())
         _ma, _mb, _mc = st.columns(3)
-        _ma.metric("Total de servicios", _ncl(_tot_sv, 0))
-        _mb.metric("Simples", _ncl(_n_simp, 0), f"{_ncl(_n_simp / _tot_sv * 100 if _tot_sv else 0, 1)} %")
-        _mc.metric("Dobles", _ncl(_n_dob, 0), f"{_ncl(_n_dob / _tot_sv * 100 if _tot_sv else 0, 1)} %")
+        _v36_tarjeta(_ma, "Total de servicios", _ncl(_tot_sv, 0))
+        _v36_tarjeta(_mb, "Simples", _ncl(_n_simp, 0), f"{_ncl(_n_simp / _tot_sv * 100 if _tot_sv else 0, 1)} %")
+        _v36_tarjeta(_mc, "Dobles", _ncl(_n_dob, 0), f"{_ncl(_n_dob / _tot_sv * 100 if _tot_sv else 0, 1)} %")
         _viz_opts = ["🍩 Torta", "📊 Barra", "🪪 Tarjetas"]
         try:
             if hasattr(st, "segmented_control"):
@@ -7715,8 +7856,8 @@ if _seccion == _SECCIONES[6]:
                     _cl[_i % len(_cl)].markdown(
                         f'<div style="border:1px solid #e5e7eb;border-radius:12px;padding:12px 14px;background:#fff;margin-bottom:8px">'
                         f'<div style="font-size:.78rem;color:#6b7280;font-weight:600">{_r[_col]}</div>'
-                        f'<div style="font-size:1.6rem;font-weight:800;color:{_clr}">{_ncl(_r["Cantidad"], 0)}</div>'
-                        f'<div style="font-size:.85rem;color:#374151">{_ncl(_r["pct"], 1)} % del total</div></div>',
+                        f'<div style="font-size:clamp(.96rem,1.8vw,1.6rem);font-weight:800;line-height:1.2;overflow-wrap:anywhere;max-width:100%;color:{_clr}">{_ncl(_r["Cantidad"], 2)}</div>'
+                        f'<div style="font-size:.85rem;color:#374151">{_ncl(_r["pct"], 2)} % del total</div></div>',
                         unsafe_allow_html=True)
         _CM_TREN = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}
         _render_dist('Composicion', 'Cantidad de trenes (simple / doble)', {'Simple': '#005195', 'Doble': '#E85500'})
@@ -7728,7 +7869,7 @@ if _seccion == _SECCIONES[6]:
             _g = _det_sv.groupby(['Composicion', _dim]).size().reset_index(name='Cantidad')
             _tc = _g.groupby('Composicion')['Cantidad'].transform('sum')
             _g['pct'] = (_g['Cantidad'] / _tc * 100).round(1)
-            _g['pct_str'] = _g['pct'].map(lambda _v: _ncl(_v, 1))
+            _g['pct_str'] = _g['pct'].map(lambda _v: _ncl(_v, 2))
             st.markdown(f"**{_titulo}**")
             if "Barra" in _viz:
                 _f = px.bar(_g, x='Composicion', y='Cantidad', color=_dim, barmode='stack',
@@ -7755,7 +7896,7 @@ if _seccion == _SECCIONES[6]:
                         _cl[_i % len(_cl)].markdown(
                             f'<div style="border:1px solid #e5e7eb;border-radius:12px;padding:10px 12px;background:#fff;margin-bottom:8px">'
                             f'<div style="font-size:.74rem;color:#6b7280;font-weight:600">{_r[_dim]}</div>'
-                            f'<div style="font-size:1.4rem;font-weight:800;color:{_clr}">{_ncl(_r["Cantidad"], 0)}</div>'
+                            f'<div style="font-size:clamp(.94rem,1.7vw,1.4rem);font-weight:800;line-height:1.2;overflow-wrap:anywhere;max-width:100%;color:{_clr}">{_ncl(_r["Cantidad"], 2)}</div>'
                             f'<div style="font-size:.8rem;color:#374151">{_r["pct_str"]} % de los {_comp.lower()}s</div></div>',
                             unsafe_allow_html=True)
         _cM = {'XT-100': '#005195', 'XT-M': '#0a7c6e', 'SFE': '#E85500', 'Sin asignar': '#9aa0a6'}
@@ -7877,13 +8018,13 @@ if _seccion == _SECCIONES[7]:
                 _desv_pct = (_desv_g / _ide_lb_g * 100) if _ide_lb_g else 0.0
                 _exc = float(_ci['Exceso kWh'].sum())
                 _m1, _m2, _m3, _m4, _m5, _m6 = st.columns(6)
-                _m1.metric("IDE real (período)", f"{_ncl(_ide_real_g, 3)} kWh/km")
-                _m2.metric("IDE Línea Base (período)", f"{_ncl(_ide_lb_g, 3)} kWh/km")
-                _m3.metric("Desvío vs línea base", f"{_ncl(_desv_g, 3)} kWh/km", f"{_ncl(_desv_pct, 1)} %", delta_color="inverse")
-                _m4.metric("Energía vs línea base", f"{_ncl(_exc, 0)} kWh", "sobreconsumo" if _exc >= 0 else "ahorro", delta_color="off")
+                _v36_tarjeta(_m1, "IDE real (período)", f"{_ncl(_ide_real_g, 3)} kWh/km")
+                _v36_tarjeta(_m2, "IDE Línea Base (período)", f"{_ncl(_ide_lb_g, 3)} kWh/km")
+                _v36_tarjeta(_m3, "Desvío vs línea base", f"{_ncl(_desv_g, 3)} kWh/km", f"{_ncl(_desv_pct, 1)} %", delta_color="inverse")
+                _v36_tarjeta(_m4, "Energía vs línea base", f"{_ncl(_exc, 0)} kWh", "sobreconsumo" if _exc >= 0 else "ahorro", delta_color="off")
                 _e_real_lb = float(_ci['E_real'].sum()); _e_lb_tot = float(_ci['E_LB'].sum())
-                _m5.metric("Consumo real (tracción)", f"{_ncl(_e_real_lb, 0)} kWh")
-                _m6.metric("Consumo esperado (línea base)", f"{_ncl(_e_lb_tot, 0)} kWh",
+                _v36_tarjeta(_m5, "Consumo real (tracción)", f"{_ncl(_e_real_lb, 0)} kWh")
+                _v36_tarjeta(_m6, "Consumo esperado (línea base)", f"{_ncl(_e_lb_tot, 0)} kWh",
                            f"{_ncl(-_exc, 0)} kWh de ahorro" if _exc < 0 else f"{_ncl(_exc, 0)} kWh de más", delta_color="off")
                 if float(_ci['Odom_SFE'].sum()) <= 0:
                     st.caption("⚠️ No se encontró kilometraje de trenes SFE en el UMR del período: la línea base se calculó tratando todo el odómetro como trenes 100 y M.")
@@ -7920,10 +8061,10 @@ if _seccion == _SECCIONES[7]:
             _b['Ahorro CA'] = _b['Δ CA'] * _ide
             _caR = float(_b['Ahorro CA'].sum()); _cakm = float(_b['Δ CA'].sum())
             _c1, _c2, _c3, _c4 = st.columns(4)
-            _c1.metric("Ahorro por Corte y Acople", f"{_ncl(_caR, 0)} kWh", f"{_ncl(_cakm, 0)} km")
-            _c2.metric("Km (Kms.xTrenes − KmTren R)", f"{_ncl(_cakm, 0)} km")
-            _c3.metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
-            _c4.metric("Consumo sin este ahorro", f"{_ncl(_e_tr_per + _caR, 0)} kWh",
+            _v36_tarjeta(_c1, "Ahorro por Corte y Acople", f"{_ncl(_caR, 0)} kWh", f"{_ncl(_cakm, 0)} km")
+            _v36_tarjeta(_c2, "Km (Kms.xTrenes − KmTren R)", f"{_ncl(_cakm, 0)} km")
+            _v36_tarjeta(_c3, "Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+            _v36_tarjeta(_c4, "Consumo sin este ahorro", f"{_ncl(_e_tr_per + _caR, 0)} kWh",
                        f"{_ncl(_caR, 0)} kWh evitados" if _caR >= 0 else f"{_ncl(-_caR, 0)} kWh de más", delta_color="off")
             _fca = _bar_signo(_b, 'Fecha', 'Ahorro CA')
             _pc(_no_huecos(_fca), use_container_width=True, config={'locale': 'es'})
@@ -7943,11 +8084,11 @@ if _seccion == _SECCIONES[7]:
             _b['Ahorro Vacío'] = (_b['Vacío meta km'] - _b['Vacío real km']) * _ide
             _vr = float(_b['E Vacío real'].sum()); _vm = float(_b['E Vacío meta'].sum()); _av = float(_b['Ahorro Vacío'].sum())
             _v1, _v2, _v3, _v4, _v5 = st.columns(5)
-            _v1.metric("Energía vacío real", f"{_ncl(_vr, 0)} kWh", f"{_ncl(float(_b['Vacío real km'].sum()), 0)} km vacío")
-            _v2.metric("Energía vacío meta", f"{_ncl(_vm, 0)} kWh", f"{_ncl(float(_b['Vacío meta km'].sum()), 0)} km permitido")
-            _v3.metric("Ahorro vacío (meta − real)", f"{_ncl(_av, 0)} kWh")
-            _v4.metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
-            _v5.metric("Consumo sin este ahorro", f"{_ncl(_e_tr_per + _av, 0)} kWh",
+            _v36_tarjeta(_v1, "Energía vacío real", f"{_ncl(_vr, 0)} kWh", f"{_ncl(float(_b['Vacío real km'].sum()), 0)} km vacío")
+            _v36_tarjeta(_v2, "Energía vacío meta", f"{_ncl(_vm, 0)} kWh", f"{_ncl(float(_b['Vacío meta km'].sum()), 0)} km permitido")
+            _v36_tarjeta(_v3, "Ahorro vacío (meta − real)", f"{_ncl(_av, 0)} kWh")
+            _v36_tarjeta(_v4, "Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+            _v36_tarjeta(_v5, "Consumo sin este ahorro", f"{_ncl(_e_tr_per + _av, 0)} kWh",
                        f"{_ncl(_av, 0)} kWh evitados" if _av >= 0 else f"{_ncl(-_av, 0)} kWh de más", delta_color="off")
             _fv = _bar_signo(_b, 'Fecha', 'Ahorro Vacío')
             _fv.update_layout(title="Ahorro (+) / sobreconsumo (−) diario en vacío", title_font_size=14, margin=dict(t=40, b=0, l=0, r=0))
@@ -7970,10 +8111,10 @@ if _seccion == _SECCIONES[7]:
         st.markdown("#### 📊 Ahorro UMR (vs meta)")
         _u1, _u2, _u3, _u4 = st.columns(4)
         _uR = float(_b['Ahorro UMR'].sum()); _ukm = float(_b['Δ UMR'].sum())
-        _u1.metric("Ahorro UMR", f"{_ncl(_uR, 0)} kWh", f"{_ncl(_ukm, 0)} km vs meta")
-        _u2.metric("Meta UMR", f"{_ncl(_meta * 100, 1)} %")
-        _u3.metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
-        _u4.metric("Consumo sin este ahorro", f"{_ncl(_e_tr_per + _uR, 0)} kWh",
+        _v36_tarjeta(_u1, "Ahorro UMR", f"{_ncl(_uR, 0)} kWh", f"{_ncl(_ukm, 0)} km vs meta")
+        _v36_tarjeta(_u2, "Meta UMR", f"{_ncl(_meta * 100, 1)} %")
+        _v36_tarjeta(_u3, "Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+        _v36_tarjeta(_u4, "Consumo sin este ahorro", f"{_ncl(_e_tr_per + _uR, 0)} kWh",
                    f"{_ncl(_uR, 0)} kWh evitados" if _uR >= 0 else f"{_ncl(-_uR, 0)} kWh de más", delta_color="off")
         _fu = _bar_signo(_b, 'Fecha', 'Ahorro UMR')
         _pc(_no_huecos(_fu), use_container_width=True, config={'locale': 'es'})
@@ -8020,13 +8161,13 @@ if _seccion == _SECCIONES[7]:
                 _e_tr_per = float(_b['E_Tr'].sum()) if 'E_Tr' in _b.columns else 0.0
                 _pct_tr = (_gran_total / _e_tr_per * 100) if _e_tr_per > 0 else None
                 _kc = st.columns(len(_sel_ah) + 3)
-                _kc[0].metric("💰 Ahorro total", f"{_ncl(_gran_total, 0)} kWh",
+                _v36_tarjeta(_kc[0], "💰 Ahorro total", f"{_ncl(_gran_total, 0)} kWh",
                               (f"{_ncl(_pct_tr, 1)} % de la tracción" if _pct_tr is not None else None),
                               delta_color="off")
                 for _i, _k in enumerate(_sel_ah):
-                    _kc[_i + 1].metric(_k, f"{_ncl(_tot_ah[_k], 0)} kWh")
-                _kc[-2].metric("Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
-                _kc[-1].metric("Consumo sin los ahorros", f"{_ncl(_e_tr_per + _gran_total, 0)} kWh",
+                    _v36_tarjeta(_kc[_i + 1], _k, f"{_ncl(_tot_ah[_k], 0)} kWh")
+                _v36_tarjeta(_kc[-2], "Consumo real (tracción)", f"{_ncl(_e_tr_per, 0)} kWh")
+                _v36_tarjeta(_kc[-1], "Consumo sin los ahorros", f"{_ncl(_e_tr_per + _gran_total, 0)} kWh",
                                f"{_ncl(_gran_total, 0)} kWh evitados" if _gran_total >= 0 else f"{_ncl(-_gran_total, 0)} kWh de más",
                                delta_color="off")
                 _g1a, _g2a = st.columns(2)
@@ -8476,10 +8617,10 @@ if _seccion == _SECCIONES[9]:
         _lbl = "Tracción" if (_es_seat and _modo == "Tracción") else ("Total" if _es_seat else "Principal Limache")
 
         _k1, _k2, _k3, _k4 = st.columns(4)
-        _k1.metric(f"{_lbl} período ({_ndias} días)", f"{_ncl(_g_tot, 2)} kWh")
-        _k2.metric(f"Real ({_nr} días)", f"{_ncl(_r_show, 2)} kWh")
-        _k3.metric(f"Proyectado ({_npy} días)", f"{_ncl(_p_show, 2)} kWh")
-        _k4.metric("Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 2)} kWh")
+        _v36_tarjeta(_k1, f"{_lbl} período ({_ndias} días)", f"{_ncl(_g_tot, 2)} kWh")
+        _v36_tarjeta(_k2, f"Real ({_nr} días)", f"{_ncl(_r_show, 2)} kWh")
+        _v36_tarjeta(_k3, f"Proyectado ({_npy} días)", f"{_ncl(_p_show, 2)} kWh")
+        _v36_tarjeta(_k4, "Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 2)} kWh")
 
         st.markdown("**Real + proyectado del período**")
         _rows = []
@@ -8586,11 +8727,11 @@ if _seccion == _SECCIONES[10]:
             _n_neg = len(_neg)
             _n_tot = len(_ci)
             _c1, _c2, _c3 = st.columns(3)
-            _c1.metric("Días con sobreconsumo IDE", f"{_ncl(_n_neg, 0)}", f"de {_n_tot} días con línea base", delta_color="off")
-            _c2.metric("Sobreconsumo total", f"{_ncl(float(_neg['Exceso kWh'].sum()), 0)} kWh" if _n_neg else "0 kWh",
+            _v36_tarjeta(_c1, "Días con sobreconsumo IDE", f"{_ncl(_n_neg, 0)}", f"de {_n_tot} días con línea base", delta_color="off")
+            _v36_tarjeta(_c2, "Sobreconsumo total", f"{_ncl(float(_neg['Exceso kWh'].sum()), 0)} kWh" if _n_neg else "0 kWh",
                        "energía sobre la línea base", delta_color="off")
             _peor_pct = float(_neg['Sobreconsumo %'].max()) if _n_neg else 0.0
-            _c3.metric("Peor día", f"+{_ncl(_peor_pct, 1)} %" if _n_neg else "—",
+            _v36_tarjeta(_c3, "Peor día", f"+{_ncl(_peor_pct, 1)} %" if _n_neg else "—",
                        (pd.to_datetime(_neg.iloc[0]['Fecha']).strftime('%d-%m-%Y') if _n_neg else ""), delta_color="off")
 
             if _n_neg == 0:
@@ -8614,10 +8755,10 @@ if _seccion == _SECCIONES[10]:
 
                 st.markdown(f"### Análisis del {_fsel.strftime('%d-%m-%Y')}")
                 _r1, _r2, _r3, _r4 = st.columns(4)
-                _r1.metric("IDE real", f"{_ncl(_row['IDE (kWh/km)'], 3)} kWh/km", "mayor → sobreconsumo", delta_color="off")
-                _r2.metric("IDE línea base", f"{_ncl(_row['IDE_LB'], 3)} kWh/km")
-                _r3.metric("Sobreconsumo IDE", f"+{_ncl(_row['Sobreconsumo %'], 1)} %", "el real supera la base", delta_color="off")
-                _r4.metric("Exceso de energía", f"{_ncl(_row['Exceso kWh'], 0)} kWh", "sobre la línea base", delta_color="off")
+                _v36_tarjeta(_r1, "IDE real", f"{_ncl(_row['IDE (kWh/km)'], 3)} kWh/km", "mayor → sobreconsumo", delta_color="off")
+                _v36_tarjeta(_r2, "IDE línea base", f"{_ncl(_row['IDE_LB'], 3)} kWh/km")
+                _v36_tarjeta(_r3, "Sobreconsumo IDE", f"+{_ncl(_row['Sobreconsumo %'], 1)} %", "el real supera la base", delta_color="off")
+                _v36_tarjeta(_r4, "Exceso de energía", f"{_ncl(_row['Exceso kWh'], 0)} kWh", "sobre la línea base", delta_color="off")
 
                 # --- Comparación de TODOS los datos del día vs la referencia ---
                 def _val_dia(_df, _col, _fecha, _agg='sum'):
@@ -8814,16 +8955,16 @@ if _seccion == _SECCIONES[11]:
             _lag = max(_lags, key=lambda _k: _lags[_k] if pd.notna(_lags[_k]) else -9)
 
             _m1 = st.columns(4)
-            _m1[0].metric("Energía PRMTE (kWh)", _ncl(_e_tot, 0))
-            _m1[1].metric("Pax-km por kWh", _ncl(_pk_tot / _e_tot, 2) if _e_tot > 0 else "—", help=f"Pasajeros-km del período ({_ncl(_pk_tot, 0)}) dividido por la energía PRMTE.")
-            _m1[2].metric("Correlación con pasajeros", _ncl(_r_p, 2), help="Correlación (r) entre la energía de cada bloque de 15 min y los pasajeros a bordo.")
-            _m1[3].metric("Correlación con unidades", _ncl(_r_u, 2), help="Correlación (r) entre la energía de cada bloque de 15 min y las unidades en circulación.")
+            _v36_tarjeta(_m1[0], "Energía PRMTE (kWh)", _ncl(_e_tot, 0))
+            _v36_tarjeta(_m1[1], "Pax-km por kWh", _ncl(_pk_tot / _e_tot, 2) if _e_tot > 0 else "—", help=f"Pasajeros-km del período ({_ncl(_pk_tot, 0)}) dividido por la energía PRMTE.")
+            _v36_tarjeta(_m1[2], "Correlación con pasajeros", _ncl(_r_p, 2), help="Correlación (r) entre la energía de cada bloque de 15 min y los pasajeros a bordo.")
+            _v36_tarjeta(_m1[3], "Correlación con unidades", _ncl(_r_u, 2), help="Correlación (r) entre la energía de cada bloque de 15 min y las unidades en circulación.")
             st.markdown(f"**Modelo por bloque de 15 min** · kWh = base sin trenes + extra con servicio + kWh por unidad × unidades circulando · ajuste R² = {_ncl(_r2, 2)}")
             _m2 = st.columns(4)
-            _m2[0].metric("Base sin trenes", f"{_ncl(_base, 0)} kWh", help="kWh cada 15 min cuando no circula ningún tren con pasajeros (mediana de esos bloques).")
-            _m2[1].metric("Extra con servicio", f"{_ncl(_bs, 0)} kWh", help="kWh cada 15 min que se suman mientras hay servicio (estaciones abiertas, iluminación, equipos), aparte de los trenes.")
-            _m2[2].metric("Por unidad circulando", f"{_ncl(_bu, 1)} kWh", help="kWh cada 15 min por cada unidad en circulación. Un tren doble cuenta 2 unidades.")
-            _m2[3].metric("Por 100 pasajeros más", f"{_ncl(_c100, 2)} kWh" if pd.notna(_c100) else "—",
+            _v36_tarjeta(_m2[0], "Base sin trenes", f"{_ncl(_base, 0)} kWh", help="kWh cada 15 min cuando no circula ningún tren con pasajeros (mediana de esos bloques).")
+            _v36_tarjeta(_m2[1], "Extra con servicio", f"{_ncl(_bs, 0)} kWh", help="kWh cada 15 min que se suman mientras hay servicio (estaciones abiertas, iluminación, equipos), aparte de los trenes.")
+            _v36_tarjeta(_m2[2], "Por unidad circulando", f"{_ncl(_bu, 1)} kWh", help="kWh cada 15 min por cada unidad en circulación. Un tren doble cuenta 2 unidades.")
+            _v36_tarjeta(_m2[3], "Por 100 pasajeros más", f"{_ncl(_c100, 2)} kWh" if pd.notna(_c100) else "—",
                           help="kWh cada 15 min a igual hora y unidades: diferencia entre los bloques más cargados y los menos cargados, llevada a 100 pasajeros.")
             if pd.notna(_c100) and _c100 > 0 and _bu > 0:
                 _txt_pax = f"A igual hora y unidades, 100 pasajeros más suman {_ncl(_c100, 2)} kWh cada 15 min ({_ncl(_c100 / _bu * 100, 1)} % de lo que consume una unidad)"
@@ -8893,13 +9034,13 @@ if _seccion == _SECCIONES[11]:
             st.markdown(f"**Último período: {_ul['Período']}** · {_n_ul} {'día' if _n_ul == 1 else 'días'} con datos"
                         + (f" · variación contra {_ev.iloc[-2]['Período']}" if len(_ev) > 1 else ""))
             _mt = st.columns(4)
-            _mt[0].metric(f"{_sem(_ul['PKkWh'], _meta_pk, True)} Pax-km por kWh", _ncl(_ul['PKkWh'], 2), delta=_var_txt(_ul['vPK'], " %") or None,
+            _v36_tarjeta(_mt[0], f"{_sem(_ul['PKkWh'], _meta_pk, True)} Pax-km por kWh", _ncl(_ul['PKkWh'], 2), delta=_var_txt(_ul['vPK'], " %") or None,
                           help=f"Meta: {_ncl(_meta_pk, 1)} o más. Más alto = cada kWh mueve más pasajeros-km.")
-            _mt[1].metric(f"{_sem(_ul['KU'], _meta_ku, False)} kWh por unidad", f"{_ncl(_ul['KU'], 1)} kWh", delta=_var_txt(_ul['vKU'], " %") or None, delta_color="inverse",
+            _v36_tarjeta(_mt[1], f"{_sem(_ul['KU'], _meta_ku, False)} kWh por unidad", f"{_ncl(_ul['KU'], 1)} kWh", delta=_var_txt(_ul['vKU'], " %") or None, delta_color="inverse",
                           help=f"kWh cada 15 min por unidad en circulación. Meta: {_ncl(_meta_ku, 1)} o menos.")
-            _mt[2].metric(f"{_sem(_ul['DV'], _meta_dv, False, True)} Sobre lo esperado", f"{_ncl(_ul['DV'], 1)} %", delta=_var_txt(_ul['vDV'], " pp") or None, delta_color="inverse",
+            _v36_tarjeta(_mt[2], f"{_sem(_ul['DV'], _meta_dv, False, True)} Sobre lo esperado", f"{_ncl(_ul['DV'], 1)} %", delta=_var_txt(_ul['vDV'], " pp") or None, delta_color="inverse",
                           help=f"Energía real sobre la que espera el modelo con las unidades en circulación. Meta: {_ncl(_meta_dv, 1)} % o menos.")
-            _mt[3].metric("Energía (kWh)", _ncl(_ul['E'], 0), delta=_var_txt(_ul['vE'], " %") or None, delta_color="off")
+            _v36_tarjeta(_mt[3], "Energía (kWh)", _ncl(_ul['E'], 0), delta=_var_txt(_ul['vE'], " %") or None, delta_color="off")
             st.caption("🟢 cumple la meta · 🟡 no cumple por menos de la tolerancia · 🔴 no cumple. Las flechas comparan con el período anterior; en kWh por unidad y sobre lo esperado, bajar es bueno (verde). "
                        "Si el primer o último período tiene pocos días, compáralo con cuidado.")
 
@@ -9274,10 +9415,10 @@ if _seccion == _SECCIONES[12]:
                 st.markdown(f"**{_tit}** · kWh tracción/día = {_ncl(_bb[0], 0)} + {_ncl(_bb[1], 4)} × pax-km "
                             f"{'−' if _bb[2] < 0 else '+'} {_ncl(abs(_bb[2]), 0)} si es sábado {'−' if _bb[3] < 0 else '+'} {_ncl(abs(_bb[3]), 0)} si es domingo o festivo")
                 _mm = st.columns(4)
-                _mm[0].metric("kWh por 1.000 pax-km", _ncl(_bb[1] * 1000, 1), help="Cuánto sube la tracción del día por cada 1.000 pasajeros-km más.")
-                _mm[1].metric("Ajuste del modelo (R²)", _ncl(_m['r2'], 3))
-                _mm[2].metric("Error típico de un día", f"{_ncl(_m['cv'], 1)} %", help="CV(RMSE): error típico del modelo en un día, como % de la tracción diaria promedio.")
-                _mm[3].metric("Días usados", _ncl(_m['n'], 0),
+                _v36_tarjeta(_mm[0], "kWh por 1.000 pax-km", _ncl(_bb[1] * 1000, 1), help="Cuánto sube la tracción del día por cada 1.000 pasajeros-km más.")
+                _v36_tarjeta(_mm[1], "Ajuste del modelo (R²)", _ncl(_m['r2'], 3))
+                _v36_tarjeta(_mm[2], "Error típico de un día", f"{_ncl(_m['cv'], 1)} %", help="CV(RMSE): error típico del modelo en un día, como % de la tracción diaria promedio.")
+                _v36_tarjeta(_mm[3], "Días usados", _ncl(_m['n'], 0),
                               help=("Días atípicos que no se usaron (residuo mayor a 3 desviaciones): " + ", ".join(_f.strftime('%d-%m-%Y') for _f in _m['atipicos'][:15])
                                     + ("…" if len(_m['atipicos']) > 15 else "")) if _m['atipicos'] else "Se usaron todos los días con datos.")
                 _dd = _m['datos']; _anio_d = _a - 1
@@ -9321,19 +9462,19 @@ if _seccion == _SECCIONES[12]:
                 _ES = float(_c['Esp'].sum()); _ET = float(_c['E_Tr'].sum()); _PK = float(_c['PK'].sum())
                 _IND = _PK / _ET; _LBQ = _PK / _ES; _DP = (_IND / _LBQ - 1) * 100
                 _kk = st.columns(4)
-                _kk[0].metric(f"{_sem_lb(_DP)} Pax-km por kWh tracción", _ncl(_IND, 2), delta=f"{'+' if _DP > 0 else ''}{_ncl(_DP, 1)} % vs línea base",
+                _v36_tarjeta(_kk[0], f"{_sem_lb(_DP)} Pax-km por kWh tracción", _ncl(_IND, 2), delta=f"{'+' if _DP > 0 else ''}{_ncl(_DP, 1)} % vs línea base",
                               help=f"Meta: {_ncl(_meta_lb, 1)} % o más sobre la línea base. Más alto = cada kWh de tracción mueve más pasajeros-km.")
-                _kk[1].metric("Pax-km por kWh de la línea base", _ncl(_LBQ, 2), help="Pax-km del período ÷ tracción que esperaba la regresión para esos días.")
-                _kk[2].metric("kWh de tracción", _ncl(_ET, 0), delta=f"{'+' if _ET > _ES else ''}{_ncl(_ET - _ES, 0)} kWh vs línea base", delta_color="inverse",
+                _v36_tarjeta(_kk[1], "Pax-km por kWh de la línea base", _ncl(_LBQ, 2), help="Pax-km del período ÷ tracción que esperaba la regresión para esos días.")
+                _v36_tarjeta(_kk[2], "kWh de tracción", _ncl(_ET, 0), delta=f"{'+' if _ET > _ES else ''}{_ncl(_ET - _ES, 0)} kWh vs línea base", delta_color="inverse",
                               help="Diferencia contra la tracción que esperaba la regresión para los mismos pax-km y tipos de día. Negativo = ahorro.")
-                _kk[3].metric("Días evaluados", _ncl(len(_c), 0))
+                _v36_tarjeta(_kk[3], "Días evaluados", _ncl(len(_c), 0))
             else:
                 _PK = float(_ok['PK'].sum()); _ET = float(_ok['E_Tr'].sum())
                 _kk = st.columns(4)
-                _kk[0].metric("Pax-km por kWh tracción", _ncl(_PK / _ET, 2) if _ET else "—")
-                _kk[1].metric("Pasajeros-km", _ncl(_PK, 0))
-                _kk[2].metric("kWh de tracción", _ncl(_ET, 0))
-                _kk[3].metric("Días", _ncl(len(_ok), 0))
+                _v36_tarjeta(_kk[0], "Pax-km por kWh tracción", _ncl(_PK / _ET, 2) if _ET else "—")
+                _v36_tarjeta(_kk[1], "Pasajeros-km", _ncl(_PK, 0))
+                _v36_tarjeta(_kk[2], "kWh de tracción", _ncl(_ET, 0))
+                _v36_tarjeta(_kk[3], "Días", _ncl(len(_ok), 0))
             if not _excl_lb.empty:
                 _n_ex = len(_excl_lb)
                 st.caption(("Se dejó fuera 1 día" if _n_ex == 1 else f"Se dejaron fuera {_n_ex} días") + " con la tracción fuera de rango (menos de la mitad o más de 1,5 veces la esperada; posible falla de datos): "
@@ -10009,12 +10150,12 @@ if _seccion == _SECCIONES[13]:
                     _orden = _ci[_ci.abs() >= 5].reindex(_ci.abs().sort_values(ascending=False).index).dropna()
                     _top = _orden.index[0] if len(_orden) else None
                     _k = st.columns(4)
-                    _k[0].metric("Consumo (MWh)", _ncl(_E / 1000, 1), f"{'+' if _dif >= 0 else ''}{_ncl(_dif / _ref * 100, 1)} %",
+                    _v36_tarjeta(_k[0], "Consumo (MWh)", _ncl(_E / 1000, 1), f"{'+' if _dif >= 0 else ''}{_ncl(_dif / _ref * 100, 1)} %",
                                  delta_color='inverse', help=f"Consumo del día y su diferencia con un {_j1} típico.")
-                    _k[1].metric("Típico (MWh)", _ncl(_ref / 1000, 1), help=f"{_j1.capitalize()} típico: promedio de los {_jn} de {_RJ['ventana']} con datos completos.")
-                    _k[2].metric("Mayor causa", _rca_sg(_ci[_top] / 1000, 2) if _top else "—",
+                    _v36_tarjeta(_k[1], "Típico (MWh)", _ncl(_ref / 1000, 1), help=f"{_j1.capitalize()} típico: promedio de los {_jn} de {_RJ['ventana']} con datos completos.")
+                    _v36_tarjeta(_k[2], "Mayor causa", _rca_sg(_ci[_top] / 1000, 2) if _top else "—",
                                  help=(f"{_top}: {_rca_sg(_ci[_top] / 1000, 2)} MWh frente a un {_j1} típico." if _top else None))
-                    _k[3].metric("Sin explicar", _rca_sg(_rt / 1000, 2),
+                    _v36_tarjeta(_k[3], "Sin explicar", _rca_sg(_rt / 1000, 2),
                                  help=f"MWh que las variables no explican. Lo normal es que quede dentro de ±{_ncl(_lim / 1000, 1)} MWh.")
                     _min1 = lambda t: t[:1].lower() + t[1:]
                     _partes = [f"{_min1(g)} ({_rca_sg(c / 1000, 2)})" for g, c in _orden.head(3).items()]
@@ -10308,10 +10449,10 @@ if _seccion == _SECCIONES[13]:
                     _pct = (_P['E1'] / _P['E0'] - 1) * 100
                     _pct_r = (_PR['E1'] / _PR['E0'] - 1) * 100 if _PR is not None else None
                     _m1 = st.columns(4)
-                    _m1[0].metric(f"{_txt_b} (MWh/día)", _ncl(_P['E0'] / 1000, 1))
-                    _m1[1].metric(f"{_txt_a} (MWh/día)", _ncl(_P['E1'] / 1000, 1), f"{'+' if _pct >= 0 else ''}{_ncl(_pct, 1)} %", delta_color='inverse')
-                    _m1[2].metric("Mayor causa", _rca_sg(_pasos[_top] / 1000, 2), help=f"{_top}: {_rca_sg(_pasos[_top] / 1000, 2)} MWh/día.")
-                    _m1[3].metric(f"Cambio en {_ra}", f"{_rca_sg(_pct_r, 1)} %" if _pct_r is not None else "Sin datos",
+                    _v36_tarjeta(_m1[0], f"{_txt_b} (MWh/día)", _ncl(_P['E0'] / 1000, 1))
+                    _v36_tarjeta(_m1[1], f"{_txt_a} (MWh/día)", _ncl(_P['E1'] / 1000, 1), f"{'+' if _pct >= 0 else ''}{_ncl(_pct, 1)} %", delta_color='inverse')
+                    _v36_tarjeta(_m1[2], "Mayor causa", _rca_sg(_pasos[_top] / 1000, 2), help=f"{_top}: {_rca_sg(_pasos[_top] / 1000, 2)} MWh/día.")
+                    _v36_tarjeta(_m1[3], f"Cambio en {_ra}", f"{_rca_sg(_pct_r, 1)} %" if _pct_r is not None else "Sin datos",
                                   help="Cambio del consumo diario entre los mismos meses del año anterior: lo normal de la estación.")
                     st.markdown(f"**{_jn.capitalize()} de {_txt_a} {_anio_r}: {_ncl(_P['E1'] / 1000, 1)} MWh/día, {_rca_sg(_pct, 1)} % respecto de "
                                 f"{_txt_b} ({_ncl(_P['E0'] / 1000, 1)}).** Lo que más pesa: {_top[:1].lower() + _top[1:]} "
