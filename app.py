@@ -2671,6 +2671,12 @@ def _cargar_archivos_sin_interrumpir(_archivos, _lector, _tipo, _inicio, _fin, _
                 _procesados.append(_dato)
         except Exception as _exc:
             _errores[getattr(_f, 'name', 'archivo sin nombre')] = f"{_tipo}: {_exc}"
+        finally:
+            # v27: cada archivo se lee una vez, y se libera su buffer Excel.
+            if '_v27_avanzar' in globals() and '_v27_progreso' in globals():
+                _v27_avanzar(_tipo)
+            if '_v27_soltar_archivo' in globals():
+                _v27_soltar_archivo(_f)
     return _procesados
 
 
@@ -2821,43 +2827,33 @@ with st.sidebar:
                     st.error(f"No se pudo guardar {uf.name}: {_error_archivo}")
 
     st.divider()
-    st.header("📅 Filtro Global")
-    dr = st.date_input("Rango", value=(date(2026,1,1), date(2026,1,31)))
-    # Robustez: date_input puede devolver 2 fechas, 1 sola (mientras eliges el rango) o un
-    # objeto suelto. Siempre dejamos start_date/end_date como fechas válidas para que la carga
-    # selectiva de archivos (más abajo) nunca reciba una tupla y se caiga.
-    if isinstance(dr, (tuple, list)):
-        start_date = dr[0] if len(dr) >= 1 else date(2026, 1, 1)
-        end_date   = dr[1] if len(dr) >= 2 else start_date
-    else:
-        start_date = end_date = dr
-    if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
+    st.markdown("**📚 Base histórica completa**")
+    st.caption("Se cargan automáticamente todos los archivos disponibles. Los filtros de año, mes, semana, jornada y fecha se aplican después, sin volver a leer Excel.")
+    if st.button("🔄 Reconstruir datos históricos", use_container_width=True,
+                 help="Fuerza el reprocesamiento; no es necesario para cambiar los filtros."):
         st.session_state["_do_load"] = True
         st.session_state["_inicio_carga_datos"] = _medir_tiempo_carga()
-    st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
     st.divider()
     _mostrar_archivos_guardados(DATA_DIRS, _upload_revision)
 
-# Combinar uploads
-# Carga selectiva: del disco solo se leen los archivos dentro del rango del filtro.
-# THDR es diario; UMR/SEAT/OIT/Incidentes/Viajes son mensuales. Facturación se deja
-# con el rango MÁS toda la base 2025, porque la línea base nocturna la necesita.
-# Pasajeros (export anual) e IDE son un único archivo, así que entran completos.
-f_v1_all   = combinar_fuentes_rango(f_v1,         DATA_DIRS["v1"],   start_date, end_date, 'dia')
-f_v2_all   = combinar_fuentes_rango(f_v2,         DATA_DIRS["v2"],   start_date, end_date, 'dia')
-f_umr_all  = combinar_fuentes_rango(f_umr,        DATA_DIRS["umr"],  start_date, end_date, 'mes')
-f_seat_all = combinar_fuentes_rango(f_seat_files, DATA_DIRS["seat"], start_date, end_date, 'mes')
-f_bill_all = combinar_fuentes_rango(f_bill_files, DATA_DIRS["bill"], start_date, end_date, 'mes',
-                                    _extra=lambda _n: _anio_de_nombre(_n) == 2025)
+# ===== v27: INGESTA HISTÓRICA ÚNICA (LOS FILTROS SON SOLO DE VISUALIZACIÓN) =====
+# Se procesan todas las fuentes, sin exclusiones por fecha/nombre.
+# Las fechas siguientes son límites técnicos amplios del lector, NO un filtro del usuario.
+start_date, end_date = date(1900, 1, 1), date(2099, 12, 31)
+f_v1_all       = combinar_fuentes(f_v1, DATA_DIRS["v1"])
+f_v2_all       = combinar_fuentes(f_v2, DATA_DIRS["v2"])
+f_umr_all      = combinar_fuentes(f_umr, DATA_DIRS["umr"])
+f_seat_all     = combinar_fuentes(f_seat_files, DATA_DIRS["seat"])
+f_bill_all     = combinar_fuentes(f_bill_files, DATA_DIRS["bill"])
 f_carga_v1_all = combinar_fuentes(f_carga_v1, DATA_DIRS["carga_v1"])
 f_carga_v2_all = combinar_fuentes(f_carga_v2, DATA_DIRS["carga_v2"])
-f_viajes_all = combinar_fuentes_rango(f_viajes, DATA_DIRS["viajes"], start_date, end_date, 'mes')
-f_ide_all = combinar_fuentes(f_ide, DATA_DIRS["ide_lb"])
-f_incid_all = combinar_fuentes_rango(f_incid, DATA_DIRS["incid"], start_date, end_date, 'mes')
-f_oit_all = combinar_fuentes_rango(f_oit, DATA_DIRS["oit"], start_date, end_date, 'mes')
+f_viajes_all   = combinar_fuentes(f_viajes, DATA_DIRS["viajes"])
+f_ide_all      = combinar_fuentes(f_ide, DATA_DIRS["ide_lb"])
+f_incid_all    = combinar_fuentes(f_incid, DATA_DIRS["incid"])
+f_oit_all      = combinar_fuentes(f_oit, DATA_DIRS["oit"])
 
 # --- 7. LÓGICA DE CACHÉ Y PROCESAMIENTO ---
-_CACHE_VERSION = "v23_estabilidad_navegacion"
+_CACHE_VERSION = "v27_historial_completo_automatico"
 _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               firma_fuentes(f_v1_all, DATA_DIRS["v1"]),
               firma_fuentes(f_v2_all, DATA_DIRS["v2"]),
@@ -2871,8 +2867,33 @@ _cache_key = (_CACHE_VERSION, str(start_date), str(end_date),
               firma_fuentes(f_incid_all, DATA_DIRS["incid"]),
               firma_fuentes(f_oit_all, DATA_DIRS["oit"]))
 
-_hay_archivos = any([f_v1_all,f_v2_all,f_umr_all,f_seat_all,f_bill_all,f_carga_v1_all,f_carga_v2_all,f_viajes_all,f_ide_all,f_incid_all,f_oit_all])
-_recalcular   = st.session_state.get('_cache_key') != _cache_key
+_fuentes_v27 = [f_v1_all, f_v2_all, f_umr_all, f_seat_all, f_bill_all,
+                f_carga_v1_all, f_carga_v2_all, f_viajes_all, f_ide_all,
+                f_incid_all, f_oit_all]
+_hay_archivos = any(_fuentes_v27)
+_total_archivos_v27 = sum(len(_grupo) for _grupo in _fuentes_v27)
+_recalcular = st.session_state.get('_cache_key') != _cache_key
+# Inicio: se carga todo sin pulsar un botón. Si hay nuevos archivos o archivos
+# reemplazados, su firma cambia y se integra automáticamente al siguiente rerun.
+if _hay_archivos and (_recalcular or 'df_ops' not in st.session_state):
+    st.session_state['_do_load'] = True
+    if '_inicio_carga_datos' not in st.session_state:
+        st.session_state['_inicio_carga_datos'] = _medir_tiempo_carga()
+
+def _v27_soltar_archivo(_archivo):
+    """Evita retener en memoria los bytes de miles de Excel ya procesados."""
+    if isinstance(_archivo, _ArchivoEnDisco) and hasattr(_archivo, '_bio'):
+        _archivo._bio = None
+
+def _v27_avanzar(_tipo):
+    """Progreso con actualizaciones moderadas para no afectar el rendimiento."""
+    global _v27_procesados
+    _v27_procesados += 1
+    if (_v27_procesados % 15 == 0 or _v27_procesados == _total_archivos_v27):
+        _v27_progreso.progress(
+            min(100, int(100 * _v27_procesados / max(1, _total_archivos_v27))),
+            text=f"{_tipo} · {_v27_procesados:,}/{_total_archivos_v27:,} archivos"
+        )
 
 df_ops=pd.DataFrame(); df_thdr_v1=pd.DataFrame(); df_thdr_v2=pd.DataFrame()
 df_carga_v1=pd.DataFrame(); df_carga_v2=pd.DataFrame(); df_viajes=pd.DataFrame()
@@ -2909,6 +2930,10 @@ if _hay_archivos and 'df_ops' in st.session_state and not st.session_state.get('
     df_pax_tipo=st.session_state.get('df_pax_tipo', pd.DataFrame(columns=['Fecha','Tipo_Servicio','PAX']))
 
 elif _hay_archivos and st.session_state.get('_do_load'):
+    _v27_procesados = 0
+    _v27_progreso = st.sidebar.progress(0, text=f"Leyendo historial: 0/{_total_archivos_v27:,} archivos")
+    _v27_mensaje = st.sidebar.empty()
+    _v27_mensaje.info("📥 Preparando el historial completo. La primera carga puede tardar; los filtros posteriores usan los resultados en memoria.")
     st.session_state['_fichas_energia'] = []
     if f_umr_all:
         for f in f_umr_all:
@@ -2920,6 +2945,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 all_ops.extend(_ops_r); all_tr.extend(_tr_r); all_kmserv.extend(_kms_r)
             except Exception as e:
                 _errores_proc[f.name] = f"UMR: {e}"
+            finally:
+                _v27_avanzar("UMR")
+                _v27_soltar_archivo(f)
             
     if f_seat_all:
         for f in f_seat_all:
@@ -2931,6 +2959,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 all_seat.extend(_seat_r); all_saf_li.extend(_saf_r)
             except Exception as e:
                 _errores_proc[f.name] = f"SEAT: {e}"
+            finally:
+                _v27_avanzar("SEAT")
+                _v27_soltar_archivo(f)
             
     if f_bill_all:
         # Lector general de Factura/PRMTE (cualquier hoja, encabezado o formato de fecha) con una ficha por archivo.
@@ -2945,6 +2976,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                 _lf.append(_fact_r); _lp.append(_prmte_r); _l25.append(_prmte25_r); _fichas.append(_ficha_b)
             except Exception as e:
                 _errores_proc[f.name] = f"Factura/PRMTE: {e}"
+            finally:
+                _v27_avanzar("Facturación/PRMTE")
+                _v27_soltar_archivo(f)
         all_fact_full.extend(_unir_por_fecha(_lf))
         all_prmte_full.extend(_unir_por_fecha(_lp))
         all_prmte_2025.extend(_unir_por_fecha(_l25))
@@ -3003,6 +3037,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                             "IDE_LB_SFE": parse_latam_number(_dfi.iloc[_i, 6])})
             except Exception as _e:
                 _errores_proc[f.name] = f"IDE LB: {_e}"
+            finally:
+                _v27_avanzar("Línea base IDE")
+                _v27_soltar_archivo(f)
         if _ide_rows:
             df_ide_lb = pd.DataFrame(_ide_rows).drop_duplicates(subset='Fecha').sort_values('Fecha').reset_index(drop=True)
 
@@ -3077,6 +3114,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                                           'Servicio': _sv, 'Viaje': _vj, 'M1': _m1v, 'M2': _m2v})
             except Exception as _e:
                 _errores_proc[f.name] = f"Incidentes: {_e}"
+            finally:
+                _v27_avanzar("Incidentes")
+                _v27_soltar_archivo(f)
         if _inc_rows:
             df_incid = pd.DataFrame(_inc_rows).drop_duplicates(subset=['Fecha', 'Tipo', 'Lugar', 'Servicio', 'Viaje']).sort_values(['Fecha', 'Servicio', 'Viaje']).reset_index(drop=True)
         if _inc_full_rows:
@@ -3097,6 +3137,9 @@ elif _hay_archivos and st.session_state.get('_do_load'):
             except Exception as _e:
                 _oit_diag[f.name] = {'error': str(_e)}
                 _errores_proc[f.name] = f"OIT: {_e}"
+            finally:
+                _v27_avanzar("OIT")
+                _v27_soltar_archivo(f)
         if _oit_rows:
             df_oit = pd.DataFrame(_oit_rows).drop_duplicates().sort_values(['Fecha', 'Hora_n']).reset_index(drop=True)
         df_oit.attrs['diag'] = _oit_diag
@@ -3157,13 +3200,30 @@ elif _hay_archivos and st.session_state.get('_do_load'):
                               'all_prmte_full':all_prmte_full,'all_prmte_2025':all_prmte_2025,'_cache_key':_cache_key,'all_kmserv':all_kmserv,'all_saf_li':all_saf_li,
                               'df_carga_v1':df_carga_v1, 'df_carga_v2':df_carga_v2, 'df_viajes':df_viajes, 'df_serv_tipo':df_serv_tipo, 'df_pax_tipo':df_pax_tipo, 'df_ide_lb':df_ide_lb, 'df_incid':df_incid, 'df_incid_full':df_incid_full, 'df_oit':df_oit, '_oit_diag':_oit_diag, '_mot_inval':_mot_inval, '_seat_dups':_seat_dups})
     st.session_state['_do_load'] = False
+    _v27_progreso.empty()
+    _v27_mensaje.empty()
+    st.session_state['_historial_archivos_procesados'] = _v27_procesados
+    st.session_state['_historial_fecha_inicio'] = (
+        pd.to_datetime(df_ops['Fecha'], errors='coerce').min().date()
+        if not df_ops.empty and 'Fecha' in df_ops else None
+    )
+    st.session_state['_historial_fecha_fin'] = (
+        pd.to_datetime(df_ops['Fecha'], errors='coerce').max().date()
+        if not df_ops.empty and 'Fecha' in df_ops else None
+    )
     _inicio_carga = st.session_state.pop('_inicio_carga_datos', None)
     if _inicio_carga is not None:
         st.session_state['_ultima_carga_segundos'] = round(_medir_tiempo_carga() - _inicio_carga, 1)
 
-# Tiempo real de la última carga, visible en la barra lateral.
-if '_ultima_carga_segundos' in st.session_state:
-    st.sidebar.caption(f"⏱️ Última carga: {st.session_state['_ultima_carga_segundos']:.1f} s")
+# Estado de la base completa, separado de los filtros de visualización.
+if st.session_state.get('_cache_key') == _cache_key:
+    _v27_ini = st.session_state.get('_historial_fecha_inicio')
+    _v27_fin = st.session_state.get('_historial_fecha_fin')
+    st.sidebar.success(f"✅ Historial cargado: {st.session_state.get('_historial_archivos_procesados', 0):,} archivos")
+    if _v27_ini is not None and _v27_fin is not None:
+        st.sidebar.caption(f"📅 Datos operacionales: {_v27_ini:%d/%m/%Y} a {_v27_fin:%d/%m/%Y}")
+    if '_ultima_carga_segundos' in st.session_state:
+        st.sidebar.caption(f"⏱️ Procesamiento inicial: {st.session_state['_ultima_carga_segundos']:.1f} s")
 
 # --- 8. TABS DE VISUALIZACIÓN ---
 st.markdown("""<style>
@@ -3204,11 +3264,11 @@ st.session_state['_pcf_used'] = set()
 if not _hay_archivos:
     st.info("Sube archivos en la barra lateral para comenzar.")
 elif "_cache_key" not in st.session_state:
-    st.info("Configura el rango y presiona **🔄 Cargar / actualizar datos** para procesar los archivos guardados.")
+    st.info("La base histórica se está preparando automáticamente. No hace falta elegir fechas ni pulsar Cargar.")
 elif _recalcular:
-    st.warning("Hay archivos modificados o cambió el rango desde la última carga. Presiona **🔄 Cargar / actualizar datos** para actualizar los indicadores.")
+    st.info("Se detectaron nuevos archivos. Actualizando automáticamente el historial completo.")
 elif df_ops.empty:
-    st.info("No hay registros UMR para el rango cargado; puede haber datos de otras fuentes.")
+    st.info("La base se ha revisado, pero no se encontraron registros UMR. Puede haber otras fuentes disponibles.")
 
 
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
@@ -3313,8 +3373,15 @@ if not df_ops.empty and _seccion != _SECCIONES[4]:
     def _filt_df(df, col):
         if df is None or getattr(df, 'empty', True) or col not in df.columns: return df
         return df[_msk_f(df[col])].reset_index(drop=True)
+    # Evita convertir decenas de miles de registros a DataFrame en cada cambio
+    # de pestaña cuando el usuario está viendo el historial SIN FILTROS.
+    _sin_filtros_v27 = (
+        _sel_a == "Todos" and _sel_m == "Todos" and _sel_s == "Todas"
+        and len(_cods) == len(_J_COD)
+        and _fi == min(_dts_all) and _fe == max(_dts_all)
+    )
     def _filt_regs(regs):
-        if not regs: return regs
+        if not regs or _sin_filtros_v27: return regs
         _d = pd.DataFrame(regs)
         if 'Fecha' not in _d.columns: return regs
         return _d[_msk_f(_d['Fecha'])].to_dict('records')
