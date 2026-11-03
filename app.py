@@ -4449,13 +4449,15 @@ def _bi_comparar_con_sin_oit(diario, minimo=3):
 
 # ===== v33 · Investigación transversal de días con exceso del IDE =====
 # El sobreconsumo OFICIAL DEL MODELO disponible en esta aplicación depende de
-# E_LB = intercepción + IDE_LB_100M*km_100M + IDE_LB_SFE*km_SFE.
+# E_LB ajustada = intercepto + c100*km100 + cSFE*kmSFE_comercial
+#                 + cSFE*kmSFE_pruebas_pre_alta (solo estimación en línea base).
 # En el BI no se atribuye causalidad a incidentes, OIT ni cambios operacionales:
 # se presentan coincidencias verificables por FECHA y jornada comparable.
 
 def _bi_ide_km_sfe(registros):
     """Resumen diario UMR (sin conservar todos los registros por tren en el BI)."""
-    _cols=['Fecha','Odom_SFE','Registros UMR km','Registros SFE km']
+    _cols=['Fecha','Odom_SFE','Odom_SFE_pruebas',
+           'Registros UMR km','Registros SFE km','Registros SFE pruebas km']
     if not registros:
         return pd.DataFrame(columns=_cols)
     _r = pd.DataFrame(registros)
@@ -4472,12 +4474,104 @@ def _bi_ide_km_sfe(registros):
         return pd.DataFrame(columns=_cols)
     _es_sfe=_r['Tren'].astype(str).str.strip().str.upper().str.startswith('SFE')
     _comercial=_es_sfe & _sfe_mascara_comercial(_r['Tren'],_r['Fecha'])
+    # Solo SFE-410, 411 y 412 tienen fecha de habilitación verificada.
+    # Unidades SFE sin identificación no se estiman: se debe revisar la fuente.
+    _identificada=_r['Tren'].map(_sfe_unidad).notna()
+    _prueba=_es_sfe & _identificada & ~_comercial
     _r['_sfe']=_r['Valor'].where(_comercial,0.0)
+    _r['_sfe_pruebas']=_r['Valor'].where(_prueba,0.0)
+    _ids=_r['Tren'].map(_sfe_unidad)
+    for _id in ('410','411','412'):
+        _r[f'_test_{_id}']=_r['Valor'].where(_prueba & _ids.eq(_id),0.0)
     _r['_es_sfe']=_comercial.astype(int)
-    return (_r.groupby('Fecha',as_index=False).agg(**{
+    _r['_es_prueba']=_prueba.astype(int)
+    _grp=_r.groupby('Fecha',as_index=False).agg(**{
         'Odom_SFE':('_sfe','sum'),
+        'Odom_SFE_pruebas':('_sfe_pruebas','sum'),
         'Registros UMR km':('Valor','size'),
-        'Registros SFE km':('_es_sfe','sum')})[_cols])
+        'Registros SFE km':('_es_sfe','sum'),
+        'Registros SFE pruebas km':('_es_prueba','sum'),
+        **{f'SFE-{_id} km pruebas UMR':(f'_test_{_id}','sum')
+           for _id in ('410','411','412')},
+    })
+    return _grp
+
+
+def _bi_lb_energia_componentes(tabla):
+    """LB diaria trazable. SFE en pruebas se estima SOLO antes de su alta comercial.
+
+    - Commercial 412 desde 22-abr-2026; 410/411 desde 25-sep-2026.
+    - E comercial SFE ya entra UNA vez en la línea base ordinaria.
+    - Km de pruebas UMR, excluidos de odómetro comercial, añaden solamente
+      kWh estimados = km_pruebas * IDE_LB_SFE; nunca se suman al consumo real.
+    - Sin UMR/km o coeficientes, no se presume que el estimativo es cero.
+    """
+    _t=tabla.copy()
+    for _c in ('Intercepcion','IDE_LB_100M','IDE_LB_SFE','Odom_SFE',
+               'Odom_SFE_pruebas','Registros UMR km','Odómetro [km]'):
+        if _c not in _t.columns:
+            _t[_c]=np.nan
+    _odo=pd.to_numeric(_t['Odómetro [km]'],errors='coerce')
+    _com=pd.to_numeric(_t['Odom_SFE'],errors='coerce')
+    _pr=pd.to_numeric(_t['Odom_SFE_pruebas'],errors='coerce')
+    _odo_100=_odo-_com
+    _c0=pd.to_numeric(_t['Intercepcion'],errors='coerce')
+    _c100=pd.to_numeric(_t['IDE_LB_100M'],errors='coerce')
+    _csfe=pd.to_numeric(_t['IDE_LB_SFE'],errors='coerce')
+    _real=(pd.to_numeric(_t['E_real'],errors='coerce') if 'E_real' in _t.columns
+           else pd.to_numeric(_t['E_Tr'],errors='coerce') if 'E_Tr' in _t.columns
+           else pd.Series(np.nan,index=_t.index))
+    _cob=pd.to_numeric(_t['Registros UMR km'],errors='coerce')
+    _ok=(_odo.gt(0) & _real.gt(0) & _cob.gt(0) & _com.ge(0) & _pr.ge(0)
+         & _odo_100.ge(-0.0001) & _c0.notna() & _c100.ge(0) & _csfe.ge(0))
+    _base=_c0 + _c100*_odo_100.clip(lower=0) + _csfe*_com
+    _estima=_csfe*_pr
+    _total=_base+_estima
+    _ok &= _total.gt(0)
+    _t['Odom_100M']=_odo_100.where(_ok)
+    _t['E_LB_base_sin_pruebas (kWh)']=_base.where(_ok)
+    _t['E_SFE_comercial_en_LB (kWh)']=(_csfe*_com).where(_ok)
+    _t['E_SFE_pruebas_estimada_LB (kWh)']=_estima.where(_ok)
+    # Desglose opcional por unidad: la suma equivale al ajuste total.
+    for _id in ('410','411','412'):
+        _nombre=f'SFE-{_id} km pruebas UMR'
+        if _nombre in _t.columns:
+            _pr_id=pd.to_numeric(_t[_nombre],errors='coerce')
+            _t[f'E SFE-{_id} estimada pruebas LB (kWh)']=(_csfe*_pr_id).where(_ok)
+    _t['E_LB (kWh)']=_total.where(_ok)
+    _t['IDE_LB (kWh/km)']=(_total/_odo.where(_odo.gt(0))).where(_ok)
+    _t['Exceso LB (kWh)']=(_real-_total).where(_ok)
+    _t['Sobreconsumo LB %']=((_real/_total-1)*100).where(_ok)
+    _t['Línea base calculable']=_ok
+    return _t
+
+
+def _bi_lb_diaria_desde_umr(diario, lb, registros):
+    """Uniforma la LB de Ahorro y Sobreconsumo con Investigación IDE.
+
+    La unión es uno-a-uno por fecha para impedir duplicar la energía.
+    """
+    if diario is None or diario.empty or lb is None or lb.empty:
+        return pd.DataFrame()
+    _t=diario.copy()
+    _t['Fecha']=pd.to_datetime(_t['Fecha'],errors='coerce').dt.normalize()
+    _l=lb[['Fecha','Intercepcion','IDE_LB_100M','IDE_LB_SFE']].copy()
+    _l['Fecha']=pd.to_datetime(_l['Fecha'],errors='coerce').dt.normalize()
+    _l=_l.dropna(subset=['Fecha']).sort_values('Fecha').drop_duplicates('Fecha',keep='last')
+    _t=_t.merge(_l,on='Fecha',how='inner',validate='one_to_one')
+    _km=_bi_ide_km_sfe(registros)
+    if not _km.empty:
+        _t=_t.merge(_km,on='Fecha',how='left',validate='one_to_one')
+    _tr=pd.to_numeric(_t['E_Tr'],errors='coerce')
+    _ide=pd.to_numeric(_t.get('IDE (kWh/km)',pd.Series(np.nan,index=_t.index)),errors='coerce')
+    _odo=pd.to_numeric(_t['Odómetro [km]'],errors='coerce')
+    _t['E_real']=_tr.where(_tr.gt(0),_ide*_odo)
+    _t=_bi_lb_energia_componentes(_t)
+    _t['E_LB']=_t['E_LB (kWh)']
+    _t['IDE_LB']=_t['IDE_LB (kWh/km)']
+    _t['Desvío']=_ide-_t['IDE_LB']
+    _t['Exceso kWh']=_t['Exceso LB (kWh)']
+    return _t
 
 
 
@@ -4541,8 +4635,10 @@ def _bi_ide_referencias(diario, linea_base, kms_sfe, ventana=45, minimo=10):
     _t['IDE_LB_100M']=np.nan
     _t['IDE_LB_SFE']=np.nan
     _t['Odom_SFE']=np.nan
+    _t['Odom_SFE_pruebas']=np.nan
     _t['Registros UMR km']=np.nan
     _t['Registros SFE km']=np.nan
+    _t['Registros SFE pruebas km']=np.nan
     if linea_base is not None and not linea_base.empty and 'Fecha' in linea_base:
         _cols=['Intercepcion','IDE_LB_100M','IDE_LB_SFE']
         if all(c in linea_base.columns for c in _cols):
@@ -4550,31 +4646,19 @@ def _bi_ide_referencias(diario, linea_base, kms_sfe, ventana=45, minimo=10):
             _lb['Fecha']=pd.to_datetime(_lb['Fecha'],errors='coerce').dt.normalize()
             _lb=_lb.dropna(subset=['Fecha']).sort_values('Fecha').drop_duplicates('Fecha',keep='last')
             _t=_t.drop(columns=_cols).merge(_lb,on='Fecha',how='left',validate='one_to_one')
-    _kmcols=['Odom_SFE','Registros UMR km','Registros SFE km']
+    _kmcols=['Odom_SFE','Odom_SFE_pruebas','Registros UMR km','Registros SFE km',
+             'Registros SFE pruebas km']+[f'SFE-{_id} km pruebas UMR' for _id in ('410','411','412')]
     if kms_sfe is not None and not kms_sfe.empty and 'Fecha' in kms_sfe:
         _s=kms_sfe[['Fecha']+[c for c in _kmcols if c in kms_sfe]].copy()
         _s['Fecha']=pd.to_datetime(_s['Fecha'],errors='coerce').dt.normalize()
         _s=_s.dropna(subset=['Fecha']).drop_duplicates('Fecha',keep='last')
-        _t=_t.drop(columns=_kmcols).merge(_s,on='Fecha',how='left',validate='one_to_one')
+        _t=_t.drop(columns=_kmcols,errors='ignore').merge(_s,on='Fecha',how='left',validate='one_to_one')
         for _c in _kmcols:
             if _c not in _t:_t[_c]=np.nan
-    _odo_sfe=pd.to_numeric(_t['Odom_SFE'],errors='coerce')
-    _odo_100=_km - _odo_sfe
-    _cov=pd.to_numeric(_t['Registros UMR km'],errors='coerce')
-    _c0=pd.to_numeric(_t['Intercepcion'],errors='coerce')
-    _c100=pd.to_numeric(_t['IDE_LB_100M'],errors='coerce')
-    _csfe=pd.to_numeric(_t['IDE_LB_SFE'],errors='coerce')
-    _lb_ok=(_valida & _cov.gt(0) & _odo_sfe.ge(0) & _odo_100.ge(-0.0001)
-            & _c0.notna() & _c100.notna() & _csfe.notna())
-    _t['Odom_100M']=_odo_100.where(_lb_ok)
-    _e_lb=(_c0 + _c100*_odo_100.clip(lower=0) + _csfe*_odo_sfe)
-    _lb_ok &= _e_lb.gt(0)
-    _t['E_LB (kWh)']=_e_lb.where(_lb_ok)
-    _t['IDE_LB (kWh/km)']=(_e_lb/_km.where(_km.gt(0))).where(_lb_ok)
-    _t['Exceso LB (kWh)']=(_tr-_e_lb).where(_lb_ok)
-    _t['Sobreconsumo LB %']=((_tr/_e_lb-1)*100).where(_lb_ok)
+    # El estimativo de tracción SFE en pruebas se incorpora a energía LB,
+    # nunca al consumo real; los km SFE comerciales se contabilizan solo una vez.
+    _t=_bi_lb_energia_componentes(_t)
     _t['IDE válido']=_valida
-    _t['Línea base calculable']=_lb_ok
     return _t
 
 
@@ -5077,7 +5161,9 @@ if _seccion == '🎯 BI Ejecutivo':
             st.caption('Identifica el día en que el IDE real excede la línea base calculada para trenes '
                        '100/M y SFE. Se cruzan por fecha los datos energéticos, UMR, THDR, pasajeros, '
                        'incidentes PCC, tiempos reales THDR y órdenes OIT SFE de madrugada. Las coincidencias NO prueban causalidad.')
-            if ('_bi_km_sfe_v33' not in st.session_state or st.session_state.get('_bi_km_sfe_firma_v33') != _cache_key):
+            if ('_bi_km_sfe_v33' not in st.session_state
+                    or st.session_state.get('_bi_km_sfe_firma_v33') != _cache_key
+                    or 'Odom_SFE_pruebas' not in st.session_state['_bi_km_sfe_v33'].columns):
                 # UMR por tren se lee del snapshot existente, no de todos los Excel.
                 _sfe_dia=_bi_ide_km_sfe(st.session_state.get('all_tr',[]))
                 st.session_state['_bi_km_sfe_v33']=_sfe_dia
@@ -5193,6 +5279,11 @@ if _seccion == '🎯 BI Ejecutivo':
                     _v36_tarjeta(_i2, 'IDE real',f"{_ncl(_dia['IDE real (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE real (kWh/km)']) else 'Sin dato')
                     _v36_tarjeta(_i3, 'IDE de línea base',f"{_ncl(_dia['IDE_LB (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE_LB (kWh/km)']) else 'Sin dato')
                     _v36_tarjeta(_i4, 'Desviación línea base',f"{_ncl(_dia['Sobreconsumo LB %'],1)} %" if pd.notna(_dia['Sobreconsumo LB %']) else 'No calculable')
+                    if pd.notna(_dia.get('E_SFE_pruebas_estimada_LB (kWh)',np.nan)):
+                        _lb1,_lb2,_lb3=st.columns(3)
+                        _v36_tarjeta(_lb1,'LB sin pruebas',f"{_ncl(_dia.get('E_LB_base_sin_pruebas (kWh)'),2)} kWh")
+                        _v36_tarjeta(_lb2,'SFE pruebas estimada',f"{_ncl(_dia.get('E_SFE_pruebas_estimada_LB (kWh)'),2)} kWh")
+                        _v36_tarjeta(_lb3,'LB ajustada',f"{_ncl(_dia.get('E_LB (kWh)'),2)} kWh")
                     _ia,_ib=st.columns([2,1])
                     with _ia:
                         st.markdown('**Indicadores relacionados con el día y el mismo tipo de jornada**')
@@ -5243,14 +5334,19 @@ if _seccion == '🎯 BI Ejecutivo':
                                    'La desviación del tiempo NO demuestra que haya causado el aumento de IDE.')
                     st.markdown('**Línea base aplicada y procedencia del dato energético**')
                     _trazabilidad=pd.DataFrame([{'Indicador':_col,'Valor':_dia.get(_col,np.nan)} for _col in [
-                        'Intercepcion','IDE_LB_100M','IDE_LB_SFE','Odom_SFE','Odom_100M',
+                        'Intercepcion','IDE_LB_100M','IDE_LB_SFE','Odom_SFE','Odom_SFE_pruebas','Odom_100M',
                         'Registros UMR km','SFE-410 km comercial','SFE-411 km comercial',
                         'SFE-412 km comercial','SFE pruebas km UMR','Viajes SFE THDR comerciales',
-                        'E_LB (kWh)','Exceso LB (kWh)',
+                        'SFE-410 km pruebas UMR','SFE-411 km pruebas UMR','SFE-412 km pruebas UMR',
+                        'E SFE-410 estimada pruebas LB (kWh)','E SFE-411 estimada pruebas LB (kWh)',
+                        'E SFE-412 estimada pruebas LB (kWh)',
+                        'E_LB_base_sin_pruebas (kWh)','E_SFE_comercial_en_LB (kWh)',
+                        'E_SFE_pruebas_estimada_LB (kWh)','E_LB (kWh)','Exceso LB (kWh)',
                         'E_Fact','E_Prmte','E_Seat_T','E_Seat_Tr','E_Seat_12']])
                     st.dataframe(_trazabilidad,hide_index=True,width='stretch')
                     st.caption('Factura, PRMTE y SEAT son fuentes alternativas priorizadas, NO sumables. '
-                               'La fórmula usa intercepto + coeficientes 100/M y SFE multiplicados por sus respectivos km.')
+                               'LB ajustada = LB 100/M + SFE comercial (incluida una vez) + estimación de SFE en pruebas '
+                               '(km UMR × IDE_LB_SFE antes de su entrada comercial). No se modifica el consumo real.')
                     if df_incid_full is not None and not df_incid_full.empty and 'Fecha' in df_incid_full:
                         _in=df_incid_full[pd.to_datetime(df_incid_full['Fecha'],errors='coerce').dt.normalize().eq(_f)]
                         if not _in.empty:
@@ -7985,31 +8081,20 @@ if _seccion == _SECCIONES[7]:
         elif 'Intercepcion' not in df_ide_lb.columns:
             st.info("Vuelve a apretar «🔄 Cargar / actualizar datos» para recargar la línea base con la columna Intercepción.")
         else:
-            # Odómetro SFE diario (hoy solo el tren 412) desde el kilometraje por tren del UMR
-            _osfe = pd.DataFrame({'Fecha': pd.Series(dtype='datetime64[ns]'), 'Odom_SFE': pd.Series(dtype='float')})
-            if all_tr:
-                _dtr = pd.DataFrame(all_tr)
-                _dtr = _dtr[(_dtr['Clase'] == 'km') & _dtr['Tren'].astype(str).str.upper().str.startswith('SFE')]
-                if not _dtr.empty:
-                    _dtr['Fecha'] = pd.to_datetime(_dtr['Fecha']).dt.normalize()
-                    _osfe = _dtr.groupby('Fecha', as_index=False)['Valor'].sum().rename(columns={'Valor': 'Odom_SFE'})
-            _lbm = df_ide_lb.copy()
-            _lbm['Fecha'] = pd.to_datetime(_lbm['Fecha']).dt.normalize()
-            _ci = _b[['Fecha', 'Odómetro [km]', 'E_Tr', 'IDE (kWh/km)']].copy()
-            _ci['Fecha'] = pd.to_datetime(_ci['Fecha']).dt.normalize()
-            _ci = _ci.merge(_lbm[['Fecha', 'Intercepcion', 'IDE_LB_100M', 'IDE_LB_SFE']], on='Fecha', how='inner')
-            _ci = _ci.merge(_osfe, on='Fecha', how='left')
-            _ci['Odom_SFE'] = _ci['Odom_SFE'].fillna(0.0)
-            _ci = _ci[_ci['Odómetro [km]'] > 0]
+            # LB común BI / Ahorro / Sobreconsumo. No asumir que SFE sin
+            # datos equivale a cero; nunca mezclar km de pruebas con km comercial.
+            _ci=_bi_lb_diaria_desde_umr(
+                _b[['Fecha','Odómetro [km]','E_Tr','IDE (kWh/km)']],df_ide_lb,all_tr)
+            if not _ci.empty:
+                _sin_lb=int((~_ci['Línea base calculable']).sum())
+                if _sin_lb:
+                    st.warning(f'{_sin_lb} fecha(s) sin línea base calculable por datos UMR, '
+                               'coeficientes IDE o consumo insuficientes; no se asumieron pruebas SFE = 0.')
+                _ci=_ci[_ci['Línea base calculable']].copy()
             if _ci.empty:
                 st.info("No hay días con odómetro y línea base coincidentes en el período seleccionado.")
             else:
-                _ci['Odom_100M'] = _ci['Odómetro [km]'] - _ci['Odom_SFE']
-                _ci['E_LB'] = _ci['Intercepcion'] + _ci['IDE_LB_100M'] * _ci['Odom_100M'] + _ci['IDE_LB_SFE'] * _ci['Odom_SFE']
-                _ci['IDE_LB'] = _ci['E_LB'] / _ci['Odómetro [km]'].replace(0, np.nan)
-                _ci['E_real'] = _ci['E_Tr'].where(_ci['E_Tr'] > 0, _ci['IDE (kWh/km)'] * _ci['Odómetro [km]'])
-                _ci['Desvío'] = _ci['IDE (kWh/km)'] - _ci['IDE_LB']
-                _ci['Exceso kWh'] = _ci['E_real'] - _ci['E_LB']
+                # Componentes E_LB e IDE_LB ya validados y separados por fase SFE.
                 _ahorro_lb_dia = _ci[['Fecha', 'Exceso kWh']].copy()
                 _odo_t = float(_ci['Odómetro [km]'].sum())
                 _ide_real_g = (float(_ci['E_real'].sum()) / _odo_t) if _odo_t > 0 else 0.0
@@ -8026,8 +8111,15 @@ if _seccion == _SECCIONES[7]:
                 _v36_tarjeta(_m5, "Consumo real (tracción)", f"{_ncl(_e_real_lb, 0)} kWh")
                 _v36_tarjeta(_m6, "Consumo esperado (línea base)", f"{_ncl(_e_lb_tot, 0)} kWh",
                            f"{_ncl(-_exc, 0)} kWh de ahorro" if _exc < 0 else f"{_ncl(_exc, 0)} kWh de más", delta_color="off")
-                if float(_ci['Odom_SFE'].sum()) <= 0:
-                    st.caption("⚠️ No se encontró kilometraje de trenes SFE en el UMR del período: la línea base se calculó tratando todo el odómetro como trenes 100 y M.")
+                _p1,_p2,_p3=st.columns(3)
+                _v36_tarjeta(_p1,'LB sin SFE en pruebas',
+                             f"{_ncl(_ci['E_LB_base_sin_pruebas (kWh)'].sum(),2)} kWh")
+                _v36_tarjeta(_p2,'Estimación SFE en pruebas',
+                             f"{_ncl(_ci['E_SFE_pruebas_estimada_LB (kWh)'].sum(),2)} kWh")
+                _v36_tarjeta(_p3,'LB ajustada (total)',f"{_ncl(_ci['E_LB'].sum(),2)} kWh")
+                st.caption('SFE en servicio comercial: su contribución ya está dentro de la LB base; '
+                           'solo se agrega estimación por km de SFE antes de su fecha de incorporación. '
+                           'El consumo real no se modifica ni se suman dos veces los SFE comerciales.')
                 _mide = _ci.rename(columns={'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE Línea Base'})
                 _fide = px.line(_mide, x='Fecha', y=['IDE real', 'IDE Línea Base'], markers=True,
                                 color_discrete_map={'IDE real': '#E85500', 'IDE Línea Base': '#005195'})
@@ -8040,12 +8132,12 @@ if _seccion == _SECCIONES[7]:
                 _fx = _bar_signo(_cx, 'Fecha', 'Ahorro vs LB')
                 _fx.update_layout(title="Ahorro (+) / sobreconsumo (−) diario vs línea base", title_font_size=14, margin=dict(t=40, b=0, l=0, r=0))
                 _pc(_no_huecos(_fx), use_container_width=True, config={'locale': 'es'})
-                st.caption("Energía tracción LB = Intercepción + kWh/km (100 y M) × (Odómetro total − Odómetro SFE) + kWh/km (SFE) × Odómetro SFE. IDE LB = Energía tracción LB ÷ Odómetro total. Desvío positivo = consumo real mayor al esperado por la línea base.")
+                st.caption("Energía LB ajustada = Intercepción + coef.100/M × km100/M + coef.SFE × kmSFE comercial + coef.SFE × kmSFE EN PRUEBAS (estimado UMR). Los km en pruebas no forman parte del odómetro comercial del IDE. Desde el alta comercial la estimación extra de esa unidad es 0. El consumo real no se altera.")
                 with st.expander("Ver tabla diaria IDE vs línea base", expanded=False):
-                    _ti = _ci[['Fecha', 'Odómetro [km]', 'Odom_SFE', 'Odom_100M', 'IDE (kWh/km)', 'IDE_LB', 'Desvío', 'E_real', 'E_LB', 'Exceso kWh']].copy()
+                    _ti = _ci[['Fecha', 'Odómetro [km]', 'Odom_SFE', 'Odom_SFE_pruebas', 'Odom_100M', 'IDE (kWh/km)', 'IDE_LB', 'Desvío', 'E_real', 'E_LB_base_sin_pruebas (kWh)', 'E_SFE_pruebas_estimada_LB (kWh)', 'E_LB', 'Exceso kWh'] + [c for c in ('E SFE-410 estimada pruebas LB (kWh)', 'E SFE-411 estimada pruebas LB (kWh)', 'E SFE-412 estimada pruebas LB (kWh)') if c in _ci]].copy()
                     _ti['Fecha'] = _ti['Fecha'].dt.strftime('%d-%m-%Y')
                     _ti = _ti.rename(columns={'Odómetro [km]': 'Odóm. total', 'Odom_SFE': 'Odóm. SFE', 'Odom_100M': 'Odóm. 100 y M',
-                                              'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE LB', 'E_real': 'E tracción real', 'E_LB': 'E tracción LB'})
+                                              'Odom_SFE_pruebas': 'Odóm. SFE pruebas', 'E_LB_base_sin_pruebas (kWh)': 'E LB sin pruebas', 'E_SFE_pruebas_estimada_LB (kWh)': 'E SFE pruebas estimada', 'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE LB', 'E_real': 'E tracción real', 'E_LB': 'E tracción LB ajustada'})
                     for _c in _ti.columns:
                         if _c == 'Fecha':
                             continue
@@ -8689,36 +8781,20 @@ if _seccion == _SECCIONES[10]:
     else:
         _b = df_ops.copy()
         _b['Fecha'] = pd.to_datetime(_b['Fecha']).dt.normalize()
-        # Odómetro SFE por día (para separar la línea base 100/M de la de SFE)
-        _osfe = pd.DataFrame(columns=['Fecha', 'Odom_SFE'])
-        if all_tr:
-            _dtr = pd.DataFrame(all_tr)
-            if {'Tren', 'Fecha', 'Valor'}.issubset(_dtr.columns):
-                _dtr['Fecha'] = pd.to_datetime(_dtr['Fecha'], errors='coerce').dt.normalize()
-                _dtr['Valor'] = pd.to_numeric(_dtr['Valor'], errors='coerce')
-                if 'Clase' in _dtr.columns and _dtr['Clase'].notna().any():
-                    _dtr = _dtr[_dtr['Clase'] == 'km']
-                else:
-                    _dtr = _dtr[_dtr['Valor'] < 50000]
-                _dtr = _dtr[(_dtr['Valor'] >= 0) & _dtr['Tren'].astype(str).str.upper().str.startswith('SFE')]
-                if not _dtr.empty:
-                    _osfe = _dtr.groupby('Fecha', as_index=False)['Valor'].sum().rename(columns={'Valor': 'Odom_SFE'})
-        _lbm = df_ide_lb.copy()
-        _lbm['Fecha'] = pd.to_datetime(_lbm['Fecha']).dt.normalize()
-        _ci = _b[['Fecha', 'Odómetro [km]', 'E_Tr', 'IDE (kWh/km)']].copy()
-        _ci = _ci.merge(_lbm[['Fecha', 'Intercepcion', 'IDE_LB_100M', 'IDE_LB_SFE']], on='Fecha', how='inner')
-        _ci = _ci.merge(_osfe, on='Fecha', how='left')
-        _ci['Odom_SFE'] = _ci['Odom_SFE'].fillna(0.0)
-        _ci = _ci[_ci['Odómetro [km]'] > 0]
+        # LB común: estimar solo SFE previos a su comercialización; una vez
+        # comercial no sumar por segunda vez energía a la referencia.
+        _ci=_bi_lb_diaria_desde_umr(
+            _b[['Fecha','Odómetro [km]','E_Tr','IDE (kWh/km)']],df_ide_lb,all_tr)
+        if not _ci.empty:
+            _sin_lb=int((~_ci['Línea base calculable']).sum())
+            if _sin_lb:
+                st.warning(f'{_sin_lb} fecha(s) excluidas: falta cobertura UMR por tren, '
+                           'energía de tracción o coeficiente de línea base suficiente.')
+            _ci=_ci[_ci['Línea base calculable']].copy()
         if _ci.empty:
             st.info("No hay días con odómetro y línea base coincidentes en el período seleccionado.")
         else:
-            _ci['Odom_100M'] = _ci['Odómetro [km]'] - _ci['Odom_SFE']
-            _ci['E_LB'] = _ci['Intercepcion'] + _ci['IDE_LB_100M'] * _ci['Odom_100M'] + _ci['IDE_LB_SFE'] * _ci['Odom_SFE']
-            _ci['IDE_LB'] = _ci['E_LB'] / _ci['Odómetro [km]'].replace(0, np.nan)
-            _ci['E_real'] = _ci['E_Tr'].where(_ci['E_Tr'] > 0, _ci['IDE (kWh/km)'] * _ci['Odómetro [km]'])
-            _ci['Desvío'] = _ci['IDE (kWh/km)'] - _ci['IDE_LB']
-            _ci['Exceso kWh'] = _ci['E_real'] - _ci['E_LB']
+            # E_LB, IDE_LB, desvío y exceso ya calculados por la función común.
             # Sobreconsumo: cuando el IDE real es MAYOR que el IDE de la línea base.
             # Sobreconsumo % = cuánto por encima de la línea base está el IDE real (positivo = peor).
             _ci['Sobreconsumo %'] = np.where(_ci['IDE_LB'] > 0, _ci['Desvío'] / _ci['IDE_LB'] * 100, 0.0)
@@ -8733,6 +8809,12 @@ if _seccion == _SECCIONES[10]:
             _peor_pct = float(_neg['Sobreconsumo %'].max()) if _n_neg else 0.0
             _v36_tarjeta(_c3, "Peor día", f"+{_ncl(_peor_pct, 1)} %" if _n_neg else "—",
                        (pd.to_datetime(_neg.iloc[0]['Fecha']).strftime('%d-%m-%Y') if _n_neg else ""), delta_color="off")
+            _s1,_s2,_s3=st.columns(3)
+            _v36_tarjeta(_s1,'Energía LB sin SFE pruebas',f"{_ncl(_ci['E_LB_base_sin_pruebas (kWh)'].sum(),2)} kWh")
+            _v36_tarjeta(_s2,'Estimación SFE en pruebas',f"{_ncl(_ci['E_SFE_pruebas_estimada_LB (kWh)'].sum(),2)} kWh")
+            _v36_tarjeta(_s3,'Energía LB ajustada',f"{_ncl(_ci['E_LB'].sum(),2)} kWh")
+            st.caption('El ajuste utiliza km UMR en pruebas antes del alta comercial de cada SFE. '
+                       'Los kilómetros comerciales ya tienen su contribución en la LB original.')
 
             if _n_neg == 0:
                 st.success("✅ No hay días con sobreconsumo de IDE en el período: el IDE real estuvo en o bajo la línea base todos los días.")
@@ -8892,7 +8974,7 @@ if _seccion == _SECCIONES[10]:
 
                 _buf_n = BytesIO()
                 with pd.ExcelWriter(_buf_n, engine='openpyxl') as _w:
-                    _exp = _ci[['Fecha', 'IDE (kWh/km)', 'IDE_LB', 'Sobreconsumo %', 'Exceso kWh', 'Odómetro [km]', 'E_real', 'E_LB']].copy()
+                    _exp = _ci[['Fecha', 'IDE (kWh/km)', 'IDE_LB', 'Sobreconsumo %', 'Exceso kWh', 'Odómetro [km]', 'Odom_SFE', 'Odom_SFE_pruebas', 'E_real', 'E_LB_base_sin_pruebas (kWh)', 'E_SFE_pruebas_estimada_LB (kWh)', 'E_LB']].copy()
                     _exp = _exp.rename(columns={'IDE (kWh/km)': 'IDE real', 'IDE_LB': 'IDE línea base'})
                     _exp['Fecha'] = pd.to_datetime(_exp['Fecha']).dt.strftime('%d-%m-%Y')
                     _exp.to_excel(_w, sheet_name='Sobreconsumo IDE por día', index=False)
