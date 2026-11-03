@@ -2673,8 +2673,67 @@ def _cargar_archivos_sin_interrumpir(_archivos, _lector, _tipo, _inicio, _fin, _
     return _procesados
 
 
+# ===== DISEÑO LATERAL v25 =====
+st.markdown("""<style>
+[data-testid="stSidebar"] {border-right: 1px solid rgba(90,100,115,.18);}
+.st-key-_nav_seccion [role="radiogroup"] {gap: .12rem;}
+.st-key-_nav_seccion [role="radiogroup"] label {
+    border: 1px solid transparent;
+    border-radius: .58rem;
+    padding: .40rem .50rem;
+    transition: background-color .12s ease-in-out;
+}
+.st-key-_nav_seccion [role="radiogroup"] label:hover {
+    background: rgba(0,81,149,.075);
+}
+.st-key-_nav_seccion [role="radiogroup"] label:has(input:checked) {
+    background: rgba(0,81,149,.12);
+    border-color: rgba(0,81,149,.25);
+}
+.st-key-_nav_seccion [role="radiogroup"] label p {
+    font-size: .92rem;
+    line-height: 1.28;
+    white-space: normal;
+}
+</style>""", unsafe_allow_html=True)
+
+_SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía",
+              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo"]
+
 # --- 6. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
+    st.markdown("### 🚆 Datos operacionales")
+    st.caption("EFE Valparaíso · Navegación")
+    _seccion = st.radio("Secciones", _SECCIONES, key="_nav_seccion", horizontal=False, label_visibility="collapsed")
+    st.divider()
+    with st.expander("📥 Cargar archivos", expanded=False):
+        st.caption("Formatos XLS, XLSX, XLSM y CSV · Los archivos guardados permanecen disponibles.")
+        _upload_revision = st.session_state.get("_upload_revision", 0)
+        def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
+
+        f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v1_{_upload_revision}")
+        f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v2_{_upload_revision}")
+        f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_umr_{_upload_revision}")
+        f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_seat_files_{_upload_revision}")
+        f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_bill_files_{_upload_revision}")
+        f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v1_{_upload_revision}")
+        f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v2_{_upload_revision}")
+        f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_viajes_{_upload_revision}")
+        f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_ide_{_upload_revision}")
+        f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_incid_{_upload_revision}")
+        f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_oit_{_upload_revision}")
+        for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
+                        (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
+                        (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
+                        (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"]),
+                        (f_oit,DATA_DIRS["oit"])]:
+            for uf in (_ul or []):
+                try:
+                    guardar_archivo(uf, _ca)
+                except (ValueError, OSError) as _error_archivo:
+                    st.error(f"No se pudo guardar {uf.name}: {_error_archivo}")
+
+    st.divider()
     st.header("📅 Filtro Global")
     dr = st.date_input("Rango", value=(date(2026,1,1), date(2026,1,31)))
     # Robustez: date_input puede devolver 2 fechas, 1 sola (mientras eliges el rango) o un
@@ -2688,33 +2747,6 @@ with st.sidebar:
     if st.button("🔄 Cargar / actualizar datos", type="primary", use_container_width=True):
         st.session_state["_do_load"] = True
     st.caption("Los datos se procesan al apretar este botón; no se cargan solos al abrir.")
-    st.divider()
-    
-    _upload_revision = st.session_state.get("_upload_revision", 0)
-    def _badge(c): n=len(listar_archivos(c)); return f" ({n} guardados)" if n else ""
-    
-    f_v1         = st.file_uploader(f"1. THDR Vía 1{_badge(DATA_DIRS['v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v1_{_upload_revision}")
-    f_v2         = st.file_uploader(f"2. THDR Vía 2{_badge(DATA_DIRS['v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_v2_{_upload_revision}")
-    f_umr        = st.file_uploader(f"3. UMR / Odómetros{_badge(DATA_DIRS['umr'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_umr_{_upload_revision}")
-    f_seat_files = st.file_uploader(f"4. Energía SEAT{_badge(DATA_DIRS['seat'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_seat_files_{_upload_revision}")
-    f_bill_files = st.file_uploader(f"5. Facturación y PRMTE{_badge(DATA_DIRS['bill'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_bill_files_{_upload_revision}")
-    f_carga_v1   = st.file_uploader(f"6. Carga Pasajeros V1{_badge(DATA_DIRS['carga_v1'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v1_{_upload_revision}")
-    f_carga_v2   = st.file_uploader(f"7. Carga Pasajeros V2{_badge(DATA_DIRS['carga_v2'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_carga_v2_{_upload_revision}")
-    f_viajes     = st.file_uploader(f"8. Viajes por Contrato (mensual){_badge(DATA_DIRS['viajes'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_viajes_{_upload_revision}")
-    f_ide        = st.file_uploader(f"9. IDE Línea Base{_badge(DATA_DIRS['ide_lb'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_ide_{_upload_revision}")
-    f_incid      = st.file_uploader(f"10. Incidentes PCC{_badge(DATA_DIRS['incid'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_incid_{_upload_revision}")
-    f_oit        = st.file_uploader(f"11. Consulta OIT (órdenes de trabajo){_badge(DATA_DIRS['oit'])}", accept_multiple_files=True, type=["xls", "xlsx", "xlsm", "csv"], key=f"upload_f_oit_{_upload_revision}")
-    for _ul,_ca in [(f_v1,DATA_DIRS["v1"]),(f_v2,DATA_DIRS["v2"]),(f_umr,DATA_DIRS["umr"]),
-                    (f_seat_files,DATA_DIRS["seat"]),(f_bill_files,DATA_DIRS["bill"]),
-                    (f_carga_v1,DATA_DIRS["carga_v1"]),(f_carga_v2,DATA_DIRS["carga_v2"]),
-                    (f_viajes,DATA_DIRS["viajes"]),(f_ide,DATA_DIRS["ide_lb"]),(f_incid,DATA_DIRS["incid"]),
-                    (f_oit,DATA_DIRS["oit"])]:
-        for uf in (_ul or []):
-            try:
-                guardar_archivo(uf, _ca)
-            except (ValueError, OSError) as _error_archivo:
-                st.error(f"No se pudo guardar {uf.name}: {_error_archivo}")
-            
     st.divider()
     with st.expander("🗂️ Archivos guardados"):
         _labels={"v1":"Vía 1","v2":"Vía 2","umr":"UMR","seat":"SEAT","bill":"Facturación", "carga_v1":"Pasajeros V1", "carga_v2":"Pasajeros V2", "viajes":"Viajes Contrato", "ide_lb":"IDE Línea Base", "incid":"Incidentes", "oit":"Consulta OIT"}
@@ -3079,15 +3111,14 @@ st.markdown("""<style>
   [data-testid="stMetricLabel"] [data-testid="stMarkdownContainer"], [data-testid="stMetricLabel"] p { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }
 }
 </style>""", unsafe_allow_html=True)
-_SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía",
-              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo"]
 
-with st.container(key="_topbar"):
-    _cl, _cn = st.columns([1, 9], vertical_alignment="center")
-    with _cl:
+with st.container(key="_contenido_cabecera"):
+    _hl, _hr = st.columns([5, 1], vertical_alignment="center")
+    with _hl:
+        st.caption("EFE VALPARAÍSO  ·  DATOS OPERACIONALES")
+        st.markdown(f"### {_seccion}")
+    with _hr:
         _logo_header()
-    with _cn:
-        _seccion = st.radio("Sección", _SECCIONES, horizontal=True, key="_nav_seccion", label_visibility="collapsed")
 st.session_state['_pcf_used'] = set()
 
 # Avisos de estado de carga
