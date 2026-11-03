@@ -2990,6 +2990,7 @@ _V29_CODIGOS_COMPATIBLES = {
     # v28-v31 publicados. La v32 añade cruce BI con OIT sin alterar parseo,
     # sin alterar el parseo histórico. Se permite usarlos durante precálculo.
     "aeb1a712743d0bf2094572dbaf0e52c5fe3d55729a290a4dce3140220383acdf",  # v30 real publicada
+    "1b866ad6530b26b8063f6cf1b53fa23dbe8bb0929346bd31ae022715c0960043",  # v32 publicada (si coincide con manifest)
     "21112a1e75bb36180c8dd11e0f6f5b18950f292882ba1fd76343c955431549e2",
     # v28 y v29 publicados. Permiten mostrar el BI mientras GitHub Actions
     # materializa el snapshot para la nueva versión del código.
@@ -3012,8 +3013,9 @@ _V29_DATOS_POR_SECCION = (
     ('df_carga_v1', 'df_carga_v2', 'all_prmte_full'),
     ('df_carga_v1', 'df_carga_v2'),
     (),  # Causa raíz: esta vista tiene su propia carga anual por caché.
-    ("df_serv_tipo", "df_pax_tipo", "df_incid", "df_oit", "_oit_diag",
-     "_errores_proc", "_seat_dups"),  # BI: incluye OIT nocturna, sin traer todo PRMTE/THDR.
+    ("df_serv_tipo", "df_pax_tipo", "df_incid", "df_incid_full", "df_ide_lb",
+      "all_tr", "df_oit", "_oit_diag", "_errores_proc", "_seat_dups"),
+      # BI v33: UMR por tren para modelo IDE 100/M-SFE, incidentes, OIT y rutas.
 )
 
 def _v29_necesarios():
@@ -3885,7 +3887,9 @@ def _bi_serie(df, nombre):
 def _bi_base_liviana(tabla):
     """Serie diaria de KPI: conserva NaN para ausencia, no inventa observaciones."""
     _nombres = ['E_Total', 'E_Tr', 'E_12', 'Odómetro [km]',
-                'Tren-Km [km]', 'PAX', 'Servicios', 'IDE (kWh/km)']
+                'Tren-Km [km]', 'PAX', 'Servicios', 'IDE (kWh/km)', 'UMR (%)',
+                'E_Fact', 'E_Prmte', 'E_Seat_T', 'E_Seat_Tr', 'E_Seat_12',
+                '% Tracción', '% 12 kV']
     if tabla is None or getattr(tabla, 'empty', True) or 'Fecha' not in tabla.columns:
         return pd.DataFrame(columns=['Fecha'] + _nombres)
     _out = pd.DataFrame({'Fecha':pd.to_datetime(tabla['Fecha'], errors='coerce').dt.normalize()})
@@ -4062,6 +4066,218 @@ def _bi_comparar_con_sin_oit(diario, minimo=3):
     return pd.DataFrame(_rs,columns=_cols)
 
 
+
+# ===== v33 · Investigación transversal de días con exceso del IDE =====
+# El sobreconsumo OFICIAL DEL MODELO disponible en esta aplicación depende de
+# E_LB = intercepción + IDE_LB_100M*km_100M + IDE_LB_SFE*km_SFE.
+# En el BI no se atribuye causalidad a incidentes, OIT ni cambios operacionales:
+# se presentan coincidencias verificables por FECHA y jornada comparable.
+
+def _bi_ide_km_sfe(registros):
+    """Resumen diario UMR (sin conservar todos los registros por tren en el BI)."""
+    _cols=['Fecha','Odom_SFE','Registros UMR km','Registros SFE km']
+    if not registros:
+        return pd.DataFrame(columns=_cols)
+    _r = pd.DataFrame(registros)
+    if not {'Fecha','Tren','Valor'}.issubset(_r.columns):
+        return pd.DataFrame(columns=_cols)
+    _r['Fecha']=pd.to_datetime(_r['Fecha'],errors='coerce').dt.normalize()
+    _r['Valor']=pd.to_numeric(_r['Valor'],errors='coerce')
+    if 'Clase' in _r and _r['Clase'].notna().any():
+        _r=_r[_r['Clase'].astype(str).str.strip().str.casefold().eq('km')].copy()
+    else:
+        _r=_r[_r['Valor'].lt(50000)].copy()
+    _r=_r[_r['Fecha'].notna() & _r['Valor'].ge(0)].copy()
+    if _r.empty:
+        return pd.DataFrame(columns=_cols)
+    _es_sfe=_r['Tren'].astype(str).str.strip().str.upper().str.startswith('SFE')
+    _r['_sfe']=_r['Valor'].where(_es_sfe,0.0)
+    _r['_es_sfe']=_es_sfe.astype(int)
+    return (_r.groupby('Fecha',as_index=False).agg(**{
+        'Odom_SFE':('_sfe','sum'),
+        'Registros UMR km':('Valor','size'),
+        'Registros SFE km':('_es_sfe','sum')})[_cols])
+
+
+def _bi_ide_referencias(diario, linea_base, kms_sfe, ventana=45, minimo=10):
+    """Fecha única, modelo LB 100/M-SFE y referencia histórica anterior de misma jornada.
+
+    IDE inválido si falta energía de tracción u odómetro; NaN no equivale a 0.
+    El modelo LB exige cobertura UMR para distinguir cero SFE de sin registros.
+    """
+    if diario is None or diario.empty or 'Fecha' not in diario:
+        return pd.DataFrame()
+    _t=diario.copy()
+    _t['Fecha']=pd.to_datetime(_t['Fecha'],errors='coerce').dt.normalize()
+    _t=_t.dropna(subset=['Fecha']).sort_values('Fecha').drop_duplicates('Fecha',keep='last').reset_index(drop=True)
+    _tr=pd.to_numeric(_t['E_Tr'],errors='coerce')
+    _km=pd.to_numeric(_t['Odómetro [km]'],errors='coerce')
+    _valida = _tr.gt(0) & _km.gt(0)
+    _t['IDE real (kWh/km)']=(_tr / _km.where(_km.gt(0))).where(_valida)
+    _ide=_t['IDE real (kWh/km)']
+    _gb=_ide.groupby(_t['Tipo Día'],sort=False)
+    _t['Días previos comparables']=_gb.transform(
+        lambda v:v.shift(1).rolling(ventana,min_periods=1).count()).fillna(0).astype(int)
+    _t['IDE referencia histórica']=_gb.transform(
+        lambda v:v.shift(1).rolling(ventana,min_periods=minimo).median())
+    _ref=_t['IDE referencia histórica']
+    _t['Desviación histórica %']=((_ide/_ref-1)*100).where(_ref.gt(0))
+
+    _t['Intercepcion']=np.nan
+    _t['IDE_LB_100M']=np.nan
+    _t['IDE_LB_SFE']=np.nan
+    _t['Odom_SFE']=np.nan
+    _t['Registros UMR km']=np.nan
+    _t['Registros SFE km']=np.nan
+    if linea_base is not None and not linea_base.empty and 'Fecha' in linea_base:
+        _cols=['Intercepcion','IDE_LB_100M','IDE_LB_SFE']
+        if all(c in linea_base.columns for c in _cols):
+            _lb=linea_base[['Fecha']+_cols].copy()
+            _lb['Fecha']=pd.to_datetime(_lb['Fecha'],errors='coerce').dt.normalize()
+            _lb=_lb.dropna(subset=['Fecha']).sort_values('Fecha').drop_duplicates('Fecha',keep='last')
+            _t=_t.drop(columns=_cols).merge(_lb,on='Fecha',how='left',validate='one_to_one')
+    _kmcols=['Odom_SFE','Registros UMR km','Registros SFE km']
+    if kms_sfe is not None and not kms_sfe.empty and 'Fecha' in kms_sfe:
+        _s=kms_sfe[['Fecha']+[c for c in _kmcols if c in kms_sfe]].copy()
+        _s['Fecha']=pd.to_datetime(_s['Fecha'],errors='coerce').dt.normalize()
+        _s=_s.dropna(subset=['Fecha']).drop_duplicates('Fecha',keep='last')
+        _t=_t.drop(columns=_kmcols).merge(_s,on='Fecha',how='left',validate='one_to_one')
+        for _c in _kmcols:
+            if _c not in _t:_t[_c]=np.nan
+    _odo_sfe=pd.to_numeric(_t['Odom_SFE'],errors='coerce')
+    _odo_100=_km - _odo_sfe
+    _cov=pd.to_numeric(_t['Registros UMR km'],errors='coerce')
+    _c0=pd.to_numeric(_t['Intercepcion'],errors='coerce')
+    _c100=pd.to_numeric(_t['IDE_LB_100M'],errors='coerce')
+    _csfe=pd.to_numeric(_t['IDE_LB_SFE'],errors='coerce')
+    _lb_ok=(_valida & _cov.gt(0) & _odo_sfe.ge(0) & _odo_100.ge(-0.0001)
+            & _c0.notna() & _c100.notna() & _csfe.notna())
+    _t['Odom_100M']=_odo_100.where(_lb_ok)
+    _e_lb=(_c0 + _c100*_odo_100.clip(lower=0) + _csfe*_odo_sfe)
+    _lb_ok &= _e_lb.gt(0)
+    _t['E_LB (kWh)']=_e_lb.where(_lb_ok)
+    _t['IDE_LB (kWh/km)']=(_e_lb/_km.where(_km.gt(0))).where(_lb_ok)
+    _t['Exceso LB (kWh)']=(_tr-_e_lb).where(_lb_ok)
+    _t['Sobreconsumo LB %']=((_tr/_e_lb-1)*100).where(_lb_ok)
+    _t['IDE válido']=_valida
+    _t['Línea base calculable']=_lb_ok
+    return _t
+
+
+def _bi_ide_cruzar_fuentes(tabla, inc_full=None, inc_acoples=None, servicios=None, pax_rutas=None):
+    """Incorpora evidencia diaria sin multiplicar las filas de energía/IDE."""
+    if tabla is None or tabla.empty:
+        return pd.DataFrame()
+    _d=tabla.copy()
+    _d['Fecha']=pd.to_datetime(_d['Fecha'],errors='coerce').dt.normalize()
+    if _d['Fecha'].duplicated().any():
+        raise ValueError('El BI IDE requiere una sola fila por fecha, no una por evento')
+    if 'Órdenes OIT madrugada' in _d:
+        _dia_siguiente=_d.set_index('Fecha')['Órdenes OIT madrugada']
+        _d['OIT cierre madrugada siguiente']=(_d['Fecha']+pd.Timedelta(days=1)).map(_dia_siguiente)
+        if 'Registro OIT nocturno' in _d and _d['Registro OIT nocturno'].eq('Sin archivos OIT').all():
+            _d['OIT cierre madrugada siguiente']=np.nan
+        else:
+            _d['OIT cierre madrugada siguiente']=_d['OIT cierre madrugada siguiente'].fillna(0).astype(int)
+
+    if inc_full is not None and not inc_full.empty and 'Fecha' in inc_full:
+        _i=inc_full.copy()
+        _i['Fecha']=pd.to_datetime(_i['Fecha'],errors='coerce').dt.normalize()
+        _i=_i.dropna(subset=['Fecha']).drop_duplicates()
+        _i['_afecta']=_i.get('Afecta operación',pd.Series(False,index=_i.index)).fillna(False).astype(bool).astype(int)
+        _i['_minutos']=pd.to_numeric(_i.get('Tiempo impacto (min)',pd.Series(np.nan,index=_i.index)),errors='coerce')
+        _i=_i.groupby('Fecha',as_index=False).agg(**{
+            'Incidentes PCC':('Fecha','size'),
+            'Incidentes con afectación':('_afecta','sum'),
+            'Minutos de impacto registrados':('_minutos','sum')})
+        _d=_d.merge(_i,on='Fecha',how='left',validate='one_to_one')
+        for _col in ['Incidentes PCC','Incidentes con afectación']:
+            _d[_col]=_d[_col].fillna(0).astype(int)
+    else:
+        for _col in ['Incidentes PCC','Incidentes con afectación','Minutos de impacto registrados']:
+            _d[_col]=np.nan
+    if inc_acoples is not None and not inc_acoples.empty and {'Fecha','Tipo'}.issubset(inc_acoples.columns):
+        _i=inc_acoples.copy()
+        _i['Fecha']=pd.to_datetime(_i['Fecha'],errors='coerce').dt.normalize()
+        _i=_i.dropna(subset=['Fecha']).drop_duplicates()
+        _i['_acople']=_i['Tipo'].astype(str).str.strip().eq('Acople').astype(int)
+        _i['_desacople']=_i['Tipo'].astype(str).str.strip().eq('Desacople').astype(int)
+        _i=_i.groupby('Fecha',as_index=False)[['_acople','_desacople']].sum().rename(columns={
+            '_acople':'Acoples registrados','_desacople':'Desacoples registrados'})
+        _d=_d.merge(_i,on='Fecha',how='left',validate='one_to_one')
+        _d[['Acoples registrados','Desacoples registrados']]=_d[['Acoples registrados','Desacoples registrados']].fillna(0).astype(int)
+    else:
+        _d['Acoples registrados']=np.nan
+        _d['Desacoples registrados']=np.nan
+    if servicios is not None and not servicios.empty and {'Fecha','Servicios'}.issubset(servicios.columns):
+        _s=servicios.copy()
+        _s['Fecha']=pd.to_datetime(_s['Fecha'],errors='coerce').dt.normalize()
+        _s['Servicios']=pd.to_numeric(_s['Servicios'],errors='coerce')
+        _g=_s.groupby('Fecha',as_index=False)['Servicios'].sum(min_count=1).rename(columns={'Servicios':'Servicios THDR por recorrido'})
+        _d=_d.merge(_g,on='Fecha',how='left',validate='one_to_one')
+    else:
+        _d['Servicios THDR por recorrido']=np.nan
+    if pax_rutas is not None and not pax_rutas.empty and {'Fecha','PAX'}.issubset(pax_rutas.columns):
+        _p=pax_rutas.copy()
+        _p['Fecha']=pd.to_datetime(_p['Fecha'],errors='coerce').dt.normalize()
+        _p['PAX']=pd.to_numeric(_p['PAX'],errors='coerce')
+        _g=_p.groupby('Fecha',as_index=False)['PAX'].sum(min_count=1).rename(columns={'PAX':'Pasajeros asociados a recorridos'})
+        _d=_d.merge(_g,on='Fecha',how='left',validate='one_to_one')
+    else:
+        _d['Pasajeros asociados a recorridos']=np.nan
+    return _d
+
+
+def _bi_ide_factores_dia(historico, fecha, ventana=45, minimo=5):
+    """Variaciones descriptivas contra hasta 45 días anteriores de igual jornada.
+    El ranking de valores absolutos NO equivale a impacto causal en IDE.
+    """
+    _cols=['Indicador','Día investigado','Mediana comparable','Variación %','Antecedentes','Señal']
+    if historico is None or historico.empty:
+        return pd.DataFrame(columns=_cols)
+    _d=pd.Timestamp(fecha).normalize()
+    _h=historico.copy()
+    _h['Fecha']=pd.to_datetime(_h['Fecha'],errors='coerce').dt.normalize()
+    _fila=_h[_h['Fecha'].eq(_d)]
+    if _fila.empty:
+        return pd.DataFrame(columns=_cols)
+    _tipo=_fila.iloc[0].get('Tipo Día')
+    _pasado=_h[(_h['Fecha']<_d) & (_h['Tipo Día']==_tipo)].sort_values('Fecha').tail(ventana)
+    _indicadores=[('E_Tr','Energía de tracción (kWh)'),('Odómetro [km]','Kilometraje real (km)'),
+                  ('E_Total','Energía total (kWh)'),('E_12','Energía 12 kV (kWh)'),
+                  ('Tren-Km [km]','Tren-km (km)'),('UMR (%)','Utilización UMR (%)'),
+                  ('Servicios','Servicios'),('PAX','Pasajeros'),
+                  ('Incidentes PCC','Incidentes PCC'),('Incidentes con afectación','Incidentes con afectación'),
+                  ('Órdenes OIT madrugada','Órdenes OIT de madrugada'),
+                  ('OIT cierre madrugada siguiente','OIT cierre madrugada siguiente')]
+    _rs=[]
+    for _campo,_label in _indicadores:
+        if _campo not in _h:
+            continue
+        _v=pd.to_numeric(pd.Series([_fila.iloc[0].get(_campo)]),errors='coerce').iloc[0]
+        _prev=pd.to_numeric(_pasado[_campo],errors='coerce')
+        _prev=_prev[_prev.notna()]
+        if pd.isna(_v):
+            continue
+        _n=len(_prev)
+        _ref=float(_prev.median()) if _n >= minimo else np.nan
+        _dif=100*(_v/_ref-1) if pd.notna(_ref) and _ref>0 else np.nan
+        if pd.isna(_ref):
+            _senal='Sin historial suficiente'
+        elif pd.isna(_dif):
+            _senal='Referencia cero (variación % no definida)'
+        elif _dif>=20:
+            _senal='Aumento frente a días comparables'
+        elif _dif<=-20:
+            _senal='Disminución frente a días comparables'
+        else:
+            _senal='Sin desviación de ±20 %'
+        _rs.append({'Indicador':_label,'Día investigado':float(_v),
+                    'Mediana comparable':_ref,'Variación %':_dif,
+                    'Antecedentes':_n,'Señal':_senal})
+    return pd.DataFrame(_rs,columns=_cols)
+
+
 def _bi_valor_kpi(tabla, campo):
     if campo == 'IDE (kWh/km)':
         # El IDE de periodo es consumo tracción / kilometraje real.
@@ -4214,7 +4430,8 @@ if _seccion == '🎯 BI Ejecutivo':
     _bi_hist = _bi_base_liviana(st.session_state.get('df_ops',pd.DataFrame()))
     _bi_filtro = _bi_base_liviana(df_ops)
     _bi_oit_disponible = bool(listar_archivos(DATA_DIRS['oit']))
-    _bi_diario_historico = _bi_cruzar_nocturnos(_bi_hist, df_oit, _bi_oit_disponible)
+    _bi_diario_historico = _bi_cruzar_nocturnos(
+        _bi_hist, st.session_state.get('df_oit',pd.DataFrame()), _bi_oit_disponible)
     _bi_diario = (_bi_diario_historico[
         _bi_diario_historico['Fecha'].isin(set(_bi_filtro['Fecha']))
     ].copy() if not _bi_diario_historico.empty else pd.DataFrame())
@@ -4223,9 +4440,9 @@ if _seccion == '🎯 BI Ejecutivo':
     elif _bi_filtro.empty:
         st.info('No existen datos para los filtros seleccionados. Cambia el período en la barra superior.')
     else:
-        _bt_res,_bt_diario,_bt_alert,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
-            '📊 Resumen ejecutivo','🌙 Día a día · trenes nocturnos','🚦 Alertas','🔮 Proyecciones',
-            '🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
+        _bt_res,_bt_diario,_bt_alert,_bt_ide,_bt_pred,_bt_causa,_bt_calidad=st.tabs([
+            '📊 Resumen ejecutivo','🌙 Día a día · trenes nocturnos','🚦 Alertas',
+            '🔬 Investigación IDE','🔮 Proyecciones','🔎 Análisis de contribuyentes','🧪 Calidad de datos'])
         with _bt_res:
             _ini=_bi_filtro['Fecha'].min(); _fin=_bi_filtro['Fecha'].max()
             _prev,_tiene_comparable = _bi_referencia_comparable(_bi_hist,_bi_filtro)
@@ -4400,6 +4617,178 @@ if _seccion == '🎯 BI Ejecutivo':
                 _buf = _alertas.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig')
                 st.download_button('⬇️ Exportar alertas CSV',data=_buf,file_name='alertas_bi_operacional.csv',
                                    mime='text/csv',key='_bi_csv_alertas')
+
+        with _bt_ide:
+            st.markdown('#### Investigación integral de días con sobreconsumo IDE')
+            st.caption('Identifica el día en que el IDE real excede la línea base calculada para trenes '
+                       '100/M y SFE. Se cruzan por fecha los datos energéticos, UMR, THDR, pasajeros, '
+                       'incidentes PCC y órdenes OIT SFE de madrugada. Las coincidencias NO prueban causalidad.')
+            if ('_bi_km_sfe_v33' not in st.session_state or st.session_state.get('_bi_km_sfe_firma_v33') != _cache_key):
+                # UMR por tren se lee del snapshot existente, no de todos los Excel.
+                _sfe_dia=_bi_ide_km_sfe(st.session_state.get('all_tr',[]))
+                st.session_state['_bi_km_sfe_v33']=_sfe_dia
+                st.session_state['_bi_km_sfe_firma_v33']=_cache_key
+            else:
+                _sfe_dia=st.session_state['_bi_km_sfe_v33']
+            _ide_historico=_bi_ide_referencias(
+                _bi_diario_historico,st.session_state.get('df_ide_lb',pd.DataFrame()),_sfe_dia)
+            _ide_historico=_bi_ide_cruzar_fuentes(
+                _ide_historico,st.session_state.get('df_incid_full',pd.DataFrame()),
+                st.session_state.get('df_incid',pd.DataFrame()),
+                st.session_state.get('df_serv_tipo',pd.DataFrame()),
+                st.session_state.get('df_pax_tipo',pd.DataFrame()))
+            _ide_fecha_vis=set(_bi_filtro['Fecha'])
+            _ide_periodo=_ide_historico[_ide_historico['Fecha'].isin(_ide_fecha_vis)].copy()
+            if _ide_periodo.empty:
+                st.info('No hay fechas con datos operacionales para estos filtros.')
+            else:
+                _hay_lb=bool(_ide_periodo['Línea base calculable'].any())
+                _opciones_ide=['Línea base IDE (100/M + SFE)','Histórico: misma jornada (L / S / D-F)']
+                _idx_ide=0 if _hay_lb else 1
+                _ci,_cj=st.columns([3,2])
+                _modo_ide=_ci.selectbox('Referencia para detectar desvíos',_opciones_ide,
+                     index=_idx_ide,key='_bi_ide_modo_ref_v33')
+                _lb_elegida=(_modo_ide==_opciones_ide[0])
+                _umbral_ide=_cj.slider('Exceso mínimo sobre la referencia (%)',0,100,
+                    value=0 if _lb_elegida else 20,step=5,
+                    key='_bi_ide_umbral_lb_v33' if _lb_elegida else '_bi_ide_umbral_hist_v33')
+                _ide_periodo['Referencia IDE']=(_ide_periodo['IDE_LB (kWh/km)'] if _lb_elegida
+                                               else _ide_periodo['IDE referencia histórica'])
+                _ide_periodo['Exceso %']=(_ide_periodo['Sobreconsumo LB %'] if _lb_elegida
+                                          else _ide_periodo['Desviación histórica %'])
+                _ide_periodo['Fuera de referencia']=(_ide_periodo['Exceso %'].notna()
+                                                    & _ide_periodo['Exceso %'].gt(_umbral_ide))
+                _validos=int(_ide_periodo['Referencia IDE'].gt(0).sum())
+                _fuera=_ide_periodo[_ide_periodo['Fuera de referencia']].copy().sort_values(
+                    ['Exceso %','Fecha'],ascending=[False,False])
+                _ks=st.columns(4)
+                _ks[0].metric('Días evaluables',_ncl(_validos))
+                _ks[1].metric('Días con IDE excedido',_ncl(len(_fuera)))
+                _ks[2].metric('Mayor desvío',f"+{_ncl(_fuera['Exceso %'].max(),1)} %" if not _fuera.empty else '—')
+                if _lb_elegida:
+                    _ks[3].metric('Exceso energético (solo días excedidos)',
+                        f"{_ncl(_fuera['Exceso LB (kWh)'].sum(),0)} kWh" if not _fuera.empty else '0 kWh')
+                else:
+                    _ks[3].metric('Días sin referencia',_ncl(len(_ide_periodo)-_validos))
+                if _lb_elegida and _validos<len(_ide_periodo):
+                    st.warning(f'{len(_ide_periodo)-_validos} fecha(s) sin línea base calculable: '
+                               'se necesitan coeficientes IDE, odómetro UMR por tren y tracción válidos. '
+                               'No se supone que SFE recorrió cero km cuando falta la fuente UMR.')
+                if not _lb_elegida:
+                    st.caption('Referencia exploratoria: mediana de hasta 45 antecedentes anteriores de '
+                               'la MISMA jornada y al menos 10 observaciones positivas. '
+                               'No sustituye el modelo de línea base IDE 100/M + SFE.')
+                if _fuera.empty:
+                    st.info('No se detectaron días que superen el umbral con la referencia seleccionada. '
+                            'Prueba otro período o revisa la disponibilidad de la línea base.')
+                else:
+                    _vista_cols=['Fecha','Tipo de jornada','IDE real (kWh/km)','Referencia IDE','Exceso %',
+                                 'E_Tr','Odómetro [km]','Servicios','PAX','Tren-Km [km]',
+                                 'Incidentes PCC','Incidentes con afectación','Acoples registrados',
+                                 'Desacoples registrados','Órdenes OIT madrugada','OIT cierre madrugada siguiente',
+                                 'Unidades SFE OIT','Fuente']
+                    _reporte=_fuera[[c for c in _vista_cols if c in _fuera]].copy()
+                    st.markdown('**Días prioritarios para investigar · mayor desviación primero**')
+                    st.dataframe(_reporte,hide_index=True,width='stretch')
+                    st.download_button('⬇️ Descargar casos IDE y datos cruzados',
+                        data=_reporte.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                        file_name='bi_investigacion_desviaciones_ide.csv',
+                        mime='text/csv',key='_bi_ide_descarga_v33')
+                _graf=_ide_periodo.dropna(subset=['IDE real (kWh/km)']).copy()
+                if not _graf.empty:
+                    _graf['Estado'] = np.where(_graf['Fuera de referencia'],'IDE excedido','Dentro de referencia / sin base')
+                    _fig=px.scatter(_graf,x='Fecha',y='IDE real (kWh/km)',color='Estado',
+                        hover_data=['Tipo de jornada','Exceso %','Incidentes PCC','Órdenes OIT madrugada'],
+                        title='IDE por día · detectar, seleccionar e investigar')
+                    if _graf['Referencia IDE'].notna().any():
+                        _fig.add_trace(go.Scatter(x=_graf.sort_values('Fecha')['Fecha'],
+                            y=_graf.sort_values('Fecha')['Referencia IDE'],name='Referencia IDE',
+                            mode='lines',line=dict(dash='dash')))
+                    _fig.update_layout(margin=dict(t=65,b=15),yaxis_title='kWh/km')
+                    st.plotly_chart(_fig,width='stretch',key='_bi_ide_cruce_graf_v33')
+                _opcion_det=st.radio('Día a inspeccionar',
+                    ['Días con IDE excedido','Todos los días del filtro'],horizontal=True,
+                    key='_bi_ide_ver_dias_v33')
+                _candidatos=(_fuera if _opcion_det=='Días con IDE excedido' else _ide_periodo)
+                if _candidatos.empty:
+                    st.info('No hay fechas en el grupo seleccionado para ver el detalle.')
+                else:
+                    _fechas_ide=list(_candidatos['Fecha'].dt.date)
+                    _fecha_ide=st.selectbox('Fecha exacta',_fechas_ide,
+                        format_func=lambda f:f.strftime('%d-%m-%Y'),key='_bi_ide_fecha_v33')
+                    _f=pd.Timestamp(_fecha_ide)
+                    _dia=_ide_historico[_ide_historico['Fecha'].eq(_f)].iloc[0]
+                    st.markdown('##### Expediente operacional · '+_fecha_ide.strftime('%d-%m-%Y'))
+                    _i1,_i2,_i3,_i4=st.columns(4)
+                    _i1.metric('Jornada',str(_dia['Tipo de jornada']))
+                    _i2.metric('IDE real',f"{_ncl(_dia['IDE real (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE real (kWh/km)']) else 'Sin dato')
+                    _i3.metric('IDE de línea base',f"{_ncl(_dia['IDE_LB (kWh/km)'],3)} kWh/km" if pd.notna(_dia['IDE_LB (kWh/km)']) else 'Sin dato')
+                    _i4.metric('Desviación línea base',f"{_ncl(_dia['Sobreconsumo LB %'],1)} %" if pd.notna(_dia['Sobreconsumo LB %']) else 'No calculable')
+                    _ia,_ib=st.columns([2,1])
+                    with _ia:
+                        st.markdown('**Indicadores relacionados con el día y el mismo tipo de jornada**')
+                        _compar=_bi_ide_factores_dia(_ide_historico,_f)
+                        st.dataframe(_compar,hide_index=True,width='stretch')
+                        st.caption('Medianas calculadas con hasta 45 fechas PREVIAS de la misma jornada. '
+                                   'Las variaciones son indicios descriptivos, no porcentajes de causalidad.')
+                    with _ib:
+                        st.markdown('**Condiciones observadas**')
+                        _fuente_dia=_dia.get('Fuente','N/A')
+                        st.write('Fuente energía:',str(_fuente_dia))
+                        _noct=int(_dia.get('Órdenes OIT madrugada',0))
+                        st.write('Órdenes SFE madrugada:',_noct)
+                        if pd.notna(_dia.get('OIT cierre madrugada siguiente',np.nan)):
+                            st.write('Cierres OIT madrugada siguiente:',
+                                     int(_dia['OIT cierre madrugada siguiente']))
+                        if pd.notna(_dia.get('Incidentes PCC',np.nan)):
+                            st.write('Incidentes PCC:',int(_dia['Incidentes PCC']))
+                        if pd.notna(_dia.get('Incidentes con afectación',np.nan)):
+                            st.write('Incidentes con afectación:',int(_dia['Incidentes con afectación']))
+                        if pd.notna(_dia.get('Acoples registrados',np.nan)):
+                            st.write('Acoples / desacoples:',f"{int(_dia['Acoples registrados'])} / {int(_dia['Desacoples registrados'])}")
+                        if _noct:
+                            st.caption('SFE informadas: '+str(_dia.get('Unidades SFE OIT','')))
+                        st.caption('OIT indica fecha de CIERRE, no hora real de circulación; '           'la madrugada siguiente podría corresponder a la noche anterior, '           'pero no está confirmado.')
+                    st.markdown('**Línea base aplicada y procedencia del dato energético**')
+                    _trazabilidad=pd.DataFrame([{'Indicador':_col,'Valor':_dia.get(_col,np.nan)} for _col in [
+                        'Intercepcion','IDE_LB_100M','IDE_LB_SFE','Odom_SFE','Odom_100M',
+                        'Registros UMR km','E_LB (kWh)','Exceso LB (kWh)',
+                        'E_Fact','E_Prmte','E_Seat_T','E_Seat_Tr','E_Seat_12']])
+                    st.dataframe(_trazabilidad,hide_index=True,width='stretch')
+                    st.caption('Factura, PRMTE y SEAT son fuentes alternativas priorizadas, NO sumables. '
+                               'La fórmula usa intercepto + coeficientes 100/M y SFE multiplicados por sus respectivos km.')
+                    if df_incid_full is not None and not df_incid_full.empty and 'Fecha' in df_incid_full:
+                        _in=df_incid_full[pd.to_datetime(df_incid_full['Fecha'],errors='coerce').dt.normalize().eq(_f)]
+                        if not _in.empty:
+                            st.markdown('**Incidentes PCC registrados en la fecha**')
+                            _cols=[k for k in ['Afecta operación','Tipo incidente','Categoría','Tiempo impacto (min)',
+                                                'N° servicio','Tramo ini','Tramo fin','Descripción'] if k in _in]
+                            st.dataframe(_in[_cols].head(100),hide_index=True,width='stretch')
+                    if df_incid is not None and not df_incid.empty and 'Fecha' in df_incid:
+                        _in2=df_incid[pd.to_datetime(df_incid['Fecha'],errors='coerce').dt.normalize().eq(_f)]
+                        if not _in2.empty:
+                            st.markdown('**Acoples / desacoples identificados**')
+                            _cols=[k for k in ['Tipo','Lugar','Servicio','Viaje','M1','M2'] if k in _in2]
+                            st.dataframe(_in2[_cols].head(100),hide_index=True,width='stretch')
+                    if df_oit is not None and not df_oit.empty and 'Fecha' in df_oit:
+                        _ot=df_oit[pd.to_datetime(df_oit['Fecha'],errors='coerce').dt.normalize().eq(_f)]
+                        if not _ot.empty:
+                            st.markdown('**Órdenes OIT SFE cerradas de madrugada**')
+                            _cols=[k for k in ['SFE','Hora cierre','OT','Área','Sistema','Trabajos'] if k in _ot]
+                            st.dataframe(_ot[_cols].head(100),hide_index=True,width='stretch')
+                    for _origen,_tab,_campos,_nombre in [
+                        ('THDR',df_serv_tipo,['Tipo_Servicio','Servicios','TrenKm'],'Servicios THDR por recorrido'),
+                        ('Carga',df_pax_tipo,['Tipo_Servicio','PAX'],'Pasajeros identificados por recorrido')]:
+                        if _tab is not None and not _tab.empty and 'Fecha' in _tab:
+                            _fil=_tab[pd.to_datetime(_tab['Fecha'],errors='coerce').dt.normalize().eq(_f)]
+                            if not _fil.empty:
+                                st.markdown('**'+_nombre+'**')
+                                st.dataframe(_fil[[k for k in _campos if k in _fil]].head(100),
+                                             hide_index=True,width='stretch')
+                    st.caption('La ausencia de un registro en una fuente no confirma que no haya ocurrido '
+                               'el evento: la cobertura de cada archivo puede ser distinta. '
+                               'Para movimientos de tren con horarios reales, consulta THDR en '
+                               '«Análisis de contribuyentes» y verifica sus campos originales.')
 
         with _bt_pred:
             st.markdown('#### Proyección operativa orientativa')
