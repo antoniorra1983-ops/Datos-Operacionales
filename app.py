@@ -443,117 +443,218 @@ def _no_huecos(_fig, _fmt='%d-%m-%y'):
         pass
     return _fig
 
-# ===== Click-to-filter: las barras con eje temporal (día/mes/año) filtran el dashboard al pulsarlas =====
-_MESNUM_CLK = {m: i + 1 for i, m in enumerate(["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"])}
+# ===== v38 · FILTROS DESDE PUNTOS Y BARRAS DE GRÁFICOS TEMPORALES =====
+# st.plotly_chart(on_select=callback) ejecuta el callback ANTES de dibujar los
+# widgets del nuevo ciclo. Esto es necesario: cambiar _f_fecha después de crear
+# st.date_input provoca StreamlitAPIException y no aplica el filtro.
 _MES_CAP_CLK = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+_MESNUM_CLK = {m.lower(): i + 1 for i, m in enumerate(_MES_CAP_CLK)}
+_MESNUM_CLK.update({'ene':1, 'feb':2, 'mar':3, 'abr':4, 'may':5, 'jun':6,
+                    'jul':7, 'ago':8, 'sep':9, 'sept':9, 'oct':10, 'nov':11, 'dic':12})
 
-def _modo_x_temporal(_fig):
-    """Inspecciona las trazas de barra y devuelve 'dia' | 'mes' | 'anio' | None según el eje X."""
+
+def _pcf_descomponer_x(valor):
+    """Devuelve (año, mes, día) o None; evita interpretar horas, kWh y códigos como fechas."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float, np.integer, np.floating)):
+        if np.isfinite(valor) and int(valor) == valor and 1990 <= int(valor) <= 2100:
+            return (int(valor), None, None)
+        return None
+    if isinstance(valor, (pd.Timestamp, datetime, date, np.datetime64)):
+        try:
+            d = pd.Timestamp(valor)
+            return (int(d.year), int(d.month), int(d.day)) if not pd.isna(d) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+    txt = str(valor).strip()
+    if not txt:
+        return None
+    low = txt.lower()
+    if low in _MESNUM_CLK:
+        return (None, _MESNUM_CLK[low], None)
+    # Mes + año y año + mes, nombres completos y abreviaturas.
+    pat_mes = r'(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic)'
+    ms = re.fullmatch(rf'({pat_mes})[.\s/\-]+((?:19|20)\d{{2}})', low)
+    if ms:
+        mm = _MESNUM_CLK.get(ms.group(1), 9 if ms.group(1) == 'setiembre' else None)
+        return (int(ms.group(2)), mm, None) if mm else None
+    ms = re.fullmatch(rf'((?:19|20)\d{{2}})[\s/\-]+({pat_mes})', low)
+    if ms:
+        mm = _MESNUM_CLK.get(ms.group(2), 9 if ms.group(2) == 'setiembre' else None)
+        return (int(ms.group(1)), mm, None) if mm else None
+    if re.fullmatch(r'(19|20)\d{2}', txt):
+        return (int(txt), None, None)
+    # Formato mes/año de series agregadas (2026-09 o 09/2026).
+    mm = re.fullmatch(r'((?:19|20)\d{2})[-/](0?[1-9]|1[0-2])', txt)
+    if mm:
+        return (int(mm.group(1)), int(mm.group(2)), None)
+    mm = re.fullmatch(r'(0?[1-9]|1[0-2])[-/]((?:19|20)\d{2})', txt)
+    if mm:
+        return (int(mm.group(2)), int(mm.group(1)), None)
+    # Fecha ISO yyyy-mm-dd y fecha mostrada por _no_huecos dd-mm-yy.
+    # Admitir hora solo cuando se incluye una fecha completa: NO filtrar gráficos
+    # con eje puramente horario (HH:MM).
+    if re.match(r'^(?:19|20)\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[ T].*)?$', txt):
+        dt = pd.to_datetime(txt, errors='coerce', yearfirst=True)
+    elif re.match(r'^\d{1,2}[-/]\d{1,2}[-/](?:\d{2}|\d{4})(?:[ T].*)?$', txt):
+        dt = pd.to_datetime(txt, errors='coerce', dayfirst=True)
+    else:
+        return None
+    return (int(dt.year), int(dt.month), int(dt.day)) if pd.notna(dt) else None
+
+
+def _modo_x_temporal(fig):
+    """Identifica día/mes/año en líneas y barras; nunca filtra ejes numéricos u horarios."""
     try:
-        for _tr in _fig.data:
-            if getattr(_tr, 'type', None) not in ('bar', 'scatter', 'scattergl'):
+        _eje = getattr(fig.layout, 'xaxis', None)
+        _tickformat = str(getattr(_eje, 'tickformat', '') or '')
+        _dtick = str(getattr(_eje, 'dtick', '') or '')
+        for tr in fig.data:
+            if getattr(tr, 'type', None) not in ('bar', 'scatter', 'scattergl'):
                 continue
-            _xs = getattr(_tr, 'x', None)
-            if _xs is None:
+            if getattr(tr, 'orientation', None) == 'h':
                 continue
-            _xs = list(_xs)
-            _v = next((x for x in _xs if x is not None and not (isinstance(x, str) and x.strip() == '')), None)
-            if _v is None:
+            xs = getattr(tr, 'x', None)
+            if xs is None:
                 continue
-            if isinstance(_v, str):
-                _vl = _v.strip().lower()
-                if _vl in _MESNUM_CLK:
+            lista = [x for x in list(xs) if x is not None and str(x).strip()]
+            parsed = [p for p in (_pcf_descomponer_x(x) for x in lista) if p is not None]
+            if not parsed:
+                continue
+            if not all(p[1] is not None for p in parsed):
+                if all(p[1] is None for p in parsed):
+                    return 'anio'
+                continue
+            if all(p[2] is None for p in parsed):
+                return 'mes'
+            full = [(y, m, d) for y, m, d in parsed if d is not None]
+            if not full:
+                return 'mes'
+            # Un gráfico de varias horas de un ÚNICO día no se transforma en
+            # filtro por día; se reserva para series operacionales intradía.
+            dias = set(full)
+            if len(dias) == 1 and len(lista) > 1:
+                continue
+            # Reconoce meses mostrados como el primer día de cada mes.
+            if (all(d == 1 for _, _, d in full)
+                    and len({(y, m) for y, m, _ in full}) > 1):
+                return 'mes'
+            if _dtick.startswith('M') and all(d == 1 for _, _, d in full):
+                return 'mes'
+            if '%b' in _tickformat or '%B' in _tickformat:
+                if all(d == 1 for _, _, d in full):
                     return 'mes'
-                if re.fullmatch(r'(19|20)\d{2}', _vl):
-                    return 'anio'
-                if re.search(r'\d{1,4}[-/]\d{1,2}', _vl) and pd.notna(pd.to_datetime(_v, dayfirst=True, errors='coerce')):
-                    return 'dia'
-                return None
-            if isinstance(_v, (int, float, np.integer, np.floating)):
-                if 1990 <= float(_v) <= 2100:
-                    return 'anio'
-                return None
-            if isinstance(_v, (pd.Timestamp, datetime, date, np.datetime64)):
-                # Fechas crudas: exigir 2+ días distintos para evitar gráficos intra-día (ej. Marey por horas)
-                try:
-                    _dts = pd.to_datetime(pd.Series(_xs), errors='coerce').dropna()
-                    if _dts.dt.normalize().nunique() >= 2:
-                        return 'dia'
-                except Exception:
-                    pass
-                return None
-    except Exception:
+            return 'dia'
+    except (ValueError, TypeError, AttributeError):
         return None
     return None
 
-def _click_set_filtro(_modo, _xval, _scope):
-    """Aplica el valor clickeado al filtro (global o THDR). Solo refresca si el filtro CAMBIA
-    (compara contra el valor actual), evitando bucles sin depender de guards por key."""
-    _kfec = '_t_fec' if _scope == 'thdr' else '_f_fecha'
-    _kmes = '_t_mes' if _scope == 'thdr' else '_f_mes'
-    _kanio = '_t_anio' if _scope == 'thdr' else '_f_anio'
-    try:
-        if _modo == 'dia':
-            _d = pd.to_datetime(_xval, dayfirst=True, errors='coerce')
-            if pd.isna(_d):
-                return
-            _dd = _d.date()
-            _act = st.session_state.get(_kfec)
-            if isinstance(_act, (tuple, list)) and len(_act) == 2 and _act[0] == _dd and _act[1] == _dd:
-                return
-            st.session_state[_kfec] = (_dd, _dd)
-        elif _modo == 'mes':
-            _vl = str(_xval).strip().lower()
-            if _vl not in _MESNUM_CLK:
-                return
-            _mes = _MES_CAP_CLK[_MESNUM_CLK[_vl] - 1]
-            if st.session_state.get(_kmes) == _mes:
-                return
-            st.session_state[_kmes] = _mes
-        elif _modo == 'anio':
-            _an = str(int(float(_xval)))
-            if st.session_state.get(_kanio) == _an:
-                return
-            st.session_state[_kanio] = _an
-        else:
-            return
-    except Exception:
-        return
-    st.rerun()
 
-def _key_fig(_fig):
-    """Key estable derivado del contenido del gráfico (título, eje Y, trazas y sección).
-    Es estable entre reruns de la misma sesión, así Streamlit rastrea bien el on_select
-    en CUALQUIER pestaña (no depende del orden de ejecución como un contador)."""
-    _parts = []
+def _click_set_filtro(modo, xval, scope):
+    """Actualiza filtros ANTES de sus widgets, desde on_select=callback."""
+    valor = _pcf_descomponer_x(xval)
+    if valor is None:
+        return False
+    anio, mes, dia = valor
+    pref = '_t_' if scope == 'thdr' else '_f_'
+    f_anio = pref + 'anio'
+    f_mes = pref + 'mes'
+    f_fecha = pref + ('fec' if scope == 'thdr' else 'fecha')
+    f_sem = pref + ('sem' if scope == 'thdr' else 'semana')
+    f_jor = pref + ('jor' if scope == 'thdr' else 'jornada')
+    # No se modifica ningún widget antes de conocer un periodo interpretable.
+    if modo == 'dia' and all(x is not None for x in (anio, mes, dia)):
+        try:
+            elegido = date(anio, mes, dia)
+        except ValueError:
+            return False
+        actual = st.session_state.get(f_fecha)
+        if (actual == (elegido, elegido)
+                and st.session_state.get(f_anio) == str(anio)
+                and st.session_state.get(f_mes) == _MES_CAP_CLK[mes - 1]
+                and st.session_state.get(f_sem) == 'Todas'):
+            return False
+        st.session_state[f_anio] = str(anio)
+        st.session_state[f_mes] = _MES_CAP_CLK[mes - 1]
+        st.session_state[f_sem] = 'Todas'
+        st.session_state[f_fecha] = (elegido, elegido)
+        # Si el usuario había dejado seleccionada otra jornada, permitir ver el día.
+        clases = (['Laboral', 'Sábado', 'Domingo/Festivo'] if scope == 'thdr'
+                  else ['Laboral', 'Sábado', 'Domingo y festivo'])
+        # Los códigos L/S/D-F son la nomenclatura común a todos los módulos.
+        tipo = get_tipo_dia(elegido)
+        indice = {'L':0, 'S':1, 'D/F':2}.get(tipo)
+        seleccionadas = st.session_state.get(f_jor, clases)
+        if indice is not None and seleccionadas is not None and clases[indice] not in seleccionadas:
+            st.session_state[f_jor] = clases
+        etiqueta = elegido.strftime('%d-%m-%Y')
+    elif modo == 'mes' and mes is not None:
+        if anio is not None:
+            st.session_state[f_anio] = str(anio)
+        st.session_state[f_mes] = _MES_CAP_CLK[mes - 1]
+        st.session_state[f_sem] = 'Todas'
+        # Se reconstruye el rango válido a partir de los días disponibles del
+        # mes y año, evitando conservar un día previo que excluiría el nuevo mes.
+        st.session_state.pop(f_fecha, None)
+        etiqueta = _MES_CAP_CLK[mes - 1] + (f' {anio}' if anio else ' (todos los años)')
+    elif modo == 'anio' and anio is not None:
+        st.session_state[f_anio] = str(anio)
+        st.session_state[f_mes] = 'Todos'
+        st.session_state[f_sem] = 'Todas'
+        st.session_state.pop(f_fecha, None)
+        etiqueta = str(anio)
+    else:
+        return False
+    st.session_state['_pcf_activo_' + scope] = etiqueta
+    return True
+
+
+def _pcf_on_select(key, modo, scope):
+    """Se ejecuta ANTES de redibujar filtros, no después de st.date_input."""
     try:
-        _ti = getattr(getattr(_fig.layout, 'title', None), 'text', None)
-        if _ti: _parts.append(str(_ti))
+        estado = st.session_state.get(key, {})
+        seleccionado = estado.get('selection', {}) if isinstance(estado, dict) else getattr(estado, 'selection', {})
+        puntos = (seleccionado.get('points', []) if isinstance(seleccionado, dict)
+                  else getattr(seleccionado, 'points', [])) or []
+        if not puntos:
+            return
+        punto = puntos[-1]
+        x = punto.get('x') if isinstance(punto, dict) else getattr(punto, 'x', None)
+        if x is not None:
+            _click_set_filtro(modo, x, scope)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        pass
+
+
+def _key_fig(fig):
+    """Identidad estable por título, series, sección, sin dependencia de orden."""
+    partes = []
+    try:
+        ti = getattr(getattr(fig.layout, 'title', None), 'text', None)
+        if ti: partes.append(str(ti))
     except Exception:
         pass
     try:
-        _yt = getattr(getattr(getattr(_fig.layout, 'yaxis', None), 'title', None), 'text', None)
-        if _yt: _parts.append(str(_yt))
+        yt = getattr(getattr(getattr(fig.layout, 'yaxis', None), 'title', None), 'text', None)
+        if yt: partes.append(str(yt))
     except Exception:
         pass
     try:
-        _parts.append('~'.join(str(getattr(_tr, 'name', '') or '') for _tr in _fig.data))
+        partes.append('~'.join(str(getattr(tr, 'name', '') or '') for tr in fig.data))
     except Exception:
         pass
-    try:
-        _parts.append(str(_seccion) if '_seccion' in globals() else '')
-    except Exception:
-        pass
-    _base = '|'.join(p for p in _parts if p) or 'fig'
-    _key = f"_pcf_{abs(hash(_base)) % (10 ** 12)}"
-    _used = st.session_state.get('_pcf_used')
-    if not isinstance(_used, set):
-        _used = set(); st.session_state['_pcf_used'] = _used
-    _k = _key; _i = 1
-    while _k in _used:
-        _k = f"{_key}_{_i}"; _i += 1
-    _used.add(_k)
-    return _k
+    partes.append(str(globals().get('_seccion', '')))
+    base = '|'.join(x for x in partes if x) or 'fig'
+    kbase = '_pcf38_' + hashlib.sha1(base.encode('utf-8')).hexdigest()[:14]
+    usados = st.session_state.get('_pcf_used', set())
+    key = kbase
+    i = 1
+    while key in usados:
+        key = f'{kbase}_{i}'
+        i += 1
+    usados.add(key)
+    return key
 
 # ===== Gráficos sin choques (se aplica a TODOS los gráficos, dentro de _pc) =====
 # Arriba de cada gráfico queda una franja libre para la barra de herramientas (zoom, descargar…), que en el iPad aparece
@@ -640,35 +741,26 @@ def _sin_choques(_fig):
 
 
 def _pc(_fig, key=None, **kw):
-    """Reemplazo de st.plotly_chart con click-to-filter automático.
-    Si el gráfico es de barras con eje día/mes/año, al pulsar una barra filtra el dashboard
-    por ese día/mes/año. Para cualquier otro gráfico se comporta como st.plotly_chart normal."""
+    """Pulsar un punto/barra temporal filtra el día o mes en toda la pestaña.
+
+    El callback nativo actualiza filtros ANTES de instanciar date_input/selectbox;
+    gráficas sin eje calendario permanecen exclusivamente informativas.
+    """
     kw.pop('on_select', None)
-    if 'use_container_width' not in kw:
+    kw.pop('selection_mode', None)
+    if 'width' not in kw and 'use_container_width' not in kw:
         kw['use_container_width'] = True
     _fig = _sin_choques(_fig)
     kw['config'] = {**_CFG_GRAFICOS, **(kw.get('config') or {})}
-    _modo = _modo_x_temporal(_fig)
-    if not _modo:
+    modo = _modo_x_temporal(_fig)
+    if not modo:
         return st.plotly_chart(_fig, **kw)
-    _scope = 'thdr' if ('_SECCIONES' in globals() and '_seccion' in globals() and _seccion == _SECCIONES[4]) else 'global'
-    try:
-        _fig.update_layout(clickmode='event+select')
-    except Exception:
-        pass
-    _kk = key or _key_fig(_fig)
-    _ev = st.plotly_chart(_fig, on_select="rerun", key=_kk, **kw)
-    try:
-        _sel = _ev['selection'] if isinstance(_ev, dict) else getattr(_ev, 'selection', None)
-        _pts = (_sel['points'] if isinstance(_sel, dict) else getattr(_sel, 'points', None)) or []
-    except Exception:
-        _pts = []
-    if _pts:
-        _p0 = _pts[0]
-        _x = _p0.get('x') if isinstance(_p0, dict) else getattr(_p0, 'x', None)
-        if _x is not None:
-            _click_set_filtro(_modo, _x, _scope)
-    return _ev
+    scope = ('thdr' if ('_SECCIONES' in globals() and '_seccion' in globals()
+                      and _seccion == _SECCIONES[4]) else 'global')
+    _fig.update_layout(clickmode='event+select')
+    kk = key if key is not None else _key_fig(_fig)
+    return st.plotly_chart(_fig, on_select=lambda: _pcf_on_select(kk, modo, scope),
+                           selection_mode='points', key=kk, **kw)
 
 try:
     import plotly.io as _pio
@@ -1418,6 +1510,9 @@ def _thdr_filtros():
     _j = list(_JC.keys())
     with st.container(border=True):
         st.markdown("**🎛️ Filtros THDR** — Año · Mes · Semana · Jornada · Fecha")
+        st.caption('📊 Pulsa un punto o barra con fecha para aplicar el filtro THDR.'
+                   + ((' · Seleccionado: ' + st.session_state['_pcf_activo_thdr'])
+                      if st.session_state.get('_pcf_activo_thdr') else ''))
         _c1, _cmm, _c2, _c3, _c4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
         with _c1:
             _op_a = ["Todos"] + [str(x) for x in _anios]
@@ -4140,9 +4235,15 @@ if not df_ops.empty and _seccion != _SECCIONES[4]:
     with st.container(border=True):
         _ct1, _ct2 = st.columns([5, 1])
         _ct1.markdown('<div class="barra-filtros-tit">🎛️ Filtros</div>', unsafe_allow_html=True)
+        if st.session_state.get('_pcf_activo_global'):
+            st.caption('📍 Última selección desde gráfico: ' + st.session_state['_pcf_activo_global']
+                       + ' · Usa 🔄 Limpiar para volver a mostrar todo.')
+        else:
+            st.caption('📊 Pulsa un punto o barra con fecha para filtrar por día o por mes.')
         if _ct2.button("🔄 Limpiar", key="_btn_limpiar_f", use_container_width=True, help="Quitar todos los filtros (incluye los aplicados al pulsar barras)"):
             for _k in ('_f_anio', '_f_mes', '_f_semana', '_f_jornada', '_f_fecha'): st.session_state.pop(_k, None)
             for _k in [k for k in list(st.session_state.keys()) if str(k).startswith('_clk_')]: st.session_state.pop(_k, None)
+            st.session_state.pop('_pcf_activo_global', None)
             st.rerun()
         _cf1, _cfm, _cf2, _cf3, _cf4 = st.columns([0.9, 1.2, 1.7, 2, 1.7])
         with _cf1:
@@ -5027,7 +5128,7 @@ if _seccion == '🎯 BI Ejecutivo':
                     if _campo in _bi_filtro and _bi_filtro[_campo].notna().any():
                         _fig=px.line(_bi_filtro,x='Fecha',y=_campo,markers=len(_bi_filtro)<50,
                                      title=_titulo)
-                        st.plotly_chart(_fig, width='stretch',key=f'_bi_panel_{_campo}')
+                        _pc(_fig, width='stretch',key=f'_bi_panel_{_campo}')
                     else: st.info(f'Sin datos disponibles para {_titulo}.')
             _suma_fuentes = df_ops['Fuente'].value_counts(dropna=False).rename_axis('Fuente').reset_index(name='Días') if 'Fuente' in df_ops.columns else pd.DataFrame()
             if not _suma_fuentes.empty:
@@ -5087,7 +5188,7 @@ if _seccion == '🎯 BI Ejecutivo':
                         title='Energía total diaria y fechas con órdenes SFE nocturnas')
                     _fig.update_layout(xaxis_title='Fecha',yaxis_title='Energía diaria (kWh)',
                                        margin=dict(t=60,b=15))
-                    st.plotly_chart(_fig,width='stretch',key='_bi_energia_oit_diario')
+                    _pc(_fig,width='stretch',key='_bi_energia_oit_diario')
                 if _bi_oit_disponible:
                     _res_n=_bi_resumen_nocturno_por_jornada(_d)
                     if not _res_n.empty:
@@ -5256,7 +5357,7 @@ if _seccion == '🎯 BI Ejecutivo':
                             y=_graf.sort_values('Fecha')['Referencia IDE'],name='Referencia IDE',
                             mode='lines',line=dict(dash='dash')))
                     _fig.update_layout(margin=dict(t=65,b=15),yaxis_title='kWh/km')
-                    st.plotly_chart(_fig,width='stretch',key='_bi_ide_cruce_graf_v33')
+                    _pc(_fig,width='stretch',key='_bi_ide_cruce_graf_v33')
                 _opcion_det=st.radio('Día a inspeccionar',
                     ['Días con IDE excedido','Todos los días del filtro'],horizontal=True,
                     key='_bi_ide_ver_dias_v33')
@@ -5430,7 +5531,7 @@ if _seccion == '🎯 BI Ejecutivo':
                         key='_bi_tv_descarga_diaria_v34')
                     _gra=_tv_cruce.dropna(subset=['Desvío tiempo comparable (%)','IDE (kWh/km)'])
                     if not _gra.empty:
-                        st.plotly_chart(px.scatter(_gra,x='Desvío tiempo comparable (%)',
+                        _pc(px.scatter(_gra,x='Desvío tiempo comparable (%)',
                             y='IDE (kWh/km)',color='Tipo de jornada',hover_data=['Fecha',
                             'Viajes con referencia'],title='IDE vs variación de duración por O-D comparables'),
                             width='stretch',key='_bi_tv_ide_scatter_v34')
@@ -5522,7 +5623,7 @@ if _seccion == '🎯 BI Ejecutivo':
                          key='_bi_sfe_descargar_v35')
                     _draw=_sfe_vis.sort_values('Fecha').copy()
                     if _draw['SFE comerciales km UMR'].notna().any():
-                        st.plotly_chart(px.bar(_draw,x='Fecha',
+                        _pc(px.bar(_draw,x='Fecha',
                             y=['SFE-412 km comercial','SFE-410 km comercial','SFE-411 km comercial'],
                             title='Kilometraje diario SFE por unidad (solo UMR registrado)'),
                             width='stretch',key='_bi_sfe_graf_v35')
@@ -5567,7 +5668,7 @@ if _seccion == '🎯 BI Ejecutivo':
                                           name='Proyección (estimación)',line=dict(dash='dash')))
                 _fig.update_layout(title=f'Historial reciente y próximos {_dias} días',
                                    xaxis_title='Fecha',yaxis_title=_campo,margin=dict(t=65,b=20))
-                st.plotly_chart(_fig,width='stretch',key='_bi_grafico_proyeccion')
+                _pc(_fig,width='stretch',key='_bi_grafico_proyeccion')
                 _total=_proy['Proyección'].sum(min_count=1)
                 _pendientes=int(_proy['Proyección'].isna().sum())
                 if _pendientes:
@@ -8753,7 +8854,7 @@ if _seccion == _SECCIONES[9]:
         if not _sp.empty:
             fig.add_trace(go.Scatter(x=_sp['Fecha'], y=_sp['E'], mode='lines+markers', name='Proyectado', line=dict(color='#E85500', dash='dash')))
         fig.update_layout(title=f'{_lbl} — real y proyección', xaxis_title='Fecha', yaxis_title='kWh', hovermode='x unified', height=430)
-        st.plotly_chart(_sin_choques(fig), use_container_width=True, key='proj_td', config=_CFG_GRAFICOS)
+        _pc(_sin_choques(fig), use_container_width=True, key='proj_td', config=_CFG_GRAFICOS)
 
         _pocos = _pf[_pf['Dias'] < 2]['Tipo'].tolist()
         if _pocos:
