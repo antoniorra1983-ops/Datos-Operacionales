@@ -458,8 +458,12 @@ def _pcf_descomponer_x(valor):
     if valor is None or isinstance(valor, bool):
         return None
     if isinstance(valor, (int, float, np.integer, np.floating)):
-        if np.isfinite(valor) and int(valor) == valor and 1990 <= int(valor) <= 2100:
-            return (int(valor), None, None)
+        if np.isfinite(valor) and int(valor) == valor:
+            entero = int(valor)
+            if 1990 <= entero <= 2100:
+                return (entero, None, None)
+            if 199001 <= entero <= 210012 and 1 <= entero % 100 <= 12:
+                return (entero // 100, entero % 100, None)
         return None
     if isinstance(valor, (pd.Timestamp, datetime, date, np.datetime64)):
         try:
@@ -485,6 +489,9 @@ def _pcf_descomponer_x(valor):
         return (int(ms.group(1)), mm, None) if mm else None
     if re.fullmatch(r'(19|20)\d{2}', txt):
         return (int(txt), None, None)
+    # Agregados AñoMes, e.g. 202609 (sin sustituir su valor real en el gráfico).
+    if re.fullmatch(r'(?:19|20)\d{2}(?:0[1-9]|1[0-2])', txt):
+        return (int(txt[:4]), int(txt[4:]), None)
     # Formato mes/año de series agregadas (2026-09 o 09/2026).
     mm = re.fullmatch(r'((?:19|20)\d{2})[-/](0?[1-9]|1[0-2])', txt)
     if mm:
@@ -510,6 +517,17 @@ def _modo_x_temporal(fig):
         _eje = getattr(fig.layout, 'xaxis', None)
         _tickformat = str(getattr(_eje, 'tickformat', '') or '')
         _dtick = str(getattr(_eje, 'dtick', '') or '')
+        # Gráficos que agrupan por Mes numérico (1..12): solo cuando el eje
+        # identifica explícitamente que esos enteros son meses, no horas ni rangos.
+        _tit_x = str(getattr(getattr(_eje, 'title', None), 'text', '') or '').lower()
+        if re.search(r'\bmes(?:es)?\b', _tit_x):
+            for _tr in fig.data:
+                if getattr(_tr, 'type', None) not in ('bar', 'scatter', 'scattergl') or getattr(_tr, 'orientation', None) == 'h':
+                    continue
+                _xs = getattr(_tr, 'x', None)
+                _xs = list(_xs) if _xs is not None else []
+                if _xs and all(_pcf_num_mes_simple(_v) is not None for _v in _xs):
+                    return 'mes'
         for tr in fig.data:
             if getattr(tr, 'type', None) not in ('bar', 'scatter', 'scattergl'):
                 continue
@@ -549,6 +567,67 @@ def _modo_x_temporal(fig):
     except (ValueError, TypeError, AttributeError):
         return None
     return None
+
+
+# ===== v39 · ABREVIATURAS DE MESES EN TODOS LOS GRÁFICOS MENSUALES =====
+_MES_CORTO_EJE = ('Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+                  'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic')
+
+
+def _pcf_num_mes_simple(valor):
+    """Meses 1..12 solo cuando el eje declara explícitamente 'Mes'."""
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int, float, np.integer, np.floating)):
+        if np.isfinite(valor) and int(valor) == valor and 1 <= int(valor) <= 12:
+            return int(valor)
+    if isinstance(valor, str) and re.fullmatch(r'0?[1-9]|1[0-2]', valor.strip()):
+        return int(valor)
+    return None
+
+
+def _pcf_rotular_meses(fig):
+    """Ene..Dic en el eje X, sin cambiar los valores X ni las fechas del clic.
+
+    Se llama exclusivamente cuando el gráfico es mensual. Respeta ejes
+    secundarios y deja intactos gráficos diarios, horarios, por tren o estación.
+    """
+    candidatos = {}
+    for tr in fig.data:
+        if getattr(tr, 'type', None) not in ('bar', 'scatter', 'scattergl') or getattr(tr, 'orientation', None) == 'h':
+            continue
+        xs = getattr(tr, 'x', None)
+        if xs is None:
+            continue
+        eje_id = str(getattr(tr, 'xaxis', None) or 'x')
+        eje_layout = 'xaxis' + eje_id[1:]
+        eje = getattr(fig.layout, eje_layout, None)
+        titulo = str(getattr(getattr(eje, 'title', None), 'text', '') or '').lower()
+        mes_numerico = bool(re.search(r'\bmes(?:es)?\b', titulo))
+        for val in xs:
+            if val is None:
+                continue
+            fecha = _pcf_descomponer_x(val)
+            mes = None
+            anio = None
+            if fecha is not None:
+                anio, m, dia = fecha
+                if m is not None and (dia is None or dia == 1):
+                    mes = m
+            if mes is None and mes_numerico:
+                mes = _pcf_num_mes_simple(val)
+            if mes is not None:
+                candidatos.setdefault(eje_layout, {})[str(val)] = (val, anio, mes)
+    for eje_layout, mapa in candidatos.items():
+        # No se alteran las series. Así on_select continúa recibiendo la fecha
+        # original (p. ej. 01-09-26) aunque el usuario solo vea 'Sep'.
+        orden = sorted(mapa.values(), key=lambda r: (r[1] if r[1] is not None else 0, r[2]))
+        fig.update_layout(**{eje_layout: dict(tickmode='array',
+            tickvals=[v for v, _, _ in orden],
+            ticktext=[_MES_CORTO_EJE[m-1] for _, _, m in orden],
+            tickangle=-30 if len(orden) > 12 else 0,
+            automargin=True)})
+    return fig
 
 
 def _click_set_filtro(modo, xval, scope):
@@ -622,6 +701,11 @@ def _pcf_on_select(key, modo, scope):
         punto = puntos[-1]
         x = punto.get('x') if isinstance(punto, dict) else getattr(punto, 'x', None)
         if x is not None:
+            # Solo si el gráfico ya está clasificado como mensual, 1..12 es mes.
+            if modo == 'mes':
+                _mm = _pcf_num_mes_simple(x)
+                if _mm is not None:
+                    x = _MES_CAP_CLK[_mm - 1]
             _click_set_filtro(modo, x, scope)
     except (KeyError, TypeError, AttributeError, ValueError):
         pass
@@ -753,6 +837,8 @@ def _pc(_fig, key=None, **kw):
     _fig = _sin_choques(_fig)
     kw['config'] = {**_CFG_GRAFICOS, **(kw.get('config') or {})}
     modo = _modo_x_temporal(_fig)
+    if modo == 'mes':
+        _pcf_rotular_meses(_fig)
     if not modo:
         return st.plotly_chart(_fig, **kw)
     scope = ('thdr' if ('_SECCIONES' in globals() and '_seccion' in globals()
