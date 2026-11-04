@@ -202,6 +202,66 @@ def get_tipo_dia(fch):
     if fch.weekday() == 5: return "S"
     return "L"
 
+
+# ===== v40 · PROMEDIOS ESTRICTAMENTE SEPARADOS POR JORNADA =====
+# Los tres promedios usan SOLO fechas de su categoría chilena. La prioridad
+# del feriado (incluido un sábado festivo) se define en get_tipo_dia.
+_V40_JORNADAS = (('L', 'Laboral'), ('S', 'Sábado'), ('D/F', 'Domingo y festivo'))
+
+
+def _v40_promedios(df, columna, fecha='Fecha', agrupacion='sum'):
+    """Promedio de cada jornada, basado en una sola observación por fecha.
+
+    agrupacion='sum': total diario por fecha antes de hacer promedio entre días.
+    agrupacion='mean': promedio diario de filas de esa fecha; se usa para
+    promedios de observaciones, mientras que el promedio de viajes THDR se
+    calcula directamente por viaje y clase de jornada.
+    No se inventan registros de fechas ausentes. No se suman fuentes distintas.
+    """
+    vacio = {nombre: {'valor': float('nan'), 'dias': 0} for _, nombre in _V40_JORNADAS}
+    if (df is None or not isinstance(df, pd.DataFrame) or df.empty or
+            fecha not in df or columna not in df):
+        return vacio
+    fechas = pd.to_datetime(df[fecha], errors='coerce').dt.normalize()
+    valores = pd.to_numeric(df[columna], errors='coerce')
+    z = pd.DataFrame({'_fecha': fechas, '_valor': valores}).dropna(subset=['_fecha', '_valor'])
+    if z.empty:
+        return vacio
+    if agrupacion == 'sum':
+        diario = z.groupby('_fecha', sort=False)['_valor'].sum(min_count=1)
+    elif agrupacion == 'mean':
+        diario = z.groupby('_fecha', sort=False)['_valor'].mean()
+    else:
+        raise ValueError('Agrupación de promedio no admitida')
+    clases = pd.Series(diario.index.date, index=diario.index).map(get_tipo_dia)
+    for codigo, nombre in _V40_JORNADAS:
+        por_tipo = diario[clases.eq(codigo).values].dropna()
+        if not por_tipo.empty:
+            vacio[nombre] = {'valor': float(por_tipo.mean()), 'dias': int(len(por_tipo))}
+    return vacio
+
+
+def _v40_tarjetas(promedios, titulo='Promedio diario', unidad='', decimales=2):
+    """Tres tarjetas fijas; para jornadas sin datos se muestra —, nunca cero."""
+    tarjetas = st.columns(3)
+    for (codigo, nombre), destino in zip(_V40_JORNADAS, tarjetas):
+        r = promedios.get(nombre, {})
+        v = r.get('valor', float('nan'))
+        n = int(r.get('dias', 0))
+        mostrado = (f'{_ncl(v, decimales)} {unidad}'.strip()
+                    if pd.notna(v) and np.isfinite(v) else '—')
+        _v36_tarjeta(destino, f'{titulo} · {nombre}', mostrado,
+                     delta=f'{n} día(s) con dato' if n else 'Sin datos para esta jornada',
+                     delta_color='off')
+
+
+def _v40_desglose(df, columna, unidad='', titulo='Promedio diario',
+                  fecha='Fecha', agrupacion='sum', decimales=2):
+    promedios = _v40_promedios(df, columna, fecha, agrupacion)
+    _v40_tarjetas(promedios, titulo=titulo, unidad=unidad, decimales=decimales)
+    return promedios
+
+
 def obtener_nombre_feriado(fch):
     if fch is None: return "No aplica"
     return chile_holidays.get(fch, "No es feriado")
@@ -1099,8 +1159,20 @@ def tiempos_servicios(df_thdr_v1, df_thdr_v2, fechas=None):
 
 def _stats_dur(df, col):
     cols = col if isinstance(col, list) else [col]
-    g = df.dropna(subset=['Dur']).groupby(cols, sort=False)['Dur']
-    return g.agg(['mean', 'median', 'max', 'min', 'count']).reset_index()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols+['mean','median','max','min','count'])
+    z = df.dropna(subset=['Dur']).copy()
+    g = z.groupby(cols, sort=False, dropna=False)['Dur']
+    r = g.agg(['mean', 'median', 'max', 'min', 'count']).reset_index()
+    if 'Fecha' in z:
+        z['_J40'] = pd.to_datetime(z['Fecha'], errors='coerce').dt.date.map(
+            lambda d: get_tipo_dia(d) if pd.notna(d) else None)
+        grupos = z.groupby(cols + ['_J40'], dropna=False)['Dur'].agg(['mean','count']).reset_index()
+        for cod, _nombre in _V40_JORNADAS:
+            trozo = grupos[grupos['_J40'].eq(cod)][cols + ['mean','count']].rename(
+                columns={'mean':f'prom_{cod}', 'count':f'n_{cod}'})
+            r = r.merge(trozo, on=cols, how='left')
+    return r
 
 def _render_tv_cards(stats, col, badge=None, badge_col=None):
     filas = stats.to_dict('records')
@@ -1114,10 +1186,15 @@ def _render_tv_cards(stats, col, badge=None, badge_col=None):
             else:
                 _b = r[badge_col] if badge_col else badge
                 bdg = f'<span class="tv-badge">{_b}</span>' if _b else ''
+            _prom_j = ''.join(
+                f'<div class="tv-stat"><div class="tv-lbl">Promedio {nombre}</div>'
+                f'<div class="tv-val">{_fmt_mmss(r[f"prom_{codigo}"]) if pd.notna(r.get(f"prom_{codigo}", np.nan)) else "—"}</div>'
+                f'<div class="tv-lbl">{int(r.get(f"n_{codigo}",0)) if pd.notna(r.get(f"n_{codigo}",np.nan)) else 0} viajes</div></div>'
+                for codigo, nombre in _V40_JORNADAS)
             html = (f'<div class="tv-card"><div class="tv-head">{r[col]} {bdg}</div>'
                     f'<div class="tv-grid">'
-                    f'<div class="tv-stat"><div class="tv-lbl">Promedio</div><div class="tv-val">{_fmt_mmss(r["mean"])}</div></div>'
-                    f'<div class="tv-stat"><div class="tv-lbl">Mediana</div><div class="tv-val">{_fmt_mmss(r["median"])}</div></div>'
+                    + _prom_j +
+                    f'<div class="tv-stat"><div class="tv-lbl">Mediana global</div><div class="tv-val">{_fmt_mmss(r["median"])}</div></div>'
                     f'<div class="tv-stat"><div class="tv-lbl">Máxima</div><div class="tv-val">{_fmt_mmss(r["max"])}</div></div>'
                     f'<div class="tv-stat"><div class="tv-lbl">Mínima</div><div class="tv-val">{_fmt_mmss(r["min"])}</div></div>'
                     f'</div><div class="tv-foot">N = {_ncl(int(r["count"]), 0)} servicios</div></div>')
@@ -1139,9 +1216,13 @@ def _dwell_estaciones(v1, v2):
         _S, _L = _mat_sal_lle(t)
         for _j, _e in enumerate(ESTACIONES):
             d = _S[:, _j] - _L[:, _j]
-            d = d[~np.isnan(d)]; d = d[(d >= 0) & (d <= 30)]
-            if len(d): parts.append(pd.DataFrame({'Estacion': SHORT_NAMES_DICT.get(_e, _e), 'Dur': d}))
-    if not parts: return pd.DataFrame(columns=['Estacion', 'Dur'])
+            valido = np.isfinite(d) & (d >= 0) & (d <= 30)
+            if valido.any():
+                _fechas_dw = (pd.to_datetime(t['Fecha_Op'], errors='coerce').to_numpy()
+                              if 'Fecha_Op' in t else np.full(len(t), np.datetime64('NaT')))
+                parts.append(pd.DataFrame({'Estacion': SHORT_NAMES_DICT.get(_e, _e),
+                                           'Dur': d[valido], 'Fecha': _fechas_dw[valido]}))
+    if not parts: return pd.DataFrame(columns=['Estacion', 'Dur', 'Fecha'])
     return pd.concat(parts, ignore_index=True)
 
 def _segmentos(v1, v2):
@@ -1150,15 +1231,23 @@ def _segmentos(v1, v2):
         _S, _L = _mat_sal_lle(v1)
         for _j in range(len(E) - 1):
             d = _L[:, _j + 1] - _S[:, _j]
-            d = d[~np.isnan(d)]; d = d[(d > 0) & (d <= 60)]
-            if len(d): parts.append(pd.DataFrame({'Segmento': f"{SHORT_NAMES_DICT.get(E[_j], E[_j])}→{SHORT_NAMES_DICT.get(E[_j + 1], E[_j + 1])}", 'Dur': d}))
+            valido = np.isfinite(d) & (d > 0) & (d <= 60)
+            if valido.any():
+                _fechas_sg = (pd.to_datetime(v1['Fecha_Op'], errors='coerce').to_numpy()
+                              if 'Fecha_Op' in v1 else np.full(len(v1), np.datetime64('NaT')))
+                parts.append(pd.DataFrame({'Segmento': f"{SHORT_NAMES_DICT.get(E[_j], E[_j])}→{SHORT_NAMES_DICT.get(E[_j + 1], E[_j + 1])}",
+                                           'Dur': d[valido], 'Fecha': _fechas_sg[valido]}))
     if v2 is not None and not getattr(v2, 'empty', True):
         _S, _L = _mat_sal_lle(v2)
         for _j in range(len(E) - 1):
             d = _L[:, _j] - _S[:, _j + 1]
-            d = d[~np.isnan(d)]; d = d[(d > 0) & (d <= 60)]
-            if len(d): parts.append(pd.DataFrame({'Segmento': f"{SHORT_NAMES_DICT.get(E[_j + 1], E[_j + 1])}→{SHORT_NAMES_DICT.get(E[_j], E[_j])}", 'Dur': d}))
-    if not parts: return pd.DataFrame(columns=['Segmento', 'Dur'])
+            valido = np.isfinite(d) & (d > 0) & (d <= 60)
+            if valido.any():
+                _fechas_sg = (pd.to_datetime(v2['Fecha_Op'], errors='coerce').to_numpy()
+                              if 'Fecha_Op' in v2 else np.full(len(v2), np.datetime64('NaT')))
+                parts.append(pd.DataFrame({'Segmento': f"{SHORT_NAMES_DICT.get(E[_j + 1], E[_j + 1])}→{SHORT_NAMES_DICT.get(E[_j], E[_j])}",
+                                           'Dur': d[valido], 'Fecha': _fechas_sg[valido]}))
+    if not parts: return pd.DataFrame(columns=['Segmento', 'Dur', 'Fecha'])
     return pd.concat(parts, ignore_index=True)
 
 def _diagrama_marey(v1, v2):
@@ -1405,7 +1494,18 @@ def _km_por_tren(all_tr, excluir_sfe=True):
     _res = pd.DataFrame(index=_pivk.index)
     _res['Km recorridos'] = _pivk.sum(axis=1, min_count=1).round(0)
     _res['Días activos'] = (_pivk > 0).sum(axis=1)
-    _res['Km/día (prom)'] = (_res['Km recorridos'] / _res['Días activos'].replace(0, np.nan)).round(0)
+    # Nunca presentar un único promedio del kilometraje de días distintos.
+    for _cod40, _jor40 in _V40_JORNADAS:
+        _mesas40 = [_f for _f in _pivk.columns
+                    if get_tipo_dia(pd.Timestamp(_f).date()) == _cod40]
+        if _mesas40:
+            _act40 = _pivk[_mesas40].where(_pivk[_mesas40].gt(0))
+            _res[f'Km/día {_jor40}'] = _act40.mean(axis=1).round(2)
+            _res[f'Días {_jor40}'] = _act40.count(axis=1)
+        else:
+            _res[f'Km/día {_jor40}'] = np.nan
+            _res[f'Días {_jor40}'] = 0
+
     _res['Km máx (día)'] = _pivk.max(axis=1).round(0)
     if not _odo.empty:
         _res['Odómetro actual'] = _odo.sort_values('Fecha').groupby('Tren')['Valor'].last()
@@ -4510,7 +4610,11 @@ def _bi_resumen_por_jornada(visible):
         _ide = _bi_valor_kpi(_m, 'IDE (kWh/km)')
         _r.append({'Tipo de jornada': _nombre, 'Días':_dias,
                    'Energía (kWh)':_energia, 'Energía por día (kWh)':_energia/_dias if np.isfinite(_energia) else np.nan,
-                   'Kilómetros':_km, 'Pasajeros':_pax, 'Servicios':_serv,
+                   'Kilómetros':_km,
+                   'Kilómetros por día':_km/_dias if np.isfinite(_km) else np.nan,
+                   'Pasajeros':_pax, 'Pasajeros por día':_pax/_dias if np.isfinite(_pax) else np.nan,
+                   'Servicios':_serv, 'Servicios por día':_serv/_dias if np.isfinite(_serv) else np.nan,
+                   'Tracción por día (kWh)': _bi_valor_kpi(_m,'E_Tr')/_dias,
                    'IDE (kWh/km)':_ide})
     return pd.DataFrame(_r)
 
@@ -5125,6 +5229,47 @@ def _bi_calidad(historico, errores=None, duplicados_seat=None):
     return pd.DataFrame(_incidencias)
 
 
+
+# ===== v40 · RESUMEN DE PROMEDIOS EN TODAS LAS PESTAÑAS =====
+# Se calcula DESPUÉS de aplicar los filtros globales, respetando mes/año/fecha.
+# Si el usuario selecciona solo un tipo de jornada, las otras dos muestran —.
+if (_seccion != _SECCIONES[4] and isinstance(df_ops, pd.DataFrame)
+        and not df_ops.empty and 'Fecha' in df_ops.columns):
+    _v40_indicadores = [
+        ('Energía total', df_ops, 'E_Total', 'kWh/día'),
+        ('Energía tracción', df_ops, 'E_Tr', 'kWh/día'),
+        ('Odómetro', df_ops, 'Odómetro [km]', 'km/día'),
+        ('Tren-Km', df_ops, 'Tren-Km [km]', 'km/día'),
+        ('Pasajeros', df_ops, 'PAX', 'pax/día'),
+        ('Servicios', df_ops, 'Servicios', 'servicios/día'),
+    ]
+    if (isinstance(df_viajes, pd.DataFrame) and not df_viajes.empty
+            and {'Fecha', 'Total Viajes'} <= set(df_viajes.columns)):
+        _v40_indicadores.append(('Viajes por contrato', df_viajes, 'Total Viajes', 'viajes/día'))
+    _v40_indicadores = [x for x in _v40_indicadores if x[2] in x[1].columns and
+                         not (x[2] == 'PAX' and not x[1][x[2]].notna().any())]
+    if _v40_indicadores:
+        _v40_prefs = {
+            _SECCIONES[0]:'Viajes por contrato', _SECCIONES[1]:'Odómetro',
+            _SECCIONES[2]:'Energía total', _SECCIONES[3]:'Energía tracción',
+            _SECCIONES[5]:'Viajes por contrato', _SECCIONES[6]:'Servicios',
+            _SECCIONES[7]:'Energía total', _SECCIONES[8]:'Energía total',
+            _SECCIONES[9]:'Energía total', _SECCIONES[10]:'Energía tracción',
+            _SECCIONES[11]:'Pasajeros', _SECCIONES[12]:'Pasajeros',
+            _SECCIONES[13]:'Energía total', '🎯 BI Ejecutivo':'Energía total'}
+        _v40_opciones = [x[0] for x in _v40_indicadores]
+        _v40_default = _v40_prefs.get(_seccion, 'Energía total')
+        _v40_pos = (_v40_opciones.index(_v40_default) if _v40_default in _v40_opciones else 0)
+        with st.expander('📊 Promedios por jornada · Laboral / Sábado / Domingo y festivo',
+                         expanded=_seccion in (_SECCIONES[0], '🎯 BI Ejecutivo')):
+            _v40_opcion = st.selectbox('Indicador promedio', _v40_opciones,
+                                        index=_v40_pos, key=f'_v40_ind_{_SECCIONES.index(_seccion)}')
+            _v40_t = next(v for v in _v40_indicadores if v[0] == _v40_opcion)
+            _v40_desglose(_v40_t[1], _v40_t[2], _v40_t[3], f'{_v40_opcion} promedio')
+            st.caption('Promedio diario = suma de registros de una fecha ÷ número de fechas con dato ' 
+                       'de ESA jornada; se respeta el filtro global y los feriados nacionales de Chile. '
+                       'Los valores — indican que no hay fechas con datos para esa jornada.')
+
 if _seccion == '🎯 BI Ejecutivo':
     st.caption('BI OPERACIONAL · EFE Valparaíso · La información respeta los filtros generales de arriba.')
     if st.session_state.get('_bi_snapshot_sfe_antiguo'):
@@ -5200,7 +5345,7 @@ if _seccion == '🎯 BI Ejecutivo':
             st.caption('🚆 Etapas SFE del período: '+ ' · '.join(
                 f'{et}: {n} día(s)' for et,n in _etapas_vis.items()) +
                 '. La fecha comercial no demuestra circulación: ver pestaña Incorporación SFE.')
-            st.markdown('**Resultados separados por tipo de jornada**')
+            st.markdown('**Totales y promedios diarios separados por tipo de jornada**')
             _tabla_jornadas = _bi_resumen_por_jornada(_bi_filtro)
             if not _tabla_jornadas.empty:
                 st.dataframe(_tabla_jornadas,hide_index=True,width='stretch')
@@ -6078,7 +6223,8 @@ if _seccion == _SECCIONES[0]:
                 _dias_vj = int(_vd['Fecha'].nunique())
                 _mc = st.columns(4)
                 _v36_tarjeta(_mc[0], "Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
-                _v36_tarjeta(_mc[1], "Promedio diario", _fmt_int(_vd['Total Viajes'].sum() / _dias_vj if _dias_vj else 0))
+                _v36_tarjeta(_mc[1], "Días con viajes", _fmt_int(_dias_vj))
+                _v40_desglose(_vd, 'Total Viajes', 'viajes/día', 'Viajes promedio')
                 _vd_g = _agr_mes(_vd, ['Total Viajes'])
                 fig_pax = px.bar(_vd_g, x='Fecha', y='Total Viajes')
                 fig_pax.update_traces(marker_color='#2563eb', texttemplate='%{y:,.0f}', textposition='inside', textangle=-90, textfont=dict(color='white', size=10), hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
@@ -6438,13 +6584,15 @@ if _seccion == _SECCIONES[1]:
                 _res_tr['_key'] = _res_tr['Tren'].astype(str).str.upper().str.replace(r'[\s\-_.]+', '', regex=True)
                 if _res_tr['_key'].duplicated().any():
                     _agg = {'Tren': 'first', 'Tipo': 'first'}
-                    for _c in ['Km recorridos', 'Días activos']:
+                    for _c in ['Km recorridos', 'Días activos'] + [f'Días {_n}' for _,_n in _V40_JORNADAS]:
                         if _c in _res_tr.columns: _agg[_c] = 'sum'
+                    for _c in [f'Km/día {_n}' for _,_n in _V40_JORNADAS]:
+                        if _c in _res_tr.columns: _agg[_c] = 'mean'
                     for _c in ['Km máx (día)', 'Odómetro actual']:
                         if _c in _res_tr.columns: _agg[_c] = 'max'
                     _res_tr = _res_tr.groupby('_key', as_index=False).agg(_agg)
-                    if {'Km recorridos', 'Días activos'}.issubset(_res_tr.columns):
-                        _res_tr['Km/día (prom)'] = (_res_tr['Km recorridos'] / _res_tr['Días activos'].replace(0, np.nan)).round(0)
+                    # Los promedios por jornada ya están definidos en _km_por_tren.
+                    # La vista de flota conserva esas tres columnas, no el ratio mixto.
                 _res_tr = _res_tr.merge(_tk_tren, on='_key', how='outer')
                 _res_tr['Tren'] = _res_tr['Tren'].fillna(_res_tr['TrenTHDR'])
                 _res_tr = _res_tr.drop(columns=['_key', 'TrenTHDR'])
@@ -6465,8 +6613,27 @@ if _seccion == _SECCIONES[1]:
             _c1, _c2, _c3, _c4 = st.columns(4)
             _v36_tarjeta(_c1, "Trenes con actividad", _ncl(_n_act, 0))
             _v36_tarjeta(_c2, "Km total flota", f"{_ncl(_km_tot_tr, 0)} km")
-            _v36_tarjeta(_c3, "Km promedio/tren", f"{_ncl(_km_tot_tr / _n_act if _n_act else 0, 0)} km")
+            _v36_tarjeta(_c3, "Km/tren activo · período", f"{_ncl(_km_tot_tr / _n_act if _n_act else 0, 2)} km",
+                           help="Ratio del período completo, no un promedio diario. Promedios diarios desglosados por jornada arriba.")
             _v36_tarjeta(_c4, "Tren más usado", str(_res_tr.iloc[0]['Tren']), f"{_ncl(_res_tr.iloc[0]['Km recorridos'], 0)} km")
+            # Promedio real por tren activo y jornada, a diferencia del ratio del período.
+            if all_tr:
+                _r40_tr = pd.DataFrame(all_tr)
+                if {'Fecha','Tren','Valor'} <= set(_r40_tr.columns):
+                    _r40_tr['Fecha'] = pd.to_datetime(_r40_tr['Fecha'], errors='coerce').dt.normalize()
+                    _r40_tr['Valor'] = pd.to_numeric(_r40_tr['Valor'], errors='coerce')
+                    if 'Clase' in _r40_tr:
+                        _r40_tr = _r40_tr[_r40_tr['Clase'].astype(str).str.strip().str.casefold().eq('km')]
+                    else:
+                        _r40_tr = _r40_tr[_r40_tr['Valor'].lt(50000)]
+                    _r40_tr = _r40_tr.dropna(subset=['Fecha','Valor'])
+                    if not _r40_tr.empty:
+                        _r40_tr['_Jornada'] = _r40_tr['Fecha'].dt.date.map(get_tipo_dia).map(dict(_V40_JORNADAS))
+                        _r40_tr = _r40_tr.groupby(['Tren','Fecha','_Jornada'],as_index=False)['Valor'].sum()
+                        _pr40 = _r40_tr.groupby(['Tren','_Jornada'],observed=True)['Valor'].agg(
+                            **{'Km/día promedio': 'mean','Días con dato':'size'}).reset_index()
+                        with st.expander('📊 Km por tren · promedio separado por jornada', expanded=False):
+                            st.dataframe(_pr40.rename(columns={'_Jornada':'Jornada'}), hide_index=True, width='stretch')
             _por_tipo = _res_tr.groupby('Tipo').agg(**{'Trenes': ('Tren', 'count'), 'Km total': ('Km recorridos', 'sum')}).reset_index()
             _tot_km_tp = float(_por_tipo['Km total'].sum())
             _por_tipo['% uso'] = (_por_tipo['Km total'] / _tot_km_tp * 100).round(1) if _tot_km_tp > 0 else 0.0
@@ -6992,10 +7159,16 @@ if _seccion == _SECCIONES[2]:
                 _pc(_no_huecos(_fdia), use_container_width=True, config={'locale': 'es'})
             with _c2h:
                 _dias_h = sorted(_hh['Fecha'].dt.date.unique())
-                _sel_h = st.selectbox("Perfil horario de:", ["Promedio del período"] + [d.strftime('%d-%m-%Y') for d in _dias_h], key="_ener_hora_dia")
-                if _sel_h == "Promedio del período":
-                    _ph = _hh.groupby(['Hora', 'Fuente'], as_index=False)['Consumo'].mean()
-                    _tit_h = "Consumo por hora (promedio diario, kWh)"
+                _prom_opts = [f'Promedio · {nom}' for _,nom in _V40_JORNADAS]
+                _sel_h = st.selectbox("Perfil horario de:", _prom_opts + [d.strftime('%d-%m-%Y') for d in _dias_h], key="_ener_hora_dia")
+                if _sel_h in _prom_opts:
+                    _tipo_h = _sel_h.split(' · ',1)[1]
+                    _tipos_hh = _hh['Fecha'].dt.date.map(get_tipo_dia).map(dict(_V40_JORNADAS))
+                    _solo_hh = _hh.loc[_tipos_hh.eq(_tipo_h)].copy()
+                    _ph = _solo_hh.groupby(['Hora', 'Fuente'], as_index=False)['Consumo'].mean()
+                    _tit_h = f"Consumo por hora — promedio {_tipo_h} (kWh)"
+                    if _ph.empty:
+                        st.info(f'No hay horas registradas de jornadas { _tipo_h.lower() } en el filtro actual.')
                 else:
                     _fsel = pd.to_datetime(_sel_h, format='%d-%m-%Y')
                     _ph = _hh[_hh['Fecha'] == _fsel].groupby(['Hora', 'Fuente'], as_index=False)['Consumo'].sum()
@@ -7006,7 +7179,9 @@ if _seccion == _SECCIONES[2]:
                 _fhora.update_layout(height=330, margin=dict(t=40, b=0, l=0, r=0), title=_tit_h,
                                      yaxis_title='kWh', xaxis_title='', legend_title='')
                 _pc(_fhora, use_container_width=True, config={'locale': 'es'})
-            st.caption("PRMTE viene en registros de 15 minutos (se suman a la hora); la Factura viene horaria. El perfil horario en «Promedio del período» muestra el kWh promedio de cada hora entre los días del rango; eligiendo una fecha se ve el detalle horario de ese día.")
+            st.caption("PRMTE se suma a la hora desde bloques de 15 minutos; Factura viene horaria. "
+                       "Los perfiles promedio se calculan SOLO entre días de la misma jornada (laboral, sábado, domingo y festivo). "
+                       "También puedes consultar el detalle de una fecha individual.")
             with st.expander("Ver tabla horaria — mostrar / ocultar", expanded=False):
                 _th = _hh.pivot_table(index=['Fecha', 'Hora'], columns='Fuente', values='Consumo', aggfunc='sum').reset_index()
                 _th['Fecha'] = (pd.to_datetime(_th['Fecha']) + pd.to_timedelta(_th['Hora'].str.slice(0, 2).astype(int), unit='h')).dt.strftime('%d-%m-%y %H:%M')
@@ -7084,8 +7259,18 @@ if _seccion == _SECCIONES[2]:
             _kc = st.columns(len(_srcs))
             for _i, _s in enumerate(_srcs):
                 _tot = float(_cmp[_s].sum()); _dias = int((_cmp[_s] > 0).sum())
-                _prom = (_tot / _dias) if _dias > 0 else 0.0
-                _v36_tarjeta(_kc[_i], _s, f"{_ncl(_tot, 0)} kWh", f"{_dias} días · prom {_ncl(_prom, 0)} kWh/día", delta_color="off")
+                _v36_tarjeta(_kc[_i], _s, f"{_ncl(_tot, 2)} kWh", f"{_dias} días con energía", delta_color="off")
+            with st.expander('📊 Promedio diario por fuente y jornada', expanded=True):
+                _fr_prom = []
+                for _s in _srcs:
+                    _solo_src = _cmp[_cmp[_s].gt(0)]
+                    _estad_src = _v40_promedios(_solo_src, _s)
+                    for _, _nombre_src in _V40_JORNADAS:
+                        _r_src = _estad_src[_nombre_src]
+                        _fr_prom.append({'Fuente': _s, 'Jornada': _nombre_src,
+                                         'Días': _r_src['dias'],
+                                         'kWh promedio/día': round(_r_src['valor'], 2) if np.isfinite(_r_src['valor']) else np.nan})
+                st.dataframe(pd.DataFrame(_fr_prom), hide_index=True, width='stretch')
             _g1, _g2 = st.columns([1, 2])
             with _g1:
                 _tot_df = pd.DataFrame({'Fuente': _srcs, 'kWh': [float(_cmp[_s].sum()) for _s in _srcs]})
@@ -7465,7 +7650,9 @@ if _seccion == _SECCIONES[3]:
                 _tt1, _tt2, _tt3 = st.columns(3)
                 _v36_tarjeta(_tt1, f"Mediana nocturna {_src_lb} (00–05)", f"{_ncl(_mediana_lb, 1)} kWh", "línea base", delta_color="off")
                 _v36_tarjeta(_tt2, "Tracción SFE total", f"{_ncl(_tot_trac, 0)} kWh", f"{_n_con} de {_n_noches_cons} noches con dato", delta_color="off")
-                _v36_tarjeta(_tt3, "Tracción SFE promedio/noche", f"{_ncl(_tot_trac / max(_n_con, 1), 0)} kWh", delta_color="off")
+                _v36_tarjeta(_tt3, "Noches con energía", f"{_n_con}", delta_color="off")
+                _noc_v40 = _cons.assign(_SFE_pos=pd.to_numeric(_cons['Tracción SFE'], errors='coerce').clip(lower=0))
+                _v40_desglose(_noc_v40, '_SFE_pos', 'kWh/noche', 'Tracción SFE promedio', fecha='_fkey')
                 if _src_lb != "2025":
                     st.warning("No hay PRMTE de **2025** cargado: la línea base usa la mediana del período cargado. Sube el PRMTE de 2025 para anclar la tracción SFE a tu año base.")
                 if _n_con < _n_noches_cons:
@@ -7532,6 +7719,7 @@ if _seccion == _SECCIONES[4]:
                 st.caption("Cada servicio por material rodante (XT-100/XT-M/SFE) y además simple/doble. La vista general (sin separar simple/doble) está en el bloque anterior.")
             with st.expander("🚉 Detención en estaciones y tiempo entre estaciones (mostrar / ocultar)", expanded=False):
                 _dw = _dwell_estaciones(df_thdr_v1, df_thdr_v2)
+                st.caption('Los promedios de detención y de viaje entre estaciones se muestran por separado en Laboral, Sábado y Domingo y festivo.')
                 st.markdown("**🛑 Tiempo detenido en cada estación**")
                 if _dw.empty: st.info("Sin datos de detención por estación.")
                 else: _render_tv_cards(_stats_dur(_dw, 'Estacion'), 'Estacion')
@@ -7602,16 +7790,22 @@ if _seccion == _SECCIONES[4]:
                  'Tren-Km neto (con cortes y acoples)': 'TrenKm_neto'}[_met_h]
         _ndias_h = int(_kmh['Fecha'].nunique())
         _tot_h = float(_kmh[_cval].sum())
-        _hh = _kmh.groupby('Hora', as_index=False)[_cval].sum()
-        _hh['Promedio diario'] = _hh[_cval] / max(_ndias_h, 1)
+        _kmh['_J40'] = pd.to_datetime(_kmh['Fecha'], errors='coerce').dt.date.map(get_tipo_dia)
+        _n_h = _kmh.groupby('_J40')['Fecha'].nunique().to_dict()
+        _hh = _kmh.groupby(['_J40', 'Hora'], as_index=False)[_cval].sum()
+        _hh['Promedio diario'] = _hh[_cval] / _hh['_J40'].map(_n_h).replace(0, np.nan)
+        _hh['Jornada'] = _hh['_J40'].map(dict(_V40_JORNADAS))
         _pico = _hh.loc[_hh['Promedio diario'].idxmax()]
         _k1h, _k2h, _k3h, _k4h = st.columns(4)
         _v36_tarjeta(_k1h, "Total del período", f"{_ncl(_tot_h, 0)} km")
-        _v36_tarjeta(_k2h, "Promedio por día", f"{_ncl(_tot_h / max(_ndias_h, 1), 0)} km", f"{_ndias_h} días", delta_color="off")
-        _v36_tarjeta(_k3h, "Hora punta", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 0)} km/día", delta_color="off")
+        _v36_tarjeta(_k2h, "Días con dato", str(_ndias_h), delta_color="off")
+        _v36_tarjeta(_k3h, f"Hora punta · {_pico['Jornada']}", f"{int(_pico['Hora']):02d}:00", f"{_ncl(float(_pico['Promedio diario']), 2)} km/día", delta_color="off")
+        _v40_desglose(_kmh, _cval, 'km/día', f'{_met_h} promedio')
         _v36_tarjeta(_k4h, "Descuento por cortes/acoples", f"{_ncl(_desc_h, 0)} km",
                     "Tren-Km bruto − neto" if _desc_h > 0 else "sin eventos en ruta", delta_color="off")
-        _fkh = px.bar(_hh, x='Hora', y='Promedio diario', color_discrete_sequence=['#005195'])
+        _fkh = px.line(_hh, x='Hora', y='Promedio diario', color='Jornada', markers=True,
+                       category_orders={'Jornada':[n for _,n in _V40_JORNADAS]},
+                       color_discrete_map={'Laboral':'#005195','Sábado':'#E85500','Domingo y festivo':'#0a7c6e'})
         _fkh.update_traces(hovertemplate='%{x}:00 — %{y:,.1f} km<extra></extra>')
         _fkh.update_layout(height=340, margin=dict(t=10, b=0, l=0, r=0),
                            yaxis_title=f"{_met_h} — promedio por día",
@@ -7692,8 +7886,9 @@ if _seccion == _SECCIONES[5]:
             _vk1, _vk2, _vk3 = st.columns(3)
             _v36_tarjeta(_vk1, "Total de viajes", f"{_ncl(_tot_vj, 0)}")
             _v36_tarjeta(_vk2, "Días con dato", f"{_dias_vj}")
-            _v36_tarjeta(_vk3, "Promedio diario", f"{_ncl(_prom_vj, 0)} viajes/día")
+            _v36_tarjeta(_vk3, "Tipos de jornada con datos", str(df_viajes['Fecha'].dt.date.map(get_tipo_dia).nunique()))
             _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
+            _v40_desglose(_vd, 'Total Viajes', 'viajes/día', 'Viajes promedio')
             _fvj = px.bar(_vd, x='Fecha', y='Total Viajes', color_discrete_sequence=['#0a7c6e'])
             _fvj.update_traces(hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
             _fvj.update_layout(height=320, margin=dict(t=10, b=0, l=0, r=0), yaxis_title='Viajes', xaxis_title='')
@@ -8899,7 +9094,8 @@ if _seccion == _SECCIONES[9]:
         _v36_tarjeta(_k1, f"{_lbl} período ({_ndias} días)", f"{_ncl(_g_tot, 2)} kWh")
         _v36_tarjeta(_k2, f"Real ({_nr} días)", f"{_ncl(_r_show, 2)} kWh")
         _v36_tarjeta(_k3, f"Proyectado ({_npy} días)", f"{_ncl(_p_show, 2)} kWh")
-        _v36_tarjeta(_k4, "Promedio diario", f"{_ncl(_g_tot / _ndias if _ndias else 0, 2)} kWh")
+        _v36_tarjeta(_k4, "Días del período", str(_ndias))
+        _v40_desglose(pd.DataFrame(_serie), 'E', 'kWh/día', 'Energía promedio')
 
         st.markdown("**Real + proyectado del período**")
         _rows = []
