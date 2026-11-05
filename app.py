@@ -6259,7 +6259,7 @@ def _v41_css():
     [data-testid="stAppViewContainer"] [data-testid="stVerticalBlockBorderWrapper"] {
       border-color:rgba(40,118,160,.28)!important;
     }
-    .st-key-v41_hero,
+    .st-key-v41_hero,.st-key-v44_pax,.st-key-v44_servicios,
     .st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right {
        background:linear-gradient(145deg,rgba(4,24,51,.94),rgba(2,15,38,.96));
        border:1px solid rgba(38,137,174,.39);
@@ -6287,6 +6287,10 @@ def _v41_css():
       color:#f2f8ff;letter-spacing:-.4px;line-height:1.13;
       font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
     .efe41-kpi-unit{color:var(--ac);font-size:12px;margin-top:4px;font-weight:620}
+    .efe44-kpi-average{margin-top:12px;padding-top:9px;border-top:1px solid rgba(65,154,192,.26)}
+    .efe44-kpi-average-title{font-size:10px;font-weight:760;letter-spacing:.5px;color:#8eb6cf;margin-bottom:6px}
+    .efe44-kpi-average-row{display:flex;justify-content:space-between;align-items:baseline;gap:7px;font-size:11px;color:#b7d6e9;line-height:1.65}
+    .efe44-kpi-average-row strong{font-size:11px;color:#f3faff;white-space:nowrap}
     .efe41-miniline{font-size:12px;color:#90aac4;margin-top:7px;line-height:1.3}
     .efe41-track{height:7px;background:#112c49;border-radius:9px;overflow:hidden;margin:7px 0 11px}
     .efe41-track span{display:block;height:100%;border-radius:9px;
@@ -6302,7 +6306,7 @@ def _v41_css():
     @media(max-width:1000px){
       .efe41-kpi{padding:13px 12px;min-height:106px}
       .efe41-kpi-number{font-size:clamp(18px,2.5vw,25px)}
-      .st-key-v41_hero,.st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right{padding:13px}
+      .st-key-v41_hero,.st-key-v44_pax,.st-key-v44_servicios,.st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right{padding:13px}
     }
     </style>""",unsafe_allow_html=True)
 
@@ -6313,17 +6317,38 @@ def _v41_suma(df,campo):
     return float(pd.to_numeric(df[campo],errors='coerce').sum(min_count=1))
 
 
-def _v41_card(titulo,valor,unidad,accent):
+def _v41_card(titulo,valor,unidad,accent,promedios=None,unidad_promedio=None):
+    """Indicador con desglose opcional dentro de la MISMA tarjeta.
+
+    No repone el selector global «Indicador promedio» de la parte superior.
+    Los promedios son diarios y se separan por jornada del calendario chileno.
+    """
     import html as _html41
     if valor is None or not np.isfinite(float(valor)):
         mostrado='—'
     else:
         mostrado=_ncl(float(valor),2)
+    desglose=''
+    if promedios is not None:
+        filas=[]
+        for jornada in ('Laboral','Sábado','Domingo y festivo'):
+            r=promedios.get(jornada,{})
+            promedio=r.get('valor',float('nan'))
+            valor_jornada=(_ncl(promedio,2) if pd.notna(promedio) and np.isfinite(promedio)
+                           else '—')
+            filas.append('<div class="efe44-kpi-average-row">'
+                         f'<span>{_html41.escape(jornada)}</span>'
+                         f'<strong>{valor_jornada}</strong></div>')
+        unidad_p=_html41.escape(unidad_promedio or unidad)
+        desglose=('<div class="efe44-kpi-average">'
+                  f'<div class="efe44-kpi-average-title">PROMEDIO POR JORNADA · {unidad_p}</div>'
+                  + ''.join(filas) + '</div>')
     st.markdown(
         f'<div class="efe41-kpi" style="--ac:{accent}">'
         f'<div class="efe41-kpi-title">{_html41.escape(titulo)}</div>'
         f'<div class="efe41-kpi-number">{mostrado}</div>'
         f'<div class="efe41-kpi-unit">{_html41.escape(unidad)}</div>'
+        f'{desglose}'
         f'</div>',unsafe_allow_html=True)
 
 
@@ -6429,12 +6454,56 @@ def _v41_render_dashboard(df):
     with kcols[2]:_v41_card('Kilometraje UMR',km,'km','#bb62ef')
     with kcols[3]:_v41_card('IDE ponderado',ide,'kWh/km','#21dbc6')
 
-    # v43 · Indicadores operacionales nuevos, en el orden solicitado:
-    # primero pasajeros (PAX), después servicios. Se usan totales del período
-    # filtrado; los promedios por jornada existentes permanecen en sus módulos.
+    # v44 · PAX primero y Servicios después, con sus promedios en cada indicador.
     opcols = st.columns(2, gap='small')
-    with opcols[0]:_v41_card('Pasajeros (PAX)',pax,'pasajeros','#10ded1')
-    with opcols[1]:_v41_card('Servicios',serv,'servicios','#bb62ef')
+    with opcols[0]:
+        _v41_card('Pasajeros (PAX)',pax,'pasajeros','#10ded1',
+                  promedios=_v40_promedios(datos,'PAX'),unidad_promedio='pax/día')
+    with opcols[1]:
+        _v41_card('Servicios',serv,'servicios','#bb62ef',
+                  promedios=_v40_promedios(datos,'Servicios'),unidad_promedio='servicios/día')
+
+    # La entrega v43 solo incluía tarjetas. Ahora ambos indicadores tienen
+    # evolución temporal interactiva, PAX primero y después Servicios.
+    for campo,titulo,unidad,color,contenedor,clave in (
+        ('PAX','Pasajeros (PAX)','pax','#10ded1','v44_pax','_v44_evolucion_pax'),
+        ('Servicios','Servicios','servicios','#bb62ef','v44_servicios','_v44_evolucion_servicios'),
+    ):
+        with st.container(key=contenedor):
+            st.markdown(f'<div class="efe41-section">Evolución de {titulo.lower()}</div>',
+                        unsafe_allow_html=True)
+            st.markdown('<div class="efe41-miniline">Haz clic en una barra para filtrar el mes o el día.</div>',
+                        unsafe_allow_html=True)
+            if datos[campo].notna().any():
+                serie=datos[['Fecha',campo]].copy()
+                if vista!='Diaria':
+                    serie['Fecha']=serie['Fecha'].dt.to_period('M').dt.to_timestamp()
+                    serie=serie.groupby('Fecha',as_index=False)[campo].sum(min_count=1)
+                fig_op=_go41.Figure(_go41.Bar(
+                    x=serie['Fecha'],y=serie[campo],name=titulo,
+                    marker=dict(color=color),
+                    hovertemplate=('%{x|%d/%m/%Y}' if vista=='Diaria'
+                                   else '%{x|%m/%Y}') +
+                                  f'<br>%{{y:,.0f}} {unidad}<extra></extra>',
+                ))
+                fig_op.update_layout(
+                    height=248,showlegend=False,hovermode='closest',
+                    paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#b7d4e9',size=11),
+                    margin=dict(l=10,r=10,t=10,b=8),
+                    xaxis=dict(title='',showgrid=False,showline=False,
+                               tickformat='%d/%m' if vista=='Diaria' else '%b'),
+                    yaxis=dict(title=unidad,gridcolor='rgba(120,170,216,.13)',
+                               zeroline=False),
+                )
+                if vista!='Diaria':
+                    # Enero..Diciembre abreviados con las primeras tres letras.
+                    fig_op.update_xaxes(dtick='M1',tickmode='array',
+                        tickvals=serie['Fecha'],
+                        ticktext=[_MES_CORTO_EJE[f.month-1] for f in serie['Fecha']])
+                _pc(fig_op,width='stretch',key=clave)
+            else:
+                st.info(f'Sin registros de {titulo.lower()} para el período seleccionado.')
 
     lower=st.columns([1,1,1],gap='small')
     with lower[0]:
@@ -8347,6 +8416,10 @@ if _seccion == _SECCIONES[4]:
 
 if _seccion == _SECCIONES[5]:
     st.write("### Flujo y Carga de Pasajeros")
+    if (isinstance(df_ops,pd.DataFrame) and not df_ops.empty and 'PAX' in df_ops
+            and pd.to_numeric(df_ops['PAX'],errors='coerce').gt(0).any()):
+        st.markdown('#### 👥 Pasajeros · promedio por jornada')
+        _v40_desglose(df_ops,'PAX','pax/día','PAX promedio')
     _vista_pax = st.radio("Vista", ["📊 Resumen", "🚆 Por servicio"], horizontal=True, key="_pax_vista", label_visibility="collapsed")
     if _vista_pax == "📊 Resumen":
         if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
@@ -8593,6 +8666,10 @@ if _seccion == _SECCIONES[5]:
                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_ps")
 
 if _seccion == _SECCIONES[6]:
+    if (isinstance(df_ops,pd.DataFrame) and not df_ops.empty and 'Servicios' in df_ops
+            and pd.to_numeric(df_ops['Servicios'],errors='coerce').gt(0).any()):
+        st.markdown('#### 🚆 Servicios · promedio por jornada')
+        _v40_desglose(df_ops,'Servicios','servicios/día','Servicios promedio')
     # ===== UMR: Servicios programados vs realizados, por día y tipo =====
     st.markdown("### 🔀 Programados vs Realizados (UMR)")
     if not all_kmserv:
