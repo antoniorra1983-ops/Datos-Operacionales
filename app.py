@@ -3882,7 +3882,9 @@ _V29_DATOS_POR_SECCION = (
     ("df_serv_tipo", "df_pax_tipo", "df_bi_tiempos", "df_incid", "df_incid_full", "df_ide_lb",
       "all_tr", "df_oit", "_oit_diag", "_errores_proc", "_seat_dups"),
       # BI v33: UMR por tren para modelo IDE 100/M-SFE, incidentes, OIT y rutas.
-    ('df_incid',),  # v41: resumen visual, sin cargar THDR completo.
+    # v50: Dashboard necesita Carga V1/V2 para PAX-km (misma fuente de Resumen),
+    # y servicios por vía; son tablas compactas del snapshot, NO THDR completo.
+    ('df_incid', 'df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes'),
 )
 
 def _v29_necesarios():
@@ -6455,6 +6457,31 @@ def _v49_filtrar_paxkm(paxkm_diario,fechas_visibles):
     tabla=tabla[tabla['PAX-km']>=0]
     return tabla.groupby('Fecha',as_index=False)['PAX-km'].sum(min_count=1).sort_values('Fecha')
 
+def _v50_paxkm_resumen(datos, paxkm_diario):
+    """Días y valor PAX-km EXACTAMENTE comparables con la pestaña Resumen.
+
+    PAX-km de cada tramo se calcula en _paxkm_por_dia(Carga V1/V2).
+    Resumen muestra pasajeros-km de días que también tienen kWh de tracción
+    positivos; usa el mismo cruce para que el KPI del Dashboard sea idéntico.
+    No se multiplica PAX total por kilómetros de la flota.
+    """
+    vacio=pd.DataFrame(columns=['Fecha','Tracción','Pax-km'])
+    if datos is None or datos.empty or 'Fecha' not in datos or 'E_Tr' not in datos:
+        return vacio
+    if paxkm_diario is None or not len(paxkm_diario):
+        return vacio
+    energia=datos[['Fecha','E_Tr']].copy()
+    energia['Fecha']=pd.to_datetime(energia['Fecha'], errors='coerce').dt.normalize()
+    energia['Tracción']=pd.to_numeric(energia['E_Tr'],errors='coerce')
+    energia=(energia.dropna(subset=['Fecha'])
+             .groupby('Fecha',as_index=False)['Tracción'].sum(min_count=1))
+    pkm=_v49_filtrar_paxkm(paxkm_diario,energia['Fecha'])
+    if pkm.empty: return vacio
+    pareados=energia.merge(pkm.rename(columns={'PAX-km':'Pax-km'}),on='Fecha',how='inner')
+    pareados=pareados[(pareados['Pax-km']>0)&(pareados['Tracción']>0)]
+    return pareados[['Fecha','Tracción','Pax-km']].sort_values('Fecha').reset_index(drop=True)
+
+
 def _v41_card(titulo,valor,unidad,accent,por_jornada=None,
               desglose_titulo='TOTAL POR TIPO DE DÍA',explicacion=None,nota=None):
     """KPI del Dashboard: total global y totales por jornada, o cociente por jornada."""
@@ -6568,20 +6595,14 @@ def _v46_indicadores_eficiencia(datos,viajes=None,paxkm_diario=None,fuente='Carg
                 num=float(validos['Pasajeros'].sum()); den=float(validos[denominador].sum())
                 resultado[nombre]={'valor':num/den,'dias':len(validos),'num':num,'den':den}
     if paxkm_diario is not None and len(paxkm_diario):
-        pkm=(paxkm_diario.rename('Pax-km').rename_axis('Fecha').reset_index())
-        pkm['Fecha']=pd.to_datetime(pkm['Fecha'],errors='coerce').dt.normalize()
-        pkm['Pax-km']=pd.to_numeric(pkm['Pax-km'],errors='coerce')
-        pareados=energia.merge(pkm,on='Fecha',how='inner')
-        # El total de pasajeros-km no depende de tener energía medida ese día.
-        # Solo para el cociente pax-km/kWh se exigen días con tracción válida.
-        pkm_validos=pareados[pareados['Pax-km']>0]
-        if not pkm_validos.empty:
-            total_pkm=float(pkm_validos['Pax-km'].sum())
-            resultado['Pax-km total']={'valor':total_pkm,'dias':len(pkm_validos),
-                                       'num':total_pkm,'den':float('nan')}
-        validos=pareados[(pareados['Pax-km']>0) & (pareados['E_Tr']>0)]
+        pkm_total=_v49_filtrar_paxkm(paxkm_diario,datos['Fecha'])
+        if not pkm_total.empty:
+            total=float(pkm_total['PAX-km'].sum())
+            resultado['Pax-km total']={'valor':total,'dias':len(pkm_total),
+                                       'num':total,'den':float('nan')}
+        validos=_v50_paxkm_resumen(datos,paxkm_diario)
         if not validos.empty:
-            num=float(validos['Pax-km'].sum());den=float(validos['E_Tr'].sum())
+            num=float(validos['Pax-km'].sum());den=float(validos['Tracción'].sum())
             resultado['Pax-km/kWh']={'valor':num/den,'dias':len(validos),'num':num,'den':den}
     return resultado
 
@@ -6640,18 +6661,56 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         txt(sl,x+.15,y+.60,w-.26,.60,fmt(value),25,white,True)
         if unit:txt(sl,x+.15,y+h-.39,w-.26,.25,unit,11,accent or teal)
     def periodos(tabla,campos):
-        if tabla is None or tabla.empty:return [],[[] for _ in campos],False
+        """Categorías breves y espaciadas; datos íntegros aun con etiquetas omitidas."""
+        if tabla is None or tabla.empty:return [],[[] for _ in campos],False,''
         t=tabla[['Fecha']+campos].copy()
         t['Fecha']=pd.to_datetime(t['Fecha'],errors='coerce').dt.normalize()
         t=t.dropna(subset=['Fecha']).sort_values('Fecha')
         mensual=(vista!='Diaria' or t['Fecha'].nunique()>35)
         if mensual:t['Fecha']=t['Fecha'].dt.to_period('M').dt.to_timestamp()
         t=t.groupby('Fecha',as_index=False)[campos].sum(min_count=1)
-        if len(t)>30: t=t.tail(30)
-        labels=[f.strftime('%m/%Y') if mensual else f.strftime('%d/%m') for f in t['Fecha']]
-        return labels,[[float(v) if pd.notna(v) else 0. for v in t[c]] for c in campos],mensual
-    def chart(sl,df,campos,etiquetas,x,y,w,h,tipo='bar',colors=None):
-        cats,series,agregado=periodos(df,campos)
+        # Evita 24+ meses ilegibles en el mismo eje sin alterar los KPI totales.
+        nota=''
+        if len(t)>24:
+            t=t.tail(24)
+            nota='Gráfico: últimos 24 períodos; los KPI incluyen todo el intervalo seleccionado.'
+        if vista=='Diaria' and mensual:
+            nota='Vista de muchas fechas: agregado mensual para hacer legible el eje X. '
+        dos_anos=t['Fecha'].dt.year.nunique()>1
+        abre=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+        labels=([abre[f.month-1]+(' '+str(f.year)[-2:] if dos_anos else '') for f in t['Fecha']]
+                if mensual else [f.strftime('%d/%m') for f in t['Fecha']])
+        # Conserva todas las barras y líneas; solo reduce etiquetas X cuando se enciman.
+        from math import ceil as _ceil49
+        paso=max(1,_ceil49(len(labels)/12))
+        if paso>1:
+            visibles=set(range(0,len(labels),paso))
+            # Incluye la última fecha, pero evita que choque con la penúltima.
+            ultimo=len(labels)-1
+            if ultimo not in visibles:
+                anterior=max(visibles)
+                if ultimo-anterior<paso:
+                    visibles.remove(anterior)
+                visibles.add(ultimo)
+            labels=[etq if i in visibles else ' ' for i,etq in enumerate(labels)]
+        return labels,[[float(v) if pd.notna(v) else 0. for v in t[c]] for c in campos],mensual,nota
+
+    def _fondo_grafico(ch):
+        """Fondo oscuro nativo del gráfico, también editable en PowerPoint."""
+        from pptx.oxml.xmlchemy import OxmlElement as _Ox49
+        for nodo in (ch.element,ch.element.xpath('.//c:plotArea')[0]):
+            for anterior in nodo.xpath('./c:spPr'):
+                nodo.remove(anterior)
+            sppr=_Ox49('c:spPr')
+            sol=_Ox49('a:solidFill')
+            col=_Ox49('a:srgbClr');col.set('val','0D2647')
+            sol.append(col);sppr.append(sol)
+            ln=_Ox49('a:ln');ln.set('w','0')
+            sin=_Ox49('a:noFill');ln.append(sin);sppr.append(ln)
+            nodo.append(sppr)
+
+    def chart(sl,df,campos,etiquetas,x,y,w,h,tipo='bar',colors=None,unidad_y='',titulo_x=None):
+        cats,series,agregado,nota=periodos(df,campos)
         if not cats:
             txt(sl,x,y,w,.7,'No hay datos comparables para este gráfico.',15,muted)
             return
@@ -6659,19 +6718,49 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         for name,values in zip(etiquetas,series):data.add_series(name,values)
         ct=(_ChartType49.LINE_MARKERS if tipo=='line' else _ChartType49.COLUMN_CLUSTERED)
         ch=sl.shapes.add_chart(ct,_In49(x),_In49(y),_In49(w),_In49(h),data).chart
+        ch.chart_style=10
+        _fondo_grafico(ch)
+        # Algunos visores (LibreOffice) generan un título negro automático
+        # cuando el gráfico tiene una sola serie. Un título vacío explícito
+        # evita que tape el eje o contraste mal sobre el fondo nocturno.
+        if len(etiquetas)==1:
+            ch.has_title=True
+            ch.chart_title.text_frame.text=' '
         ch.has_legend=len(etiquetas)>1
         if ch.has_legend:
             ch.legend.position=_Leg49.BOTTOM;ch.legend.include_in_layout=False
-            ch.legend.font.size=_Pt49(11)
-        ch.chart_style=10
+            ch.legend.font.name='Aptos';ch.legend.font.size=_Pt49(11)
+            ch.legend.font.color.rgb=white
         if colors:
             for serie,color in zip(ch.series,colors):
                 try:
                     serie.format.fill.solid();serie.format.fill.fore_color.rgb=color
                     serie.format.line.color.rgb=color
+                    serie.format.line.width=_Pt49(2.1)
                 except (AttributeError,ValueError):pass
-        if agregado and vista=='Diaria':
-            txt(sl,x,y+h+.02,w,.22,'Para legibilidad, el gráfico agrupa por mes.',10,muted)
+        # Ejes y unidades explícitos, con contraste y números grandes sin notación científica.
+        xa=ch.category_axis;ya=ch.value_axis
+        xa.visible=True;ya.visible=True
+        xa.tick_labels.font.name='Aptos';xa.tick_labels.font.size=_Pt49(11)
+        xa.tick_labels.font.color.rgb=white
+        ya.tick_labels.font.name='Aptos';ya.tick_labels.font.size=_Pt49(11)
+        ya.tick_labels.font.color.rgb=white
+        ya.tick_labels.number_format='#,##0'
+        ya.tick_labels.number_format_is_linked=False
+        ya.minimum_scale=0
+        ya.has_major_gridlines=True
+        ya.major_gridlines.format.line.color.rgb=_RGB49(48,81,112)
+        ya.major_gridlines.format.line.width=_Pt49(.6)
+        xa.has_title=True
+        xa.axis_title.text_frame.text=titulo_x or ('Mes / año' if agregado else 'Fecha (día/mes)')
+        ya.has_title=True
+        ya.axis_title.text_frame.text=unidad_y or (etiquetas[0] if len(etiquetas)==1 else 'Total')
+        for ax in (xa,ya):
+            for para in ax.axis_title.text_frame.paragraphs:
+                para.font.name='Aptos';para.font.size=_Pt49(11)
+                para.font.color.rgb=white;para.font.bold=True
+        if nota:
+            txt(sl,x+.05,y+h+.04,w-.1,.32,nota,10,muted)
     def block(sl,x,y,head,body,w=5.8):
         txt(sl,x,y,w,.36,head,16,teal,True)
         txt(sl,x,y+.43,w,1.2,body,13,white)
@@ -6707,7 +6796,7 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
     for x,y,label,value,unit,col in (
         (.7,1.75,'Servicios',_v41_suma(datos,'Servicios'),'servicios',violet),
         (4.85,1.75,'Pasajeros',_v41_suma(datos,'PAX'),'PAX',teal),
-        (9.0,1.75,'PAX-km transportados',pkm,'pax-km',orange),
+        (9.0,1.75,'PAX-km · Resumen',pkm,'pax-km',orange),
         (.7,4.0,'Odómetro UMR',odo,'km',violet),
         (4.85,4.0,'Energía total',total_e,'kWh',teal),
         (9.0,4.0,'IDE',ide,'kWh/km',orange),
@@ -6719,34 +6808,34 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         for k in ('Vía 1','Vía 2','Otros'):
             if k not in v:v[k]=0
         chart(sl,v,['Vía 1','Vía 2','Otros'],['Vía 1','Vía 2','Otros'],.7,1.6,11.9,4.3,
-              colors=[_RGB49(58,151,242),orange,muted])
+              colors=[_RGB49(58,151,242),orange,muted],unidad_y='Servicios')
         txt(sl,.8,6.0,11.5,.55,'Totales por vía: '+', '.join(
             f'{q}: {fmt(servicios_via.loc[servicios_via["Vía"].eq(q),"Servicios"].sum(),0)}'
             for q in ('Vía 1','Vía 2','Otros')),12,white)
     else:
-        chart(sl,datos,['Servicios'],['Servicios totales'],.7,1.6,11.9,4.5)
+        chart(sl,datos,['Servicios'],['Servicios totales'],.7,1.6,11.9,4.5,unidad_y='Servicios')
         txt(sl,.8,6.2,11.5,.35,'Sin desglose por vía disponible para las fechas filtradas.',12,muted)
     # 3. PAX-km y pasajeros.
-    sl=base('Pasajeros y PAX-km','Transporte realizado: pasajeros × distancia de cada tramo')
+    sl=base('Pasajeros y PAX-km','Mismos PAX-km comparables que Resumen: Carga V1/V2 y tracción > 0')
     tile(sl,.7,1.6,3.8,1.7,'Pasajeros',_v41_suma(datos,'PAX'),'PAX',teal)
-    tile(sl,4.75,1.6,3.8,1.7,'PAX-km transportados',pkm,'pax-km',orange)
+    tile(sl,4.75,1.6,3.8,1.7,'PAX-km · Resumen',pkm,'pax-km',orange)
     block(sl,8.85,1.64,'Fórmula PAX-km',
           'Σ (pasajeros a bordo por tramo × km recorridos en ese tramo). '
-          'Se suman los viajes de Carga V1 y V2.',3.55)
-    chart(sl,paxkm_tabla,['PAX-km'],['PAX-km'],.7,3.55,11.85,2.6,colors=[orange])
+          'Se suman los viajes de Carga V1 y V2. Se usan los días con tracción > 0.',3.55)
+    chart(sl,paxkm_tabla,['PAX-km'],['PAX-km'],.7,3.30,11.85,3.05,colors=[orange],unidad_y='PAX-km')
     # 4. UMR.
     sl=base('Kilometraje · Odómetro y Tren-Km','Comparación UMR en kilómetros')
     tile(sl,.7,1.55,3.6,1.5,'Odómetro UMR',odo,'km',violet)
     tile(sl,4.65,1.55,3.6,1.5,'Tren-Km',trenk,'km',teal)
     tile(sl,8.6,1.55,3.6,1.5,'UMR global',100*trenk/odo if np.isfinite(odo) and odo>0 else np.nan,'%',orange)
     chart(sl,km,['Odómetro [km]','Tren-Km [km]'],['Odómetro','Tren-Km'],.75,3.35,11.8,2.85,
-          colors=[violet,teal])
+          colors=[violet,teal],unidad_y='Kilómetros (km)')
     # 5. Energía.
     sl=base('Consumo energético','Energía total y energía de tracción')
     tile(sl,1.0,1.55,5.2,1.5,'Energía total',total_e,'kWh',teal)
     tile(sl,7.1,1.55,5.2,1.5,'Tracción',total_tr,'kWh',violet)
     chart(sl,datos,['E_Total','E_Tr'],['Energía total','Tracción'],.7,3.25,11.85,3.05,'line',
-          colors=[teal,violet])
+          colors=[teal,violet],unidad_y='Energía (kWh)')
     # 6. Eficiencia.
     sl=base('Desempeño energético','Cocientes ponderados calculados solo con días comparables')
     for x,y,label,value,unit,col in (
@@ -6807,12 +6896,15 @@ def _v41_render_dashboard(df):
     # El desglose toma los servicios THDR por sentido; el total viene de df_ops.
     servicios_via=_v48_servicios_via(df_serv_tipo,datos['Fecha'])
 
-    # v49 · PAX-km es transporte real: Σ (pasajeros por tramo × km de ese tramo).
-    # Se calcula desde Carga V1/V2, sin exigir energía para mostrar su TOTAL.
-    # Filtra por las mismas fechas visibles y NO multiplica el total PAX por km UMR.
+    # v50: ambas pantallas usan Carga V1/V2, la fórmula por tramo y EL MISMO
+    # cruce de fechas con tracción positiva que presenta Resumen.
     _paxkm_diario49=_v46_paxkm_diario()
-    _paxkm_tabla49=_v49_filtrar_paxkm(_paxkm_diario49,datos['Fecha'])
+    _paxkm_carga50=_v49_filtrar_paxkm(_paxkm_diario49,datos['Fecha'])
+    _paxkm_comparables50=_v50_paxkm_resumen(datos,_paxkm_diario49)
+    _paxkm_tabla49=(_paxkm_comparables50[['Fecha','Pax-km']]
+                   .rename(columns={'Pax-km':'PAX-km'}))
     _total_paxkm49=_v41_suma(_paxkm_tabla49,'PAX-km')
+    _total_carga50=_v41_suma(_paxkm_carga50,'PAX-km')
     _paxkm_jornada49=_v48_totales_jornada(_paxkm_tabla49,'PAX-km')
 
     # 2. Pasajeros se presenta después de Servicios, igual que en Resumen.
@@ -6831,14 +6923,20 @@ def _v41_render_dashboard(df):
                               por_jornada=_v48_totales_jornada(datos,'PAX'),
                               explicacion='Pasajeros registrados en el período filtrado.')
                 with _pax_cards49[1]:
-                    _v41_card('PAX-km transportados',_total_paxkm49,'pax-km','#f3b961',
+                    _v41_card('PAX-km transportados · Resumen',_total_paxkm49,'pax-km','#f3b961',
                               por_jornada=_paxkm_jornada49,
-                              explicacion='Σ (pasajeros a bordo en cada tramo × kilómetros de ese tramo); '
-                                          'se suman ambos sentidos, Vía 1 y Vía 2.',
-                              nota='Dato de Carga V1/V2, independiente de disponer de kWh de tracción.')
+                              explicacion='Σ (pasajeros a bordo por tramo × km de ese tramo), Vía 1 + Vía 2. '
+                                          'Igual que Resumen: solo días con energía de tracción positiva.',
+                              nota=f'{len(_paxkm_tabla49)} día(s) comparables. '
+                                   'Sin multiplicar pasajeros totales por odómetro UMR.')
+                if np.isfinite(_total_carga50) and (not np.isfinite(_total_paxkm49)
+                       or abs(_total_carga50-_total_paxkm49)>0.01):
+                    st.caption('PAX-km de todas las fechas con Carga V1/V2, incluso sin tracción: '
+                               f'{_ncl(_total_carga50,2)} pax-km. '
+                               'La tarjeta muestra únicamente los días comparables de Resumen.')
                 if _paxkm_tabla49.empty:
-                    st.warning('Sin PAX-km de Carga V1/V2 para las fechas seleccionadas. '
-                               'Revisa que estén disponibles los archivos de carga con estaciones y ocupación.')
+                    st.warning('No hay días con PAX-km y kWh de tracción positivos a la vez para el filtro actual. '
+                               'Comprueba Carga V1/V2 y energía; no se asignan ceros ficticios.')
             else:
                 _v41_card('Servicios · total',valor,unidad,color,
                           por_jornada=_v48_totales_jornada(datos,campo))
@@ -6944,8 +7042,9 @@ def _v41_render_dashboard(df):
                         ticktext=[_MES_CORTO_EJE[f.month-1]+(f' {f.year}' if _anos_pk49>1 else '')
                                   for f in _serie_pk49['Fecha']])
                 _pc(_fig_pk49,width='stretch',key='_v49_evolucion_paxkm')
-                st.caption('PAX-km: suma de pasajeros × distancia de cada tramo. '
-                           'El gráfico acepta clic para filtrar mes o día.')
+                st.caption('PAX-km: Σ (pasajeros a bordo × km por tramo), calculado en Carga V1/V2. '
+                           'Solo días con tracción positiva, igual que Resumen. '
+                           'Selecciona una barra para filtrar mes o día.')
 
     # 3. Kilometraje: odómetro físico, Tren-Km comercial y UMR ponderado.
     with st.container(key='v48_kilometraje'):
@@ -7219,7 +7318,8 @@ def _v41_render_dashboard(df):
         tabla=datos[['Fecha','Tipo de jornada','Servicios','PAX',
                      'Odómetro [km]','Tren-Km [km]','UMR (%)',
                      'E_Total','E_Tr','IDE (kWh/km)']].copy()
-        tabla=tabla.merge(_paxkm_tabla49,on='Fecha',how='left')
+        tabla=tabla.merge(_paxkm_tabla49.rename(columns={'PAX-km':'PAX-km (Resumen)'}),on='Fecha',how='left')
+        tabla=tabla.merge(_paxkm_carga50.rename(columns={'PAX-km':'PAX-km (toda Carga)'}),on='Fecha',how='left')
         st.dataframe(tabla,hide_index=True,width='stretch')
         st.download_button('⬇️ Exportar CSV',
             data=tabla.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
@@ -7578,15 +7678,9 @@ if _seccion == _SECCIONES[0]:
 
                 # --- 9. Pasajeros-km por kWh de tracción. Pax-km de la Carga de pasajeros: pasajeros a bordo de cada tramo × km del tramo ---
                 st.markdown("**Pasajeros-km por kWh de tracción (Pax-km/kWh)**")
-                # v47 · Compartir el mismo cálculo pasajero × km por tramo con Dashboard.
-                # El filtro del Resumen se aplica al cruzar por fecha con la energía.
+                # v50: usar el mismo cálculo y filtro de días comparables que Dashboard.
                 _pk_r = _v46_paxkm_diario()
-                _en_tr = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(), E_Tr=pd.to_numeric(df_resumen['E_Tr'], errors='coerce'))
-                          .groupby('Fecha', as_index=False)['E_Tr'].sum().rename(columns={'E_Tr': 'Tracción'}))
-                _de_pk = _en_tr.merge(_pk_r.rename('Pax-km').rename_axis('Fecha').reset_index(), on='Fecha', how='inner') if len(_pk_r) else pd.DataFrame()
-                if not _de_pk.empty:
-                    # Solo días con pasajeros-km Y energía de tracción (si falta uno de los dos, el cociente queda distorsionado)
-                    _de_pk = _de_pk[(_de_pk['Pax-km'] > 0) & (_de_pk['Tracción'] > 0)].sort_values('Fecha')
+                _de_pk = _v50_paxkm_resumen(df_resumen, _pk_r)
                 if not len(_pk_r):
                     st.info("Sin pasajeros-km: carga **Carga de pasajeros** (V1 y V2) en la barra lateral.")
                 elif _de_pk.empty:
