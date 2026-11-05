@@ -3431,7 +3431,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 _SECCIONES = [ "📑 Trenes", "⚡ Energía",
-              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "🌌 Dashboard"]
+              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "📉 Regresión lineal", "🌌 Dashboard"]
 
 # ===== OPTIMIZACIÓN INTEGRADA: GESTIÓN DE ARCHIVOS =====
 # El gestor sigue dentro del sidebar; las búsquedas y filtros no vuelven
@@ -3883,6 +3883,10 @@ _V29_DATOS_POR_SECCION = (
       # BI v33: UMR por tren para modelo IDE 100/M-SFE, incidentes, OIT y rutas.
     # v50: Dashboard necesita Carga V1/V2 para PAX-km (misma fuente de Resumen),
     # y servicios por vía; son tablas compactas del snapshot, NO THDR completo.
+    # Regresión: métricas diarias de todas las fuentes operacionales procesadas.
+    ('df_carga_v1','df_carga_v2','df_viajes','df_serv_tipo','df_pax_tipo',
+     'df_incid','df_incid_full','df_oit','df_ide_lb','df_bi_tiempos',
+     'all_tr','all_kmserv'),
     ('df_incid', 'df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes'),
 )
 
@@ -12021,3 +12025,516 @@ if _seccion == _SECCIONES[12]:
                     st.download_button("⬇️ Descargar en Excel (puente, causas y datos diarios)", data=_buf_rca.getvalue(),
                                        file_name=f"causa_raiz_consumo_{_anio_r}_{_jor.split()[0].lower()}.xlsx",
                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_rca")
+
+
+# ===== v52 · Laboratorio de regresión lineal multivariable =====
+# Un análisis distinto de las regresiones fijas de LB y Causa raíz.
+# Usa únicamente las fuentes procesadas por la aplicación, cruzadas por fecha.
+
+def _v52_dia_unico(df, cols, prefijo='', agregacion='sum', fecha='Fecha'):
+    """Agrupación segura 1:1 por día; no multiplica energía al cruzar fuentes."""
+    if not isinstance(df, pd.DataFrame) or df.empty or fecha not in df.columns:
+        return pd.DataFrame(columns=['Fecha'])
+    cols=[c for c in cols if c in df.columns]
+    if not cols:
+        return pd.DataFrame(columns=['Fecha'])
+    t=df[[fecha]+cols].copy().rename(columns={fecha:'Fecha'})
+    t['Fecha']=pd.to_datetime(t['Fecha'],errors='coerce').dt.normalize()
+    t=t.dropna(subset=['Fecha'])
+    for c in cols:
+        t[c]=pd.to_numeric(t[c], errors='coerce').replace([np.inf,-np.inf],np.nan)
+    if t.empty:
+        return pd.DataFrame(columns=['Fecha'])
+    if agregacion=='mean':
+        t=t.groupby('Fecha',as_index=False)[cols].mean()
+    elif agregacion=='last':
+        t=t.sort_values('Fecha').drop_duplicates('Fecha',keep='last')
+    else:
+        t=t.groupby('Fecha',as_index=False)[cols].sum(min_count=1)
+    return t.rename(columns={c:f'{prefijo}{c}' for c in cols})
+
+
+def _v52_matriz_diaria(ops, fuentes, regs):
+    """Matriz diaria de indicadores del repositorio; NaN = no registrado."""
+    if not isinstance(ops,pd.DataFrame) or ops.empty or 'Fecha' not in ops:
+        return pd.DataFrame(),{}
+    columnas=[
+        'E_Total','E_Tr','E_12','E_Fact','E_Prmte','E_Seat_T','E_Seat_Tr',
+        'E_Seat_12','Odómetro [km]','Tren-Km [km]','PAX','Servicios']
+    base=_v52_dia_unico(ops,columnas)
+    if base.empty:return base,{}
+    def _ratio(n,d):
+        a=pd.to_numeric(base.get(n,pd.Series(np.nan,index=base.index)),errors='coerce')
+        b=pd.to_numeric(base.get(d,pd.Series(np.nan,index=base.index)),errors='coerce')
+        return (a/b.where(b.gt(0))).replace([np.inf,-np.inf],np.nan)
+    base['IDE · tracción (kWh/km)']=_ratio('E_Tr','Odómetro [km]')
+    base['UMR · tren-km/odómetro (%)']=100*_ratio('Tren-Km [km]','Odómetro [km]')
+    base['Tracción sobre total (%)']=100*_ratio('E_Tr','E_Total')
+    fuentes_disp={c:'Operación / Energía UMR, Factura > PRMTE > SEAT' for c in base.columns if c!='Fecha'}
+    def _join(t, fuente):
+        nonlocal base
+        if not isinstance(t,pd.DataFrame) or t.empty or 'Fecha' not in t:return
+        cs=[c for c in t.columns if c!='Fecha' and c not in base.columns]
+        if not cs:return
+        if t['Fecha'].duplicated().any():
+            raise ValueError('Se intentó cruzar una fuente sin agrupar por fecha')
+        base=base.merge(t[['Fecha']+cs],on='Fecha',how='left',validate='one_to_one')
+        fuentes_disp.update({c:fuente for c in cs})
+    # PAX-km por tramos y sentido, exactamente con el motor usado en Dashboard/LB.
+    pks=[]
+    for k,et in [('df_carga_v1','Vía 1'),('df_carga_v2','Vía 2')]:
+        d=fuentes.get(k,pd.DataFrame())
+        if isinstance(d,pd.DataFrame) and not d.empty:
+            s=_paxkm_por_dia(d)
+            if not s.empty:
+                s.index=pd.to_datetime(s.index).normalize()
+                pks.append(s)
+                _join(s.rename(f'PAX-km · {et}').rename_axis('Fecha').reset_index(),f'Carga pasajeros {et}')
+    if pks:
+        tot=pks[0]
+        for s in pks[1:]:tot=tot.add(s,fill_value=0)
+        _join(tot.rename('PAX-km').rename_axis('Fecha').reset_index(),'Carga V1/V2 por ocupación de tramo')
+    _join(_v52_dia_unico(fuentes.get('df_viajes'),['Total Viajes'],prefijo='Viajes contrato · '),'Viajes por contrato')
+    # Tipo de servicio (suma por día y categoría, no promedio de las filas).
+    for k,cols,prefix,nombre in (
+        ('df_serv_tipo',['Servicios','TrenKm'],'Servicios/Tren-km · ','THDR rutas'),
+        ('df_pax_tipo',['PAX'],'PAX por servicio · ','Carga / rutas')):
+        d=fuentes.get(k,pd.DataFrame())
+        if not isinstance(d,pd.DataFrame) or d.empty or not {'Fecha','Tipo_Servicio'}.issubset(d.columns):continue
+        dd=d.copy();dd['Fecha']=pd.to_datetime(dd['Fecha'],errors='coerce').dt.normalize()
+        dd=dd.dropna(subset=['Fecha','Tipo_Servicio'])
+        for c in cols:
+            if c not in dd:continue
+            dd[c]=pd.to_numeric(dd[c],errors='coerce')
+            pv=dd.pivot_table(index='Fecha',columns='Tipo_Servicio',values=c,aggfunc='sum',observed=True)
+            pv=pv.rename(columns={z:f'{prefix}{c} · {str(z)[:55]}' for z in pv.columns})
+            _join(pv.rename_axis('Fecha').reset_index(),nombre)
+    inci=fuentes.get('df_incid',pd.DataFrame())
+    if isinstance(inci,pd.DataFrame) and not inci.empty and 'Fecha' in inci:
+        _join(_v52_dia_unico(inci.assign(**{'Incidentes acople/desacople':1}),['Incidentes acople/desacople']),'Incidentes PCC')
+        if 'Tipo' in inci:
+            for tipo in ('Acople','Desacople'):
+                x=inci[inci['Tipo'].astype(str).str.casefold().str.strip()==tipo.casefold()]
+                if not x.empty:
+                    _join(_v52_dia_unico(x.assign(**{f'Incidentes · {tipo}':1}),[f'Incidentes · {tipo}']),'Incidentes PCC')
+    inc_full=fuentes.get('df_incid_full',pd.DataFrame())
+    if isinstance(inc_full,pd.DataFrame) and not inc_full.empty and 'Fecha' in inc_full:
+        _join(_v52_dia_unico(inc_full.assign(**{'Eventos PCC':1}),['Eventos PCC']),'Incidentes PCC completos')
+        if 'Tiempo impacto (min)' in inc_full:
+            _join(_v52_dia_unico(inc_full,['Tiempo impacto (min)'],prefijo='PCC · '),'Incidentes PCC completos')
+        if 'Afecta operación' in inc_full:
+            fx=inc_full[['Fecha','Afecta operación']].copy()
+            fx['Afecta operación']=fx['Afecta operación'].fillna(False).astype(bool).astype(int)
+            _join(_v52_dia_unico(fx,['Afecta operación'],prefijo='PCC · '),'Incidentes PCC completos')
+    _oit=fuentes.get('df_oit',pd.DataFrame())
+    if isinstance(_oit,pd.DataFrame) and not _oit.empty and 'Fecha' in _oit:
+        _join(_v52_dia_unico(_oit.assign(**{'OIT · órdenes madrugada':1}),['OIT · órdenes madrugada']),'Órdenes OIT')
+    _join(_v52_dia_unico(fuentes.get('df_ide_lb'),['Intercepcion','IDE_LB_100M','IDE_LB_SFE'],prefijo='Coef. LB · ',agregacion='last'),'Coeficientes del modelo IDE LB')
+    # Kilómetros SFE: misma validación comercial y de pruebas que el BI IDE.
+    if regs is not None and len(regs)>0:
+        sk=_bi_ide_km_sfe(regs)
+        if isinstance(sk,pd.DataFrame) and not sk.empty:
+            _join(_v52_dia_unico(sk,['Odom_SFE','Odom_SFE_pruebas','Registros UMR km',
+                'Registros SFE km','Registros SFE pruebas km']),'UMR por tren · SFE')
+        # Solo calcular LB cuando hay datos verificables de energía, UMR y coeficientes.
+        lb=fuentes.get('df_ide_lb',pd.DataFrame())
+        if isinstance(lb,pd.DataFrame) and not lb.empty:
+            op=base[['Fecha','Odómetro [km]','E_Tr','IDE · tracción (kWh/km)']].rename(columns={
+                 'IDE · tracción (kWh/km)':'IDE (kWh/km)'})
+            calc=_bi_lb_diaria_desde_umr(op,lb,regs)
+            if isinstance(calc,pd.DataFrame) and not calc.empty:
+                val=calc[calc['Línea base calculable']]
+                _join(_v52_dia_unico(val,['E_LB','Exceso LB (kWh)','Sobreconsumo LB %'],
+                    prefijo='LB ajustada · ',agregacion='last'),'LB de tracción ajustada por SFE, calculable solamente')
+    kmreg=fuentes.get('all_kmserv',[])
+    if kmreg is not None and len(kmreg)>0:
+        kr=pd.DataFrame(kmreg)
+        _join(_v52_dia_unico(kr,['KmTrenR','KmsxTrenes'],prefijo='UMR servicios · '),'UMR / servicios')
+    tv=fuentes.get('df_bi_tiempos',pd.DataFrame())
+    if isinstance(tv,pd.DataFrame) and not tv.empty and 'Fecha' in tv:
+        _join(_v52_dia_unico(tv.assign(**{'Comparaciones THDR':1}),['Comparaciones THDR']),'Tiempos THDR validados')
+    base=base.sort_values('Fecha').reset_index(drop=True)
+    dt=base['Fecha'].dt
+    base['Calendario · año']=dt.year.astype(float)
+    base['Calendario · mes']=dt.month.astype(float)
+    base['Calendario · día semana (0=lun)']=dt.dayofweek.astype(float)
+    cod=dt.date.map(get_tipo_dia)
+    base['Jornada · sábado (0/1)']=cod.eq('S').astype(float)
+    base['Jornada · domingo/festivo (0/1)']=cod.eq('D/F').astype(float)
+    base['Tipo de jornada']=cod.map({'L':'Laboral','S':'Sábado','D/F':'Domingo y festivo'})
+    for c in base.columns:
+        if c.startswith('Calendario · ') or c.startswith('Jornada · '):fuentes_disp[c]='Calendario de Chile'
+    if {'PAX-km','E_Tr'}.issubset(base):
+        base['Eficiencia · PAX-km/kWh']=base['PAX-km']/base['E_Tr'].where(base['E_Tr']>0)
+        fuentes_disp['Eficiencia · PAX-km/kWh']='PAX-km / kWh de tracción, días coincidentes'
+    base=base.replace([np.inf,-np.inf],np.nan)
+    # Variables de los tipos/formatos de origen sin observaciones se omiten.
+    vacias=[c for c in fuentes_disp if c not in base or base[c].notna().sum()==0]
+    base=base.drop(columns=[c for c in vacias if c in base],errors='ignore')
+    for c in vacias:fuentes_disp.pop(c,None)
+    return base,fuentes_disp
+
+
+def _v52_mensual(diaria):
+    """Suma magnitudes extensivas; promedio solo de coeficientes/calendario.
+
+    Los ratios e IDE se vuelven a calcular como cocientes de sumas para no
+    promediar porcentajes diarios desigualmente ponderados.
+    """
+    if diaria.empty:return diaria.copy()
+    d=diaria.copy()
+    d['Fecha']=d['Fecha'].dt.to_period('M').dt.to_timestamp()
+    ex={'Fecha','Tipo de jornada'}
+    columnas=[c for c in d.columns if c not in ex and pd.api.types.is_numeric_dtype(d[c])]
+    _derivados=[c for c in columnas if c.startswith(('IDE ·','UMR ·','Tracción sobre',
+                 'Eficiencia ·','LB ajustada · Sobreconsumo LB %'))]
+    _promedios=[c for c in columnas if c.startswith(('Coef. LB ·','Calendario ·','Jornada · '))]
+    _sum=[c for c in columnas if c not in _derivados+_promedios]
+    g=d.groupby('Fecha',as_index=False)
+    suma=g[_sum].sum(min_count=1) if _sum else d[['Fecha']].drop_duplicates().sort_values('Fecha')
+    if _promedios:
+        med=g[_promedios].mean()
+        suma=suma.merge(med,on='Fecha',how='left',validate='one_to_one')
+    def rat(n,den,scale=1):
+        if n in suma and den in suma:
+            return scale*suma[n]/suma[den].where(suma[den].gt(0))
+        return pd.Series(np.nan,index=suma.index)
+    if 'IDE · tracción (kWh/km)' in _derivados:suma['IDE · tracción (kWh/km)']=rat('E_Tr','Odómetro [km]')
+    if 'UMR · tren-km/odómetro (%)' in _derivados:suma['UMR · tren-km/odómetro (%)']=rat('Tren-Km [km]','Odómetro [km]',100)
+    if 'Tracción sobre total (%)' in _derivados:suma['Tracción sobre total (%)']=rat('E_Tr','E_Total',100)
+    if 'Eficiencia · PAX-km/kWh' in _derivados:suma['Eficiencia · PAX-km/kWh']=rat('PAX-km','E_Tr')
+    if 'LB ajustada · Sobreconsumo LB %' in _derivados:
+        suma['LB ajustada · Sobreconsumo LB %']=rat('LB ajustada · Exceso LB (kWh)','LB ajustada · E_LB',100)
+    suma['Días disponibles']=d.groupby('Fecha').size().to_numpy()
+    # No comparar promedios de tipo de día con cifras mensuales de jornada:
+    # los dummies se convierten en proporción de días en el mes filtrado.
+    suma['Tipo de jornada']='Mes (días filtrados)'
+    return suma.sort_values('Fecha').reset_index(drop=True)
+
+
+def _v52_beta_cf(a,b,x):
+    """Fracción continua de la beta incompleta (algoritmo estable)."""
+    import math
+    fp=1e-290; az=1.0; qab=a+b; qap=a+1; qam=a-1
+    c=1.0; d=1.0-qab*x/qap
+    if abs(d)<fp:d=fp
+    d=1.0/d; h=d
+    for m in range(1,241):
+        m2=2*m
+        aa=m*(b-m)*x/((qam+m2)*(a+m2))
+        d=1.0+aa*d;d=d if abs(d)>fp else fp
+        c=1.0+aa/c;c=c if abs(c)>fp else fp
+        d=1.0/d;h*=d*c
+        aa=-(a+m)*(qab+m)*x/((a+m2)*(qap+m2))
+        d=1.0+aa*d;d=d if abs(d)>fp else fp
+        c=1.0+aa/c;c=c if abs(c)>fp else fp
+        d=1.0/d;delta=d*c;h*=delta
+        if abs(delta-1)<2e-12:break
+    return h
+
+
+def _v52_beta_regularizada(x,a,b):
+    import math
+    if not (0<=x<=1) or a<=0 or b<=0:return np.nan
+    if x==0:return 0.0
+    if x==1:return 1.0
+    term=math.exp(math.lgamma(a+b)-math.lgamma(a)-math.lgamma(b)+a*math.log(x)+b*math.log1p(-x))
+    if x<(a+1)/(a+b+2):return min(1.0,max(0.0,term*_v52_beta_cf(a,b,x)/a))
+    return min(1.0,max(0.0,1-term*_v52_beta_cf(b,a,1-x)/b))
+
+
+def _v52_p_t(t,grados):
+    if grados<=0:return np.nan
+    return _v52_beta_regularizada(grados/(grados+float(t)**2),grados/2,.5)
+
+
+def _v52_critico_t(grados,alfa=.05):
+    lo,hi=0.,1000000.
+    for _ in range(65):
+        mid=(lo+hi)/2
+        if _v52_p_t(mid,grados)>alfa:lo=mid
+        else:hi=mid
+    return (lo+hi)/2
+
+
+def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0):
+    """MCO estable; datos completos sin sustituciones ni eliminación automática."""
+    cols=[y]+list(x)
+    t=data[['Fecha','Tipo de jornada']+cols].copy()
+    t[cols]=t[cols].apply(pd.to_numeric,errors='coerce').replace([np.inf,-np.inf],np.nan)
+    t=t.dropna(subset=cols).sort_values('Fecha').reset_index(drop=True)
+    n=len(t); k=len(x); ncoef=k+int(intercepto)
+    if n<max(12,ncoef+5):raise ValueError(f'Se necesitan al menos {max(12,ncoef+5)} períodos completos; solo hay {n}.')
+    xmat=t[x].to_numpy(dtype=float);yv=t[y].to_numpy(dtype=float)
+    nt=n if not prueba_pct else min(n-3,max(ncoef+5,int(np.floor(n*(1-prueba_pct/100)))))
+    if nt<=ncoef:raise ValueError('No hay suficientes observaciones de entrenamiento.')
+    xm=xmat[:nt];ym=yv[:nt]
+    if not np.isfinite(ym).all() or np.std(ym)<=1e-12:
+        raise ValueError('La variable Y no tiene variación suficiente para la regresión.')
+    sc=np.std(xm,axis=0)
+    if (sc<=1e-12).any():
+        cs=[x[i] for i in range(k) if sc[i]<=1e-12]
+        raise ValueError('Variables X constantes en entrenamiento: '+', '.join(cs))
+    if intercepto:
+        mu=xm.mean(axis=0)
+        z=(xm-mu)/sc
+        D=np.column_stack([np.ones(nt),z]);Dall=np.column_stack([np.ones(n),(xmat-mu)/sc])
+        transf=np.zeros((k+1,k+1))
+        transf[0,0]=1;transf[0,1:]=-mu/sc
+        transf[1:,1:]=np.diag(1/sc)
+    else:
+        mu=np.zeros(k)
+        z=xm/sc
+        D=z;Dall=xmat/sc
+        transf=np.diag(1/sc)
+    if np.linalg.matrix_rank(D)<ncoef:
+        raise ValueError('Las variables independientes son redundantes (colinealidad perfecta). Quita alguna variable X.')
+    b_std=np.linalg.lstsq(D,ym,rcond=None)[0]
+    b=transf@b_std
+    yh=Dall@b_std;res=yv-yh
+    res_tr=ym-D@b_std
+    sse=float(res_tr@res_tr)
+    sst=float(np.sum((ym-ym.mean())**2))
+    r2=1-sse/sst if sst>0 else np.nan
+    de=nt-ncoef
+    mse=sse/de
+    # Covarianza MCO, en unidades originales de la fuente.
+    cov=transf@np.linalg.pinv(D.T@D)@transf.T*mse
+    se=np.sqrt(np.clip(np.diag(cov),0,None))
+    tc=np.divide(b,se,out=np.full(len(b),np.nan),where=se>0)
+    pv=[_v52_p_t(z,de) if np.isfinite(z) else np.nan for z in tc]
+    ic=_v52_critico_t(de)
+    nom=['Intercepto']+list(x) if intercepto else list(x)
+    coef=pd.DataFrame({'Variable':nom,'Coeficiente':b,'Error estándar':se,
+            't':tc,'p (bilateral)':pv,'IC95 inferior':b-ic*se,'IC95 superior':b+ic*se})
+    vif={'Intercepto':np.nan}
+    for j,col in enumerate(x):
+        if k==1:vif[col]=1.0;continue
+        other=np.delete(xm,j,axis=1)
+        Xv=np.column_stack([np.ones(nt),other]);zy=xm[:,j]
+        pred=Xv@np.linalg.lstsq(Xv,zy,rcond=None)[0]
+        R2j=1-np.sum((zy-pred)**2)/np.sum((zy-zy.mean())**2)
+        vif[col]=1/(1-R2j) if R2j<1-1e-10 else np.inf
+    coef['VIF']=coef['Variable'].map(vif)
+    t['Observado']=yv;t['Estimado']=yh;t['Residuo']=res
+    t['Conjunto']=np.where(np.arange(n)<nt,'Entrenamiento','Prueba')
+    rmse=float(np.sqrt(np.mean(res_tr**2)))
+    mae=float(np.mean(np.abs(res_tr)))
+    r2a=1-(1-r2)*(nt-1 if intercepto else nt)/de
+    tst=t.iloc[nt:]
+    res_pr=res[nt:]
+    eval_pr={'n':len(tst),'rmse':float(np.sqrt(np.mean(res_pr**2))) if len(tst) else np.nan,
+             'mae':float(np.mean(np.abs(res_pr))) if len(tst) else np.nan}
+    return {'tabla':t,'coef':coef,'n':n,'nt':nt,'r2':r2,'r2a':r2a,'rmse':rmse,'mae':mae,
+            'test':eval_pr,'y':y,'x':x,'intercepto':intercepto,
+            'corr':t[[y]+list(x)].corr(), 'df':de,'sig':float(np.sqrt(mse))}
+
+
+def _v52_mostrar_regresion(ops):
+    st.markdown('### 📉 Laboratorio de regresión lineal')
+    st.caption('Elige la variable que quieres explicar (Y) y hasta 8 variables independientes (X). '
+               'Se cruzan las fuentes por FECHA; no se duplica energía ni se inventan datos faltantes. '
+               'El modelo es exploratorio: una correlación no demuestra causalidad.')
+    try:
+        fuentes={k:st.session_state.get(k,pd.DataFrame()) for k in
+            ('df_carga_v1','df_carga_v2','df_viajes','df_serv_tipo','df_pax_tipo','df_incid',
+             'df_incid_full','df_oit','df_ide_lb','df_bi_tiempos','all_kmserv')}
+        regs=st.session_state.get('all_tr',[])
+        # La matriz multifuente es pesada; cambiar Y/X o un gráfico no debe
+        # recalcular Carga de pasajeros ni volver a cruzar todos los archivos.
+        _fecha_id=int(pd.util.hash_pandas_object(
+            pd.to_datetime(ops['Fecha'],errors='coerce'),index=False).sum()) if not ops.empty else 0
+        _firma=(str(st.session_state.get('_cache_key')),
+                str(st.session_state.get('_v28_creado_utc')),
+                len(ops),_fecha_id,
+                tuple((k,len(v) if hasattr(v,'__len__') else -1) for k,v in fuentes.items()),
+                len(regs) if hasattr(regs,'__len__') else -1)
+        if st.session_state.get('_v52_matriz_firma')==_firma:
+            _d,_origen=st.session_state['_v52_matriz_cache']
+        else:
+            # El df_ops visible ya incorpora los filtros globales; evitar usar datos
+            # de otros períodos guardados en session_state para los indicadores base.
+            _d,_origen=_v52_matriz_diaria(ops,fuentes,regs)
+            st.session_state['_v52_matriz_cache']=(_d,_origen)
+            st.session_state['_v52_matriz_firma']=_firma
+    except Exception as exc:
+        st.error(f'No se pudo armar la matriz operacional: {exc}')
+        return
+    if _d.empty:
+        st.info('No hay datos operacionales procesados para los filtros seleccionados.')
+        return
+    t1,t2,t3=st.columns([1.1,1.35,1.65])
+    with t1:
+        frecuencia=st.radio('Unidad de análisis',['Diaria','Mensual'],horizontal=True,key='_v52_frecuencia')
+    with t2:
+        validos=st.multiselect('Jornadas incluidas',['Laboral','Sábado','Domingo y festivo'],
+                   default=['Laboral','Sábado','Domingo y festivo'],key='_v52_jornadas')
+    with t3:
+        st.caption('Los filtros de fecha/año/mes de arriba también se aplican. '
+                   'En mensual, las magnitudes se suman y los índices se recalculan con totales.')
+    if not validos:
+        st.info('Selecciona al menos un tipo de jornada.');return
+    d=_d[_d['Tipo de jornada'].isin(validos)].copy()
+    if frecuencia=='Mensual':d=_v52_mensual(d)
+    num=[c for c in d.columns if c not in ('Fecha','Tipo de jornada')
+         and pd.api.types.is_numeric_dtype(d[c]) and d[c].notna().sum()>=2]
+    if not num:
+        st.info('No existen variables numéricas comparables en las fechas seleccionadas.');return
+    dat=st.columns([1,1.45])
+    with dat[0]:
+        y_default='E_Tr' if 'E_Tr' in num else num[0]
+        y=st.selectbox('Variable dependiente (Y) · Qué quiero explicar',num,
+           index=num.index(y_default),key='_v52_y',format_func=lambda c:c)
+    with dat[1]:
+        opx=[c for c in num if c!=y]
+        defaults=[c for c in ('Odómetro [km]','PAX-km','Servicios') if c in opx]
+        x=st.multiselect('Variables explicativas (X) · Hasta 8',opx,default=defaults[:2],key='_v52_x')
+    if not x:
+        st.info('Selecciona una o más variables independientes (X).');return
+    if len(x)>8:
+        st.warning('Selecciona máximo 8 variables para facilitar la interpretación.');return
+    c1,c2=st.columns(2)
+    with c1:
+        inter=st.radio('Intercepto de la recta',['Libre (incluye constante)','Fijado en cero'],
+            horizontal=True,key='_v52_intercepto')=='Libre (incluye constante)'
+    with c2:
+        pr=st.select_slider('Validación con períodos finales reservados (%)',
+            options=[0,10,20,30],value=20,key='_v52_prueba',
+            help='Entrena con los períodos más antiguos y compara la predicción con los últimos. No mezcla el orden temporal.')
+    st.caption(f'{len(d)} período(s) disponibles · {len(num)} variables numéricas · {len(x)} explicativas seleccionadas')
+    # Señalizar fórmulas vinculadas que inflan el ajuste artificialmente.
+    derivadas={'IDE · tracción (kWh/km)','Tracción sobre total (%)',
+              'LB ajustada · Exceso LB (kWh)','LB ajustada · Sobreconsumo LB %',
+              'Eficiencia · PAX-km/kWh'}
+    if (y=='E_Tr' and any(z in derivadas for z in x)) or \
+       (y=='E_Total' and 'E_Tr' in x):
+        st.warning('Atención: alguna X se calcula usando Y o comparte componentes de energía. '
+                   'Un R² alto podría ser una identidad contable, no una relación predictiva independiente.')
+    if frecuencia=='Mensual' and len(d)<12:
+        st.info('Para regresiones mensuales conviene disponer de 12 o más meses completos; '
+                'con pocos meses los resultados serán inestables.')
+    try:
+        out=_v52_ajustar(d,y,x,inter,pr)
+    except (ValueError,np.linalg.LinAlgError) as exc:
+        st.warning('No se pudo estimar el modelo: '+str(exc))
+        with st.expander('Cobertura y valores disponibles',expanded=True):
+            st.dataframe(pd.DataFrame({'Variable':[y]+x,'Períodos con dato':[int(d[c].notna().sum()) for c in [y]+x],
+                'Origen':[_origen.get(c,'Calculado / agregado mensual') for c in [y]+x]}),
+                hide_index=True,width='stretch')
+        return
+    o1,o2,o3,o4=st.columns(4)
+    o1.metric('R² entrenamiento',f'{out["r2"]:.3f}')
+    o2.metric('R² ajustado',f'{out["r2a"]:.3f}')
+    o3.metric('RMSE entrenamiento',f'{out["rmse"]:,.2f}')
+    o4.metric('Períodos usados',f'{out["nt"]} de {out["n"]}')
+    if pr and out['test']['n']:
+        st.caption(f'Validación temporal · {out["test"]["n"]} períodos finales sin entrenar · '
+                   f'RMSE: {out["test"]["rmse"]:,.2f} · MAE: {out["test"]["mae"]:,.2f} · '
+                   f'RMSE entrenamiento: {out["rmse"]:,.2f}')
+    if out['nt']<max(30,5*(len(x)+int(inter))):
+        st.warning('Pocos períodos para el número de variables; considera ampliar las fechas o reducir X.')
+    vc=out['coef'].loc[out['coef']['Variable']!='Intercepto','VIF']
+    if vc.gt(10).any():
+        st.warning('Multicolinealidad elevada (VIF > 10): algunos coeficientes pueden ser inestables.')
+    betas=out['coef'].set_index('Variable')['Coeficiente']
+    formula=('Y = '+(f'{betas["Intercepto"]:,.4g}' if inter else '0'))
+    for c in x:
+        coef=float(betas[c]);formula+=f' {"+" if coef>=0 else "−"} {abs(coef):,.4g} × ({c})'
+    st.markdown('**Ecuación estimada**')
+    st.code(formula,language='text')
+    st.markdown('#### Coeficientes y significancia')
+    st.dataframe(out['coef'].style.format({'Coeficiente':'{:,.6g}','Error estándar':'{:,.4g}',
+        't':'{:,.3f}','p (bilateral)':'{:.4g}','IC95 inferior':'{:,.5g}',
+        'IC95 superior':'{:,.5g}','VIF':'{:,.2f}'},na_rep='—'),hide_index=True,width='stretch')
+    st.caption('p-valor e intervalos al 95 % suponen errores independientes, con varianza constante y '
+               'aproximadamente normales. VIF > 5 merece revisión; > 10 suele indicar colinealidad marcada. '
+               'Sin intercepto, el R² se presenta respecto de la media y puede ser negativo.')
+    tab=out['tabla']
+    f=go.Figure()
+    f.add_trace(go.Scatter(x=tab['Fecha'],y=tab['Observado'],mode='lines+markers',name='Real',
+                           line=dict(color='#0EA5E9'),marker=dict(size=5)))
+    ent=tab[tab['Conjunto']=='Entrenamiento'];tes=tab[tab['Conjunto']=='Prueba']
+    f.add_trace(go.Scatter(x=ent['Fecha'],y=ent['Estimado'],mode='lines',name='Ajuste (entrenamiento)',
+                           line=dict(color='#F59E0B',width=2)))
+    if not tes.empty:
+        f.add_trace(go.Scatter(x=tes['Fecha'],y=tes['Estimado'],mode='lines+markers',name='Predicción (prueba)',
+                               line=dict(color='#FB7185',width=2,dash='dash')))
+    f.update_layout(title='Real frente a estimado',height=385,xaxis_title='Fecha',yaxis_title=y,
+                    margin=dict(l=5,r=10,t=45,b=15),legend=dict(orientation='h',y=1.14))
+    _pc(f,use_container_width=True,config={'locale':'es'})
+    iz,de=st.columns(2)
+    with iz:
+        if len(x)==1:
+            fx=px.scatter(tab,x=x[0],y='Observado',color='Conjunto',
+                    hover_data=['Fecha'],title='Relación Y versus X')
+            xy=tab[[x[0]]].sort_values(x[0]);mx=float(betas[x[0]])
+            b0=float(betas.get('Intercepto',0.))
+            fx.add_trace(go.Scatter(x=xy[x[0]],y=b0+mx*xy[x[0]],name='Recta ajustada',
+                      mode='lines',line=dict(color='#F59E0B')))
+        else:
+            fx=px.scatter(tab,x='Estimado',y='Observado',color='Conjunto',
+                          hover_data=['Fecha'],title='Observado versus estimado')
+            a=min(tab['Observado'].min(),tab['Estimado'].min());b=max(tab['Observado'].max(),tab['Estimado'].max())
+            fx.add_trace(go.Scatter(x=[a,b],y=[a,b],mode='lines',name='Predicción perfecta',
+                           line=dict(color='#F59E0B',dash='dash')))
+        fx.update_layout(height=360,margin=dict(l=0,r=0,t=45,b=0))
+        _pc(fx,use_container_width=True,config={'locale':'es'})
+    with de:
+        fr=px.scatter(tab,x='Estimado',y='Residuo',color='Conjunto',
+                       hover_data=['Fecha'],title='Residuos frente a estimados')
+        fr.add_hline(y=0,line_dash='dash',line_color='#F59E0B')
+        fr.update_layout(height=360,margin=dict(l=0,r=0,t=45,b=0),yaxis_title=f'Residuo ({y})')
+        _pc(fr,use_container_width=True,config={'locale':'es'})
+    with st.expander('Diagnósticos: probabilidad normal, correlaciones y atípicos',expanded=False):
+        from statistics import NormalDist
+        rr=np.sort(ent['Residuo'].to_numpy(float))
+        nn=len(rr)
+        qq=np.array([NormalDist().inv_cdf((i-.5)/nn) for i in range(1,nn+1)])
+        fig=go.Figure()
+        fig.add_trace(go.Scatter(x=qq,y=rr,mode='markers',name='Residuos'))
+        if nn>2:
+            slope=np.std(rr,ddof=1)
+            fig.add_trace(go.Scatter(x=[qq.min(),qq.max()],y=[rr.mean()+slope*qq.min(),rr.mean()+slope*qq.max()],
+                        mode='lines',name='Referencia normal',line=dict(dash='dash',color='#F59E0B')))
+        fig.update_layout(title='Gráfico de probabilidad normal (QQ)',xaxis_title='Cuantiles teóricos normales',
+                          yaxis_title='Cuantiles de los residuos',height=350)
+        _pc(fig,use_container_width=True,config={'locale':'es'})
+        corr=out['corr']
+        h=px.imshow(corr,x=corr.columns,y=corr.columns,text_auto='.2f',zmin=-1,zmax=1,
+                    color_continuous_scale='RdBu_r',title='Correlaciones entre Y y X')
+        h.update_layout(height=min(550,210+50*len(corr)),margin=dict(t=45,b=10,l=10,r=10))
+        _pc(h,use_container_width=True,config={'locale':'es'})
+        tt=tab.copy();sd=out['sig']
+        tt['Residuo estandarizado']=tt['Residuo']/sd if sd>0 else np.nan
+        at=tt[(tt['Conjunto']=='Entrenamiento') & tt['Residuo estandarizado'].abs().gt(3)]
+        if not at.empty:
+            st.warning(f'{len(at)} período(s) tienen residuos mayores que 3 desviaciones: se conservan en el ajuste.')
+            st.dataframe(at[['Fecha','Observado','Estimado','Residuo','Residuo estandarizado']],
+                         hide_index=True,width='stretch')
+        else:st.caption('Sin residuos de entrenamiento mayores que ±3 desviaciones estimadas.')
+    with st.expander('Datos y procedencia de cada variable',expanded=False):
+        t_or=pd.DataFrame({'Variable':list(_origen),
+                          'Días con dato':[int(_d[c].notna().sum()) for c in _origen],
+                          'Fuente':list(_origen.values())}).sort_values('Variable')
+        st.dataframe(t_or,hide_index=True,width='stretch')
+        st.caption('No hay imputación de faltantes. Se excluyen de la regresión solo las fechas '
+                   'sin datos para alguna variable elegida. En mensual, días filtrados no equivalen '
+                   'necesariamente a un mes completo.')
+    st.markdown('#### Descargar resultados')
+    _excel=BytesIO()
+    with pd.ExcelWriter(_excel,engine='openpyxl') as wr:
+        tab.to_excel(wr,sheet_name='Datos y predicción',index=False)
+        out['coef'].to_excel(wr,sheet_name='Coeficientes',index=False)
+        pd.DataFrame({'Métrica':['Variable Y','Variables X','Frecuencia','Intercepto','Validación %',
+                                  'N total','N entrenamiento','R2','R2 ajustado','RMSE','MAE','RMSE prueba'],
+                      'Valor':[y,', '.join(x),frecuencia,inter,pr,out['n'],out['nt'],out['r2'],
+                               out['r2a'],out['rmse'],out['mae'],out['test']['rmse']]}).to_excel(wr,sheet_name='Resumen',index=False)
+        out['corr'].to_excel(wr,sheet_name='Correlaciones')
+        d.to_excel(wr,sheet_name='Base disponible',index=False)
+    st.download_button('⬇️ Descargar análisis de regresión (.xlsx)',data=_excel.getvalue(),
+             file_name='regresion_lineal_datos_operacionales.xlsx',
+             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='_v52_excel')
+
+
+if _seccion == '📉 Regresión lineal':
+    _v52_mostrar_regresion(df_ops)
