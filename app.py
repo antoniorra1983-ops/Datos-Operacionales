@@ -103,6 +103,164 @@ st.markdown("""<style>
 }
 </style>""", unsafe_allow_html=True)
 
+
+# ===== v42 · TEMA NEÓN GLOBAL EN TODAS LAS SECCIONES =====
+# Solamente estilo visual; no modifica números, filtros ni referencias.
+# Esta paleta replica el dashboard v41 con contraste apto para escritorio / iPad.
+st.markdown("""<style>
+:root {
+    color-scheme: dark;
+    --efe42-bg: #061327;
+    --efe42-panel: #0b2545;
+    --efe42-card: #0a2344;
+    --efe42-text: #edf7ff;
+    --efe42-muted: #a6c8dd;
+    --efe42-cyan: #1bdfd2;
+    --efe42-blue: #3a9cf4;
+    --efe42-violet: #b86cf5;
+    --efe42-border: rgba(72,161,203,.34);
+    --background-color: #071b32;
+}
+[data-testid="stApp"],
+[data-testid="stAppViewContainer"] {
+    color: var(--efe42-text) !important;
+    background: radial-gradient(ellipse at 25% -10%,#06475a 0%,#071e3a 30%,#061327 69%,#060e21 100%) !important;
+}
+[data-testid="stHeader"] { background: rgba(5,18,39,.96) !important; }
+[data-testid="stBottom"],
+[data-testid="stBottomBlockContainer"] { background: #07152c !important; }
+[data-testid="stSidebar"] {
+    background: linear-gradient(162deg,#07373f 0%,#082b45 24%,#071b37 65%,#090f28 100%) !important;
+    border-right: 1px solid rgba(32,219,217,.31) !important;
+}
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stAppViewContainer"] h1,
+[data-testid="stAppViewContainer"] h2,
+[data-testid="stAppViewContainer"] h3,
+[data-testid="stAppViewContainer"] h4,
+[data-testid="stAppViewContainer"] p,
+[data-testid="stAppViewContainer"] label,
+[data-testid="stAppViewContainer"] li {
+    color: var(--efe42-text);
+}
+[data-testid="stCaptionContainer"] p,
+[data-testid="stMetricLabel"] p,
+[data-testid="stMetricLabel"] label,
+[data-testid="stAppViewContainer"] small {
+    color: var(--efe42-muted) !important;
+}
+/* Tarjetas de indicadores en TODAS las pestañas. Se mantiene v36 (dos decimales / wrap). */
+.stMetric,
+[data-testid="stMetric"] {
+    background: linear-gradient(145deg,rgba(12,47,84,.97),rgba(7,28,56,.98)) !important;
+    border: 1px solid rgba(54,171,209,.45) !important;
+    border-left: 3px solid var(--efe42-cyan) !important;
+    border-radius: 13px !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,.16), inset 0 1px 0 rgba(55,221,226,.08) !important;
+    color: var(--efe42-text) !important;
+}
+[data-testid="stMetricValue"],
+[data-testid="stMetricValue"] > div,
+[data-testid="stMetricValue"] p { color: #ffffff !important; }
+[data-testid="stMetricDelta"] { font-variant-numeric: tabular-nums; }
+/* Contenedores, pestañas e inputs nativos */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: var(--efe42-border) !important;
+}
+[data-testid="stTabs"] [role="tablist"] { border-bottom: 1px solid var(--efe42-border) !important; }
+[data-testid="stTabs"] [role="tab"] { color: var(--efe42-muted) !important; }
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    color: #70f8ed !important;
+    border-bottom-color: var(--efe42-cyan) !important;
+}
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--efe42-border) !important;
+    border-radius: 10px !important;
+    overflow: hidden;
+}
+[data-testid="stDataFrame"] [data-testid="stDataFrameToolbar"] {
+    background: #102d4b !important;
+}
+[data-testid="stExpander"] { border-color: var(--efe42-border) !important; }
+[data-testid="stExpander"] summary:hover { background: rgba(38,176,202,.08) !important; }
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+[data-testid="stDateInput"] [data-baseweb="input"] > div,
+[data-testid="stTextInput"] [data-baseweb="input"] > div,
+[data-testid="stNumberInput"] [data-baseweb="input"] > div,
+[data-testid="stTextArea"] [data-baseweb="textarea"] {
+    background-color: #0b2949 !important;
+    border-color: rgba(70,162,201,.49) !important;
+    color: #eef8ff !important;
+}
+[data-testid="stButton"] button[kind="primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"] {
+    background: linear-gradient(95deg,#057d88,#1769c8) !important;
+    border: 1px solid #36d9e2 !important;
+    color: #fff !important;
+}
+[data-testid="stButton"] button[kind="secondary"],
+[data-testid="stDownloadButton"] button,
+[data-testid="stFormSubmitButton"] button[kind="secondary"] {
+    background-color: #0f2b4a !important;
+    border-color: #3a779e !important;
+    color: #eaf8ff !important;
+}
+/* Navegación con acento turquesa, sin modificar sus claves ni sus selecciones. */
+.st-key-_nav_seccion [role="radiogroup"] label:hover {
+    background: rgba(0,213,213,.12) !important;
+}
+.st-key-_nav_seccion [role="radiogroup"] label:has(input:checked) {
+    background: linear-gradient(90deg,rgba(0,221,205,.24),rgba(44,108,207,.21)) !important;
+    border-color: rgba(39,229,227,.60) !important;
+    box-shadow: inset 3px 0 0 #1de0d4,0 0 12px rgba(0,216,208,.07);
+}
+.st-key-_nav_seccion [role="radiogroup"] label p { color: #e0f4fd !important; }
+.st-key-_topbar {
+    background-color: #071b32 !important;
+    border-bottom: 1px solid var(--efe42-border) !important;
+}
+.st-key-_contenido_cabecera {
+    border-bottom: 1px solid rgba(32,216,216,.20);
+    padding-bottom: .35rem;
+}
+.barra-filtros-tit { color: #36e6da !important; }
+/* Tarjetas HTML del módulo de tiempos THDR, definidas originalmente en tema claro. */
+.tv-card {
+    background: linear-gradient(145deg,#0d2b4e,#081d3a) !important;
+    border: 1px solid rgba(55,155,206,.43) !important;
+    box-shadow: 0 7px 19px rgba(0,0,0,.16) !important;
+}
+.tv-head { color: #39e8e0 !important; }
+.tv-badge { background: #1362a1 !important; color: #fff !important; }
+.tv-badge-alt { background: #087e80 !important; }
+.tv-stat { background: #0b2545 !important; border-color: rgba(70,153,198,.34) !important; }
+.tv-val { color: #edf7ff !important; }
+.tv-lbl, .tv-foot { color: #aac8df !important; }
+/* Paneles HTML puntuales de la investigación IDE que aún usaban blanco inline. */
+[data-testid="stMarkdownContainer"] div[style*="background:#fff"] {
+    background: #102b4a !important;
+    border-color: #32698d !important;
+    color: #eef8ff !important;
+}
+[data-testid="stMarkdownContainer"] div[style*="background:#fff"] * {
+    color: #e4f3ff;
+}
+/* Contraste y lectura en iPad sin reducir ni truncar indicadores. */
+@media (max-width: 900px) {
+    [data-testid="stMetric"] { padding: 13px 12px !important; }
+    [data-testid="stMetricValue"] { overflow-wrap: anywhere !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .st-key-_nav_seccion [role="radiogroup"] label { transition: none !important; }
+}
+</style>""", unsafe_allow_html=True)
+
 # --- 2. CONSTANTES DE RED Y CONFIGURACIONES ---
 ESTACIONES = [
     'Puerto','Bellavista','Francia','Baron','Portales','Recreo','Miramar',
@@ -884,6 +1042,52 @@ def _sin_choques(_fig):
     return _fig
 
 
+
+# ===== v42 · PALETA NEÓN GLOBAL PARA GRÁFICOS PLOTLY =====
+# Se aplica al presentar cada figura, sin cambiar puntos, fechas, clics, ejes ni cálculos.
+_V42_PLOTLY_COLORS = ['#20dfd2','#399af7','#b66cf6','#2bc4fd','#48d7a3',
+                     '#e0abff','#f3b961','#6493f7']
+
+def _v42_tema_plotly(fig):
+    if not isinstance(fig, go.Figure):
+        return fig
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(8,28,53,.42)',
+        font=dict(color='#dbedfc'),
+        colorway=_V42_PLOTLY_COLORS,
+        title_font=dict(color='#f0f8ff'),
+        legend=dict(font=dict(color='#d9edf9'), bgcolor='rgba(8,28,53,.28)'),
+        hoverlabel=dict(bgcolor='#102b4b',font_color='#f6fbff',bordercolor='#21d4d0'),
+    )
+    fig.update_xaxes(gridcolor='rgba(84,153,188,.18)',
+                     zerolinecolor='rgba(84,153,188,.26)',
+                     linecolor='rgba(79,156,198,.4)',tickfont=dict(color='#bed9ed'))
+    fig.update_yaxes(gridcolor='rgba(84,153,188,.18)',
+                     zerolinecolor='rgba(84,153,188,.26)',
+                     linecolor='rgba(79,156,198,.4)',tickfont=dict(color='#bed9ed'))
+    # Cambiar únicamente colores predeterminados de Plotly Express (no los
+    # colores semánticos explícitos: alertas rojas, estados, escalas térmicas).
+    _anteriores = {
+        '#636efa':'#20dfd2', '#ef553b':'#399af7','#00cc96':'#b66cf6',
+        '#ab63fa':'#2bc4fd','#ffa15a':'#48d7a3','#19d3f3':'#e0abff',
+        '#ff6692':'#f3b961','#b6e880':'#6493f7',
+    }
+    for tr in fig.data:
+        for nodo in (getattr(tr,'line',None),getattr(tr,'marker',None)):
+            if nodo is None:
+                continue
+            v=getattr(nodo,'color',None)
+            if isinstance(v,str) and v.lower() in _anteriores:
+                nodo.color=_anteriores[v.lower()]
+    for a in fig.layout.annotations or ():
+        if a.font is not None and isinstance(a.font.color,str):
+            if a.font.color.lower() in ('#005195','#0f172a','#111827','#334155','#000000','black'):
+                a.font.color='#e4f3ff'
+    return fig
+
+
 def _pc(_fig, key=None, **kw):
     """Pulsar un punto/barra temporal filtra el día o mes en toda la pestaña.
 
@@ -895,6 +1099,7 @@ def _pc(_fig, key=None, **kw):
     if 'width' not in kw and 'use_container_width' not in kw:
         kw['use_container_width'] = True
     _fig = _sin_choques(_fig)
+    _fig = _v42_tema_plotly(_fig)
     kw['config'] = {**_CFG_GRAFICOS, **(kw.get('config') or {})}
     modo = _modo_x_temporal(_fig)
     if modo == 'mes':
@@ -6322,7 +6527,7 @@ def _v41_render_dashboard(df):
                                       x=.5,y=.5,showarrow=False,font=dict(color='#e5fcff',size=23))],
                 )
                 # Gráfico circular no es fecha y no aplica filtro de mes/día.
-                st.plotly_chart(figpie,width='stretch',config={'displayModeBar':False})
+                st.plotly_chart(_v42_tema_plotly(figpie),width='stretch',config={'displayModeBar':False})
                 st.markdown('<div class="efe41-legend">'
                             f'<span style="color:#17dbc9">●</span> Tracción: <b>{_ncl(t,2)} kWh</b><br>'
                             f'<span style="color:#a45ee6">●</span> Otros usos: <b>{_ncl(restante,2)} kWh</b>'
