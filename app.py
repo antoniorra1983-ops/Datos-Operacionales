@@ -867,13 +867,18 @@ def _click_set_filtro(modo, xval, scope):
         except ValueError:
             return False
         actual = st.session_state.get(f_fecha)
+        _mes_actual = st.session_state.get(f_mes, [])
+        _mes_esperado = ([_MES_CAP_CLK[mes - 1]] if scope != 'thdr'
+                         else _MES_CAP_CLK[mes - 1])
         if (actual == (elegido, elegido)
                 and st.session_state.get(f_anio) == str(anio)
-                and st.session_state.get(f_mes) == _MES_CAP_CLK[mes - 1]
+                and _mes_actual == _mes_esperado
                 and st.session_state.get(f_sem) == 'Todas'):
             return False
         st.session_state[f_anio] = str(anio)
-        st.session_state[f_mes] = _MES_CAP_CLK[mes - 1]
+        st.session_state[f_mes] = _mes_esperado
+        if scope != 'thdr':
+            st.session_state['_f_preservar_fecha_click'] = True
         st.session_state[f_sem] = 'Todas'
         st.session_state[f_fecha] = (elegido, elegido)
         # Si el usuario había dejado seleccionada otra jornada, permitir ver el día.
@@ -889,7 +894,8 @@ def _click_set_filtro(modo, xval, scope):
     elif modo == 'mes' and mes is not None:
         if anio is not None:
             st.session_state[f_anio] = str(anio)
-        st.session_state[f_mes] = _MES_CAP_CLK[mes - 1]
+        st.session_state[f_mes] = ([_MES_CAP_CLK[mes - 1]] if scope != 'thdr'
+                                   else _MES_CAP_CLK[mes - 1])
         st.session_state[f_sem] = 'Todas'
         # Se reconstruye el rango válido a partir de los días disponibles del
         # mes y año, evitando conservar un día previo que excluiría el nuevo mes.
@@ -897,7 +903,7 @@ def _click_set_filtro(modo, xval, scope):
         etiqueta = _MES_CAP_CLK[mes - 1] + (f' {anio}' if anio else ' (todos los años)')
     elif modo == 'anio' and anio is not None:
         st.session_state[f_anio] = str(anio)
-        st.session_state[f_mes] = 'Todos'
+        st.session_state[f_mes] = ([] if scope != 'thdr' else 'Todos')
         st.session_state[f_sem] = 'Todas'
         st.session_state.pop(f_fecha, None)
         etiqueta = str(anio)
@@ -4650,7 +4656,7 @@ if not df_ops.empty and _seccion != _SECCIONES[3]:
     # interrumpa la construcción de los widgets (evita NameError al aplicar el filtro).
     _fmin, _fmax = min(_dts_all), max(_dts_all)
     _fi, _fe = _fmin, _fmax
-    _sel_a = _sel_m = _sel_s = "Todos"; _sel_s = "Todas"
+    _sel_a = "Todos"; _sel_m = []; _sel_s = "Todas"
     _selj = list(_J_COD.keys())
     with st.container(border=True):
         _ct1, _ct2 = st.columns([5, 1])
@@ -4672,10 +4678,21 @@ if not df_ops.empty and _seccion != _SECCIONES[3]:
             _sel_a = st.selectbox("Año", _op_anio, key="_f_anio")
         _dts_a = [d for d in _dts_all if _sel_a == "Todos" or d.year == int(_sel_a)]
         with _cfm:
-            _op_mes_g = ["Todos"] + [_MES_g[mn - 1] for mn in sorted({d.month for d in _dts_a})]
-            if st.session_state.get('_f_mes') not in _op_mes_g: st.session_state['_f_mes'] = "Todos"
-            _sel_m = st.selectbox("Mes", _op_mes_g, key="_f_mes")
-        _dts_m = [d for d in _dts_a if _sel_m == "Todos" or d.month == _mesnum_g[_sel_m]]
+            _op_mes_g = [_MES_g[mn - 1] for mn in sorted({d.month for d in _dts_a})]
+            _ant = st.session_state.get('_f_mes', [])
+            # Migra sesiones antiguas (filtro selectbox de un solo mes).
+            if isinstance(_ant, str):
+                _ant = [] if _ant == 'Todos' else [_ant]
+            if not isinstance(_ant, (list, tuple, set)):
+                _ant = []
+            _ant = [m for m in _op_mes_g if m in _ant]
+            if st.session_state.get('_f_mes') != _ant:
+                st.session_state['_f_mes'] = _ant
+            _sel_m = st.multiselect("Meses (selecciona uno o varios)", _op_mes_g,
+                                    default=[], key="_f_mes",
+                                    help="Puedes escoger varios meses. Sin meses seleccionados se incluyen TODOS.")
+        _num_meses_g = {_mesnum_g[m] for m in _sel_m}
+        _dts_m = [d for d in _dts_a if not _num_meses_g or d.month in _num_meses_g]
         with _cf2:
             _sem_map = _semmap_de(_dts_m)
             _op_sem = ["Todas"] + list(_sem_map.keys())
@@ -4686,6 +4703,13 @@ if not df_ops.empty and _seccion != _SECCIONES[3]:
             _dts_s = [d for d in _dts_m if (d.isocalendar()[0], d.isocalendar()[1]) == _iyw]
         else:
             _dts_s = _dts_m
+        # Al ampliar años o meses, no conservar por accidente un rango antiguo
+        # que excluya parte de la nueva selección. Los clics sobre días se respetan.
+        _ctx_fecha = (str(_sel_a), tuple(_sel_m), str(_sel_s))
+        if st.session_state.get('_f_fechas_contexto') != _ctx_fecha:
+            if not st.session_state.pop('_f_preservar_fecha_click', False):
+                st.session_state.pop('_f_fecha', None)
+            st.session_state['_f_fechas_contexto'] = _ctx_fecha
         with _cf3:
             _opj = list(_J_COD.keys())
             if hasattr(st, "pills"):
@@ -4720,7 +4744,7 @@ if not df_ops.empty and _seccion != _SECCIONES[3]:
         _fn = f.dt.normalize()
         m = f.notna() & (_fn >= _lo) & (_fn <= _hi)
         if _sel_a != "Todos": m = m & (f.dt.year == int(_sel_a))
-        if _sel_m != "Todos": m = m & (f.dt.month == _mesnum_g[_sel_m])
+        if _num_meses_g: m = m & f.dt.month.isin(_num_meses_g)
         if _sel_s != "Todas":
             _iy2, _iw2 = _sem_map[_sel_s]
             _ic = f.dt.isocalendar()
@@ -4735,7 +4759,7 @@ if not df_ops.empty and _seccion != _SECCIONES[3]:
     # Evita convertir decenas de miles de registros a DataFrame en cada cambio
     # de pestaña cuando el usuario está viendo el historial SIN FILTROS.
     _sin_filtros_v27 = (
-        _sel_a == "Todos" and _sel_m == "Todos" and _sel_s == "Todas"
+        _sel_a == "Todos" and not _num_meses_g and _sel_s == "Todas"
         and len(_cods) == len(_J_COD)
         and _fi == min(_dts_all) and _fe == max(_dts_all)
     )
@@ -4764,7 +4788,7 @@ if not df_ops.empty and _seccion != _SECCIONES[3]:
     all_saf_li = _filt_regs(all_saf_li)
     _rf = []
     if _sel_a != "Todos": _rf.append(f"Año {_sel_a}")
-    if _sel_m != "Todos": _rf.append(_sel_m)
+    if _sel_m: _rf.append("Meses: " + ", ".join(_sel_m))
     if _sel_s != "Todas": _rf.append(_sel_s)
     _rf.append("Jornada: " + ("todas" if len(_cods) == 3 else ", ".join(_selj)))
     _rf.append(f"{_fi.strftime('%d-%m-%Y')} → {_fe.strftime('%d-%m-%Y')}")
@@ -12264,7 +12288,9 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0):
     t[cols]=t[cols].apply(pd.to_numeric,errors='coerce').replace([np.inf,-np.inf],np.nan)
     t=t.dropna(subset=cols).sort_values('Fecha').reset_index(drop=True)
     n=len(t); k=len(x); ncoef=k+int(intercepto)
-    if n<max(12,ncoef+5):raise ValueError(f'Se necesitan al menos {max(12,ncoef+5)} períodos completos; solo hay {n}.')
+    minimo=max(6,ncoef+3)
+    if n<minimo:
+        raise ValueError(f'Se necesitan al menos {minimo} períodos completos (Y y todas las X); solo hay {n}.')
     xmat=t[x].to_numpy(dtype=float);yv=t[y].to_numpy(dtype=float)
     nt=n if not prueba_pct else min(n-3,max(ncoef+5,int(np.floor(n*(1-prueba_pct/100)))))
     if nt<=ncoef:raise ValueError('No hay suficientes observaciones de entrenamiento.')
@@ -12328,6 +12354,33 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0):
     return {'tabla':t,'coef':coef,'n':n,'nt':nt,'r2':r2,'r2a':r2a,'rmse':rmse,'mae':mae,
             'test':eval_pr,'y':y,'x':x,'intercepto':intercepto,
             'corr':t[[y]+list(x)].corr(), 'df':de,'sig':float(np.sqrt(mse))}
+
+
+def _v53_tabla_periodos(data, y, x, intercepto, prueba_pct):
+    """Todos los períodos visibles, con Y/X originales y razón de su uso.
+
+    A diferencia de la tabla del ajuste, aquí se muestran también las fechas
+    sin datos completos, que NO deben imputarse con ceros.
+    """
+    columnas=[y]+list(x)
+    t=data[['Fecha','Tipo de jornada']+columnas].copy()
+    t['Fecha']=pd.to_datetime(t['Fecha'], errors='coerce')
+    for c in columnas:
+        t[c]=pd.to_numeric(t[c], errors='coerce').replace([np.inf,-np.inf],np.nan)
+    t=t.sort_values('Fecha').reset_index(drop=True)
+    completo=t[columnas].notna().all(axis=1)
+    n=int(completo.sum())
+    num_coef=len(x)+int(intercepto)
+    nt=n if not prueba_pct else min(n-3,max(num_coef+5,int(np.floor(n*(1-prueba_pct/100)))))
+    nt=max(0,min(n,nt))
+    etiquetas=np.full(len(t),'Excluido: faltan datos',dtype=object)
+    pos_validas=np.flatnonzero(completo.to_numpy())
+    etiquetas[pos_validas[:nt]]='Entrenamiento (entra en regresión)'
+    etiquetas[pos_validas[nt:]]='Validación final (no entra en regresión)'
+    t.insert(2,'Uso en el modelo',etiquetas)
+    t['Variables sin dato']=[', '.join(c for c in columnas if pd.isna(t.at[i,c]))
+                               for i in range(len(t))]
+    return t, n, nt
 
 
 def _v52_mostrar_regresion(ops):
@@ -12399,9 +12452,43 @@ def _v52_mostrar_regresion(ops):
             horizontal=True,key='_v52_intercepto')=='Libre (incluye constante)'
     with c2:
         pr=st.select_slider('Validación con períodos finales reservados (%)',
-            options=[0,10,20,30],value=20,key='_v52_prueba',
-            help='Entrena con los períodos más antiguos y compara la predicción con los últimos. No mezcla el orden temporal.')
-    st.caption(f'{len(d)} período(s) disponibles · {len(num)} variables numéricas · {len(x)} explicativas seleccionadas')
+            options=[0,10,20,30],value=0,key='_v53_prueba',
+            help='0 % = se usan TODOS los períodos completos para ajustar. '
+                 'Por ejemplo, 20 % reserva el 20 % más reciente solo para evaluar predicciones: '
+                 'NO entra en los coeficientes. No se altera el orden temporal.')
+    st.caption(f'{len(d)} período(s) visibles tras los filtros · {len(num)} variables numéricas · '
+               f'{len(x)} variables X seleccionadas. Período: '
+               f'{d["Fecha"].min():%d-%m-%Y} a {d["Fecha"].max():%d-%m-%Y}.')
+    with st.expander('¿Qué significa validación con períodos finales?', expanded=False):
+        st.markdown('**0 % (opción predeterminada):** todas las fechas que tengan dato válido '
+                    'en **Y y cada X** se usan para calcular la regresión. '
+                    '**20 %:** las fechas completas más recientes (aproximadamente un 20 %) '
+                    'se dejan fuera del cálculo de los coeficientes. La regresión se ajusta '
+                    'con el 80 % anterior y se comprueba qué tan bien predice las fechas finales. '
+                    'Eso se llama **validación temporal** y permite detectar si el modelo '
+                    'funciona en períodos que no utilizó para entrenarse. '
+                    'No equivale a excluir datos del historial: se muestran en la tabla como «Validación».')
+    muestra, n_comp, n_ent = _v53_tabla_periodos(d,y,x,inter,pr)
+    n_sin = len(muestra)-n_comp
+    st.markdown('#### Tabla de períodos y datos para la regresión')
+    st.caption('Cada fila es un día o mes según la unidad elegida. Se muestran la variable Y y '
+               'todas las variables X con sus valores originales antes del ajuste. '
+               'Las filas sin alguna variable se conservan visibles, pero NO participan '
+               'ni se sustituyen por cero.')
+    col_m = st.columns(3)
+    col_m[0].metric('Períodos del filtro',f'{len(muestra):,}')
+    col_m[1].metric('Usados para ajustar',f'{n_ent:,}')
+    col_m[2].metric('Sin datos completos / validación',f'{n_sin:,} / {n_comp-n_ent:,}')
+    st.dataframe(muestra,hide_index=True,width='stretch',height=380)
+    st.download_button('⬇️ Descargar tabla exacta de regresión (CSV)',
+        data=muestra.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+        file_name='datos_para_regresion.csv',mime='text/csv',key='_v53_muestra_csv')
+    if not pr:
+        st.info('Se ajustará con el 100 % de los períodos que tengan datos completos en Y y X. '
+                'Los registros excluidos por faltantes aparecen identificados arriba.')
+    else:
+        st.caption(f'{n_ent} fechas completas para entrenamiento; '
+                   f'{n_comp-n_ent} fechas finales completas solo para evaluación de predicciones.')
     # Señalizar fórmulas vinculadas que inflan el ajuste artificialmente.
     derivadas={'IDE · tracción (kWh/km)','Tracción sobre total (%)',
               'LB ajustada · Exceso LB (kWh)','LB ajustada · Sobreconsumo LB %',
@@ -12426,7 +12513,7 @@ def _v52_mostrar_regresion(ops):
     o1.metric('R² entrenamiento',f'{out["r2"]:.3f}')
     o2.metric('R² ajustado',f'{out["r2a"]:.3f}')
     o3.metric('RMSE entrenamiento',f'{out["rmse"]:,.2f}')
-    o4.metric('Períodos usados',f'{out["nt"]} de {out["n"]}')
+    o4.metric('Períodos en regresión',f'{out["nt"]} de {len(d)}')
     if pr and out['test']['n']:
         st.caption(f'Validación temporal · {out["test"]["n"]} períodos finales sin entrenar · '
                    f'RMSE: {out["test"]["rmse"]:,.2f} · MAE: {out["test"]["mae"]:,.2f} · '
@@ -12523,6 +12610,7 @@ def _v52_mostrar_regresion(ops):
     st.markdown('#### Descargar resultados')
     _excel=BytesIO()
     with pd.ExcelWriter(_excel,engine='openpyxl') as wr:
+        muestra.to_excel(wr,sheet_name='Muestra y exclusiones',index=False)
         tab.to_excel(wr,sheet_name='Datos y predicción',index=False)
         out['coef'].to_excel(wr,sheet_name='Coeficientes',index=False)
         pd.DataFrame({'Métrica':['Variable Y','Variables X','Frecuencia','Intercepto','Validación %',
