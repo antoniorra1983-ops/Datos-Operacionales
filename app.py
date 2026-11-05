@@ -5442,45 +5442,8 @@ def _bi_calidad(historico, errores=None, duplicados_seat=None):
 
 
 
-# ===== v40 · RESUMEN DE PROMEDIOS EN TODAS LAS PESTAÑAS =====
-# Se calcula DESPUÉS de aplicar los filtros globales, respetando mes/año/fecha.
-# Si el usuario selecciona solo un tipo de jornada, las otras dos muestran —.
-if (_seccion != _SECCIONES[4] and isinstance(df_ops, pd.DataFrame)
-        and not df_ops.empty and 'Fecha' in df_ops.columns):
-    _v40_indicadores = [
-        ('Energía total', df_ops, 'E_Total', 'kWh/día'),
-        ('Energía tracción', df_ops, 'E_Tr', 'kWh/día'),
-        ('Odómetro', df_ops, 'Odómetro [km]', 'km/día'),
-        ('Tren-Km', df_ops, 'Tren-Km [km]', 'km/día'),
-        ('Pasajeros', df_ops, 'PAX', 'pax/día'),
-        ('Servicios', df_ops, 'Servicios', 'servicios/día'),
-    ]
-    if (isinstance(df_viajes, pd.DataFrame) and not df_viajes.empty
-            and {'Fecha', 'Total Viajes'} <= set(df_viajes.columns)):
-        _v40_indicadores.append(('Viajes por contrato', df_viajes, 'Total Viajes', 'viajes/día'))
-    _v40_indicadores = [x for x in _v40_indicadores if x[2] in x[1].columns and
-                         not (x[2] == 'PAX' and not x[1][x[2]].notna().any())]
-    if _v40_indicadores:
-        _v40_prefs = {
-            _SECCIONES[0]:'Viajes por contrato', _SECCIONES[1]:'Odómetro',
-            _SECCIONES[2]:'Energía total', _SECCIONES[3]:'Energía tracción',
-            _SECCIONES[5]:'Viajes por contrato', _SECCIONES[6]:'Servicios',
-            _SECCIONES[7]:'Energía total', _SECCIONES[8]:'Energía total',
-            _SECCIONES[9]:'Energía total', _SECCIONES[10]:'Energía tracción',
-            _SECCIONES[11]:'Pasajeros', _SECCIONES[12]:'Pasajeros',
-            _SECCIONES[13]:'Energía total', '🎯 BI Ejecutivo':'Energía total'}
-        _v40_opciones = [x[0] for x in _v40_indicadores]
-        _v40_default = _v40_prefs.get(_seccion, 'Energía total')
-        _v40_pos = (_v40_opciones.index(_v40_default) if _v40_default in _v40_opciones else 0)
-        with st.expander('📊 Promedios por jornada · Laboral / Sábado / Domingo y festivo',
-                         expanded=_seccion in (_SECCIONES[0], '🎯 BI Ejecutivo')):
-            _v40_opcion = st.selectbox('Indicador promedio', _v40_opciones,
-                                        index=_v40_pos, key=f'_v40_ind_{_SECCIONES.index(_seccion)}')
-            _v40_t = next(v for v in _v40_indicadores if v[0] == _v40_opcion)
-            _v40_desglose(_v40_t[1], _v40_t[2], _v40_t[3], f'{_v40_opcion} promedio')
-            st.caption('Promedio diario = suma de registros de una fecha ÷ número de fechas con dato ' 
-                       'de ESA jornada; se respeta el filtro global y los feriados nacionales de Chile. '
-                       'Los valores — indican que no hay fechas con datos para esa jornada.')
+# v43: Se retiró el selector global «Indicador promedio» de la parte superior.
+# Los promedios específicos dentro de cada módulo/indicador se mantienen.
 
 if _seccion == '🎯 BI Ejecutivo':
     st.caption('BI OPERACIONAL · EFE Valparaíso · La información respeta los filtros generales de arriba.')
@@ -6466,6 +6429,12 @@ def _v41_render_dashboard(df):
     with kcols[2]:_v41_card('Kilometraje UMR',km,'km','#bb62ef')
     with kcols[3]:_v41_card('IDE ponderado',ide,'kWh/km','#21dbc6')
 
+    # v43 · Indicadores operacionales nuevos, en el orden solicitado:
+    # primero pasajeros (PAX), después servicios. Se usan totales del período
+    # filtrado; los promedios por jornada existentes permanecen en sus módulos.
+    opcols = st.columns(2, gap='small')
+    with opcols[0]:_v41_card('Pasajeros (PAX)',pax,'pasajeros','#10ded1')
+    with opcols[1]:_v41_card('Servicios',serv,'servicios','#bb62ef')
 
     lower=st.columns([1,1,1],gap='small')
     with lower[0]:
