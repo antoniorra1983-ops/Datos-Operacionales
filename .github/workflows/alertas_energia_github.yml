@@ -1,0 +1,60 @@
+name: Alertas energéticas LB por GitHub
+
+# GitHub crea Issues, asigna a la cuenta propietaria y permite notificarlos por correo.
+# No es necesario configurar Watch. Se requiere Email en "Participating".
+# No se configura SMTP ni se almacena ninguna contraseña de correo.
+on:
+  workflow_run:
+    workflows: ["Precalcular historial de Datos Operacionales"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publicar:
+        description: "Crear alertas reales (false = solo vista previa)"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: efe-alertas-github-main
+  cancel-in-progress: false
+
+jobs:
+  detectar:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Descargar código e historial precalculado
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: python -m pip install "pandas>=2.0" "numpy>=1.24" "pyarrow>=14.0"
+
+      - name: Detectar anomalías y notificar por GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          EVENTO: ${{ github.event_name }}
+          PUBLICAR: ${{ inputs.publicar }}
+        shell: bash
+        run: |
+          if [[ "$EVENTO" == "workflow_dispatch" && "$PUBLICAR" != "true" ]]; then
+            python alertas_energia_github.py --vista-previa
+          else
+            python alertas_energia_github.py --publicar
+          fi
