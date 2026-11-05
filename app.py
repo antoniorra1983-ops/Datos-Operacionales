@@ -6275,7 +6275,7 @@ def _v41_css():
     [data-testid="stAppViewContainer"] [data-testid="stVerticalBlockBorderWrapper"] {
       border-color:rgba(40,118,160,.28)!important;
     }
-    .st-key-v41_hero,.st-key-v44_pax,.st-key-v44_servicios,
+    .st-key-v41_hero,.st-key-v44_pax,.st-key-v44_servicios,.st-key-v48_kilometraje,
     .st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right {
        background:linear-gradient(145deg,rgba(4,24,51,.94),rgba(2,15,38,.96));
        border:1px solid rgba(38,137,174,.39);
@@ -6306,10 +6306,10 @@ def _v41_css():
     .efe46-kpi-explain{color:#c1d9e9;font-size:12px;line-height:1.48;
       margin-top:11px;padding-top:10px;border-top:1px solid rgba(65,154,192,.26)}
     .efe46-kpi-note{color:#8fb4cb;font-size:11px;margin-top:7px;line-height:1.4}
-    .efe44-kpi-average{margin-top:12px;padding-top:9px;border-top:1px solid rgba(65,154,192,.26)}
-    .efe44-kpi-average-title{font-size:10px;font-weight:760;letter-spacing:.5px;color:#8eb6cf;margin-bottom:6px}
-    .efe44-kpi-average-row{display:flex;justify-content:space-between;align-items:baseline;gap:7px;font-size:11px;color:#b7d6e9;line-height:1.65}
-    .efe44-kpi-average-row strong{font-size:11px;color:#f3faff;white-space:nowrap}
+    .efe48-kpi-day{margin-top:12px;padding-top:9px;border-top:1px solid rgba(65,154,192,.26)}
+    .efe48-kpi-day-title{font-size:10px;font-weight:760;letter-spacing:.5px;color:#8eb6cf;margin-bottom:6px}
+    .efe48-kpi-day-row{display:flex;justify-content:space-between;align-items:baseline;gap:7px;font-size:11px;color:#b7d6e9;line-height:1.65}
+    .efe48-kpi-day-row strong{font-size:11px;color:#f3faff;white-space:nowrap}
     .efe41-miniline{font-size:12px;color:#90aac4;margin-top:7px;line-height:1.3}
     .efe41-track{height:7px;background:#112c49;border-radius:9px;overflow:hidden;margin:7px 0 11px}
     .efe41-track span{display:block;height:100%;border-radius:9px;
@@ -6325,7 +6325,7 @@ def _v41_css():
     @media(max-width:1000px){
       .efe41-kpi{padding:13px 12px;min-height:106px}
       .efe41-kpi-number{font-size:clamp(18px,2.5vw,25px)}
-      .st-key-v41_hero,.st-key-v44_pax,.st-key-v44_servicios,.st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right{padding:13px}
+      .st-key-v41_hero,.st-key-v44_pax,.st-key-v44_servicios,.st-key-v48_kilometraje,.st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right{padding:13px}
     }
     </style>""",unsafe_allow_html=True)
 
@@ -6336,31 +6336,132 @@ def _v41_suma(df,campo):
     return float(pd.to_numeric(df[campo],errors='coerce').sum(min_count=1))
 
 
-def _v41_card(titulo,valor,unidad,accent,promedios=None,unidad_promedio=None,explicacion=None,nota=None):
-    """Indicador con desglose opcional dentro de la MISMA tarjeta.
+# ===== v48 · SERVICIOS POR VÍA, TREN-KM Y TOTALES POR JORNADA =====
+def _v48_totales_jornada(df, campo, fecha='Fecha'):
+    """Suma por laboral, sábado y domingo/festivo, sin promediar ni inventar datos.
 
-    No repone el selector global «Indicador promedio» de la parte superior.
-    Los promedios son diarios y se separan por jornada del calendario chileno.
+    Las clases corresponden al calendario chileno: el festivo tiene prioridad.
     """
+    salida={nombre:{'valor':float('nan'),'dias':0} for _,nombre in _V40_JORNADAS}
+    if (df is None or getattr(df,'empty',True) or
+            campo not in df.columns or fecha not in df.columns):
+        return salida
+    fechas=pd.to_datetime(df[fecha],errors='coerce').dt.normalize()
+    valores=pd.to_numeric(df[campo],errors='coerce')
+    tmp=pd.DataFrame({'Fecha':fechas,'Valor':valores}).dropna(subset=['Fecha','Valor'])
+    if tmp.empty:
+        return salida
+    diario=tmp.groupby('Fecha',as_index=False)['Valor'].sum(min_count=1)
+    diario['Jornada']=diario['Fecha'].dt.date.map(get_tipo_dia)
+    for codigo,nombre in _V40_JORNADAS:
+        sub=diario[diario['Jornada'].eq(codigo) & diario['Valor'].notna()]
+        if not sub.empty:
+            salida[nombre]={'valor':float(sub['Valor'].sum()),'dias':int(len(sub))}
+    return salida
+
+
+def _v48_cociente_jornada(datos,numerador,denominador,factor=1.0):
+    """Por jornada, suma de los numeradores / suma de denominadores coincidentes.
+
+    No promedia cocientes diarios ni cruza jornadas sin datos en ambas fuentes.
+    """
+    salida={nombre:{'valor':float('nan'),'dias':0} for _,nombre in _V40_JORNADAS}
+    if (datos is None or getattr(datos,'empty',True) or
+            numerador not in datos.columns or denominador not in datos.columns):
+        return salida
+    tabla=datos[['Fecha',numerador,denominador]].copy()
+    tabla['Fecha']=pd.to_datetime(tabla['Fecha'],errors='coerce').dt.normalize()
+    tabla[numerador]=pd.to_numeric(tabla[numerador],errors='coerce')
+    tabla[denominador]=pd.to_numeric(tabla[denominador],errors='coerce')
+    tabla=tabla.dropna(subset=['Fecha',numerador,denominador])
+    tabla=tabla[(tabla[numerador]>=0)&(tabla[denominador]>0)]
+    if tabla.empty:
+        return salida
+    tabla=tabla.groupby('Fecha',as_index=False)[[numerador,denominador]].sum(min_count=1)
+    tabla['Jornada']=tabla['Fecha'].dt.date.map(get_tipo_dia)
+    for codigo,nombre in _V40_JORNADAS:
+        sub=tabla[tabla['Jornada'].eq(codigo)]
+        if not sub.empty and float(sub[denominador].sum())>0:
+            salida[nombre]={'valor':float(factor*sub[numerador].sum()/sub[denominador].sum()),
+                            'dias':int(len(sub))}
+    return salida
+
+
+def _v48_tipo_via(servicio):
+    """Exactamente el criterio origen/destino de la pestaña Resumen."""
+    partes=str(servicio).split('→')
+    if len(partes)!=2:
+        return 'Otros'
+    invertidos={v:k for k,v in SHORT_NAMES_DICT.items()}
+    indices={est:i for i,est in enumerate(ESTACIONES)}
+    origen=invertidos.get(partes[0].strip(),partes[0].strip())
+    destino=invertidos.get(partes[1].strip(),partes[1].strip())
+    io=indices.get(origen)
+    ide=indices.get(destino)
+    if io is None or ide is None:
+        return 'Otros'
+    return 'Vía 1' if io<ide else ('Vía 2' if io>ide else 'Otros')
+
+
+def _v48_servicios_via(df_tipo,fechas_visibles):
+    """Servicios THDR ya filtrados, separados por sentido y solo fechas del Dashboard."""
+    cols=['Fecha','Vía','Servicios']
+    if (df_tipo is None or getattr(df_tipo,'empty',True) or
+            not {'Fecha','Tipo_Servicio','Servicios'}<=set(df_tipo.columns)):
+        return pd.DataFrame(columns=cols)
+    tmp=df_tipo[['Fecha','Tipo_Servicio','Servicios']].copy()
+    tmp['Fecha']=pd.to_datetime(tmp['Fecha'],errors='coerce').dt.normalize()
+    visibles=pd.DatetimeIndex(pd.to_datetime(fechas_visibles,errors='coerce')).normalize()
+    tmp=tmp[tmp['Fecha'].isin(visibles)]
+    tmp['Servicios']=pd.to_numeric(tmp['Servicios'],errors='coerce')
+    tmp=tmp.dropna(subset=['Fecha','Servicios'])
+    tmp=tmp[tmp['Servicios']>=0]
+    if tmp.empty:
+        return pd.DataFrame(columns=cols)
+    # Clasificar una vez cada O-D distinto; evita operaciones repetidas al navegar.
+    mapa_vias={codigo:_v48_tipo_via(codigo)
+               for codigo in tmp['Tipo_Servicio'].dropna().unique()}
+    tmp['Vía']=tmp['Tipo_Servicio'].map(mapa_vias).fillna('Otros')
+    return tmp.groupby(['Fecha','Vía'],as_index=False)['Servicios'].sum(min_count=1)
+
+
+def _v48_paxkm_jornada(paxkm_diario,fechas_visibles):
+    """PAX-km por clase de día; procede de Σ (pasajeros tramo × km tramo)."""
+    vacio={nombre:{'valor':float('nan'),'dias':0} for _,nombre in _V40_JORNADAS}
+    if paxkm_diario is None or not len(paxkm_diario):
+        return vacio
+    tmp=paxkm_diario.rename('PAX-km').rename_axis('Fecha').reset_index()
+    tmp['Fecha']=pd.to_datetime(tmp['Fecha'],errors='coerce').dt.normalize()
+    visibles=pd.DatetimeIndex(pd.to_datetime(fechas_visibles,errors='coerce')).normalize()
+    tmp=tmp[tmp['Fecha'].isin(visibles)]
+    tmp=tmp[pd.to_numeric(tmp['PAX-km'],errors='coerce')>0]
+    return _v48_totales_jornada(tmp,'PAX-km')
+
+
+def _v41_card(titulo,valor,unidad,accent,por_jornada=None,
+              desglose_titulo='TOTAL POR TIPO DE DÍA',explicacion=None,nota=None):
+    """KPI del Dashboard: total global y totales por jornada, o cociente por jornada."""
     import html as _html41
-    if valor is None or not np.isfinite(float(valor)):
+    try:
+        mostrado=_ncl(float(valor),2) if np.isfinite(float(valor)) else '—'
+    except (ValueError,TypeError):
         mostrado='—'
-    else:
-        mostrado=_ncl(float(valor),2)
     desglose=''
-    if promedios is not None:
+    if por_jornada is not None:
         filas=[]
         for jornada in ('Laboral','Sábado','Domingo y festivo'):
-            r=promedios.get(jornada,{})
-            promedio=r.get('valor',float('nan'))
-            valor_jornada=(_ncl(promedio,2) if pd.notna(promedio) and np.isfinite(promedio)
-                           else '—')
-            filas.append('<div class="efe44-kpi-average-row">'
+            res=por_jornada.get(jornada,{})
+            dato=res.get('valor',float('nan')) if isinstance(res,dict) else res
+            try:
+                visto=_ncl(float(dato),2) if np.isfinite(float(dato)) else '—'
+            except (ValueError,TypeError):
+                visto='—'
+            filas.append('<div class="efe48-kpi-day-row">'
                          f'<span>{_html41.escape(jornada)}</span>'
-                         f'<strong>{valor_jornada}</strong></div>')
-        unidad_p=_html41.escape(unidad_promedio or unidad)
-        desglose=('<div class="efe44-kpi-average">'
-                  f'<div class="efe44-kpi-average-title">PROMEDIO POR JORNADA · {unidad_p}</div>'
+                         f'<strong>{visto}</strong></div>')
+        desglose=('<div class="efe48-kpi-day">'
+                  f'<div class="efe48-kpi-day-title">{_html41.escape(desglose_titulo)}'
+                  f' · {_html41.escape(unidad)}</div>'
                   + ''.join(filas) + '</div>')
     explicacion_html=('<div class="efe46-kpi-explain">'
                       + _html41.escape(explicacion) + '</div>') if explicacion else ''
@@ -6378,7 +6479,7 @@ def _v41_card(titulo,valor,unidad,accent,promedios=None,unidad_promedio=None,exp
 def _v41_diario(df):
     if df is None or df.empty or 'Fecha' not in df:
         return pd.DataFrame()
-    campos=['E_Total','E_Tr','Odómetro [km]','PAX','Servicios']
+    campos=['E_Total','E_Tr','Odómetro [km]','Tren-Km [km]','PAX','Servicios']
     sub=df[['Fecha']+[c for c in campos if c in df.columns]].copy()
     sub['Fecha']=pd.to_datetime(sub['Fecha'],errors='coerce').dt.normalize()
     sub=sub.dropna(subset=['Fecha'])
@@ -6393,6 +6494,8 @@ def _v41_diario(df):
         {'L':'Laboral','S':'Sábado','D/F':'Domingo y festivo'})
     sub['IDE (kWh/km)']=np.where(sub['Odómetro [km]']>0,
                                   sub['E_Tr']/sub['Odómetro [km]'],np.nan)
+    sub['UMR (%)']=np.where((sub['Odómetro [km]']>0)&(sub['Tren-Km [km]']>=0),
+                           sub['Tren-Km [km]']/sub['Odómetro [km]']*100,np.nan)
     return sub
 
 
@@ -6480,14 +6583,17 @@ def _v41_render_dashboard(df):
         st.info('No hay registros operacionales para el período y las jornadas seleccionadas.')
         return
     e=_v41_suma(datos,'E_Total'); t=_v41_suma(datos,'E_Tr')
-    km=_v41_suma(datos,'Odómetro [km]')
+    # Misma fuente UMR y misma regla de días sin km negativos que «Resumen».
+    _km_validos=datos[(datos['Odómetro [km]']>=0)&(datos['Tren-Km [km]']>=0)].copy()
+    km=_v41_suma(_km_validos,'Odómetro [km]')
+    tren_km=_v41_suma(_km_validos,'Tren-Km [km]')
+    umr_pct=(100*tren_km/km if np.isfinite(km) and km>0 and np.isfinite(tren_km)
+             else float('nan'))
     pax=_v41_suma(datos,'PAX'); serv=_v41_suma(datos,'Servicios')
     ide=t/km if np.isfinite(t) and np.isfinite(km) and km>0 else np.nan
     fmin,fmax=datos['Fecha'].min(),datos['Fecha'].max()
 
-
-    # v45: mismo orden que la pestaña Resumen, sin alterar los filtros ni los cálculos.
-    # Servicios -> Pasajeros -> Odómetro -> Energía -> IDE.
+    # v48: mismo orden de Resumen y totales separados por clase de jornada.
     controles=st.columns([3.4,1.4],vertical_alignment='center')
     with controles[0]:
         st.markdown(f'<div class="efe41-miniline">{fmin:%d/%m/%Y} — {fmax:%d/%m/%Y} · '
@@ -6498,63 +6604,162 @@ def _v41_render_dashboard(df):
                                   key='_v41_vista',label_visibility='collapsed')
     from plotly import graph_objects as _go41
 
-    # 1. Servicios, 2. Pasajeros: la misma secuencia que en «📊 Resumen».
+    # 1. Servicios totales, Vía 1 y Vía 2, con Otros si existen registros.
+    # El desglose toma los servicios THDR por sentido; el total viene de df_ops.
+    servicios_via=_v48_servicios_via(df_serv_tipo,datos['Fecha'])
+
+    # 2. Pasajeros se presenta después de Servicios, igual que en Resumen.
     for campo,titulo,unidad,color,contenedor,clave in (
         ('Servicios','Servicios','servicios','#bb62ef','v44_servicios','_v44_evolucion_servicios'),
         ('PAX','Pasajeros (PAX)','pax','#10ded1','v44_pax','_v44_evolucion_pax'),
     ):
         with st.container(key=contenedor):
             valor=serv if campo=='Servicios' else pax
-            unidad_media='servicios/día' if campo=='Servicios' else 'pax/día'
-            _v41_card(titulo,valor,unidad,color,
-                      promedios=_v40_promedios(datos,campo),
-                      unidad_promedio=unidad_media)
+            _v41_card(titulo+' · total' if campo=='Servicios' else titulo,
+                      valor,unidad,color,por_jornada=_v48_totales_jornada(datos,campo))
+            if campo=='Servicios':
+                if not servicios_via.empty:
+                    vias=['Vía 1','Vía 2']
+                    if servicios_via['Vía'].eq('Otros').any():
+                        vias.append('Otros')
+                    cols_via=st.columns(len(vias),gap='small')
+                    paleta_via={'Vía 1':'#289bfa','Vía 2':'#f3b961','Otros':'#94a3b8'}
+                    for col_via,via in zip(cols_via,vias):
+                        reg=servicios_via[servicios_via['Vía'].eq(via)]
+                        valor_via=float(reg['Servicios'].sum()) if not reg.empty else 0.0
+                        desglose_via=_v48_totales_jornada(reg,'Servicios')
+                        # Si la fuente THDR existe, sin registros de esta vía el total es 0.
+                        jornadas_visibles=set(datos['Fecha'].dt.date.map(get_tipo_dia))
+                        for codigo,nom in _V40_JORNADAS:
+                            # Cero solo cuando hay días seleccionados de esta clase.
+                            # Sin días seleccionados corresponde «—», no cero.
+                            if (codigo in jornadas_visibles and
+                                    not np.isfinite(desglose_via[nom]['valor'])):
+                                desglose_via[nom]={'valor':0.0,'dias':0}
+                        with col_via:
+                            _v41_card('Servicios '+via,valor_via,'servicios',
+                                      paleta_via[via],por_jornada=desglose_via)
+                    st.caption('Clasificación por sentido del trayecto THDR, igual que en Resumen. '
+                               'El desglose usa únicamente fechas con datos operacionales visibles.')
+                else:
+                    st.caption('Sin detalle THDR por vía para el período. Se conserva el total disponible.')
             st.markdown(f'<div class="efe41-section">Evolución de {titulo.lower()}</div>',
                         unsafe_allow_html=True)
             st.markdown('<div class="efe41-miniline">Haz clic en una barra para filtrar el mes o el día.</div>',
                         unsafe_allow_html=True)
             if datos[campo].notna().any():
-                serie=datos[['Fecha',campo]].copy()
-                if vista!='Diaria':
-                    serie['Fecha']=serie['Fecha'].dt.to_period('M').dt.to_timestamp()
-                    serie=serie.groupby('Fecha',as_index=False)[campo].sum(min_count=1)
-                fig_op=_go41.Figure(_go41.Bar(
-                    x=serie['Fecha'],y=serie[campo],name=titulo,
-                    marker=dict(color=color),
-                    hovertemplate=('%{x|%d/%m/%Y}' if vista=='Diaria'
-                                   else '%{x|%m/%Y}') +
-                                  f'<br>%{{y:,.0f}} {unidad}<extra></extra>',
-                ))
+                fig_op=_go41.Figure()
+                if campo=='Servicios' and not servicios_via.empty:
+                    serie=servicios_via[['Fecha','Vía','Servicios']].copy()
+                    if vista!='Diaria':
+                        serie['Fecha']=serie['Fecha'].dt.to_period('M').dt.to_timestamp()
+                        serie=serie.groupby(['Fecha','Vía'],as_index=False)['Servicios'].sum(min_count=1)
+                    for via,col_v in (('Vía 1','#289bfa'),('Vía 2','#f3b961'),('Otros','#94a3b8')):
+                        s_v=serie[serie['Vía'].eq(via)]
+                        if not s_v.empty:
+                            fig_op.add_trace(_go41.Bar(
+                                x=s_v['Fecha'],y=s_v['Servicios'],name=via,
+                                marker_color=col_v,
+                                hovertemplate='%{x|%d/%m/%Y}<br>%{y:,.0f} servicios<extra>'+via+'</extra>'))
+                    fig_op.update_layout(barmode='stack',showlegend=True,
+                                         legend=dict(orientation='h',y=1.18,x=0))
+                else:
+                    serie=datos[['Fecha',campo]].copy()
+                    if vista!='Diaria':
+                        serie['Fecha']=serie['Fecha'].dt.to_period('M').dt.to_timestamp()
+                        serie=serie.groupby('Fecha',as_index=False)[campo].sum(min_count=1)
+                    fig_op.add_trace(_go41.Bar(
+                        x=serie['Fecha'],y=serie[campo],name=titulo,
+                        marker_color=color,
+                        hovertemplate=('%{x|%d/%m/%Y}' if vista=='Diaria'
+                                       else '%{x|%m/%Y}') +
+                                      f'<br>%{{y:,.0f}} {unidad}<extra></extra>'))
                 fig_op.update_layout(
-                    height=248,showlegend=False,hovermode='closest',
+                    height=275,hovermode='closest',
                     paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
                     font=dict(color='#b7d4e9',size=11),
-                    margin=dict(l=10,r=10,t=10,b=8),
+                    margin=dict(l=10,r=10,t=36 if campo=='Servicios' else 10,b=8),
                     xaxis=dict(title='',showgrid=False,showline=False,
                                tickformat='%d/%m' if vista=='Diaria' else '%b'),
-                    yaxis=dict(title=unidad,gridcolor='rgba(120,170,216,.13)',
-                               zeroline=False),
+                    yaxis=dict(title=unidad,gridcolor='rgba(120,170,216,.13)',zeroline=False),
                 )
                 if vista!='Diaria':
-                    # Enero..Diciembre abreviados con las primeras tres letras.
-                    fig_op.update_xaxes(dtick='M1',tickmode='array',
-                        tickvals=serie['Fecha'],
-                        ticktext=[_MES_CORTO_EJE[f.month-1] for f in serie['Fecha']])
+                    # En dos años el año desambigua meses repetidos.
+                    anos=serie['Fecha'].dt.year.nunique()
+                    posiciones=sorted(serie['Fecha'].unique())
+                    fig_op.update_xaxes(dtick='M1',tickmode='array',tickvals=posiciones,
+                        ticktext=[_MES_CORTO_EJE[pd.Timestamp(f).month-1] +
+                                  (f' {pd.Timestamp(f).year}' if anos>1 else '')
+                                  for f in posiciones])
                 _pc(fig_op,width='stretch',key=clave)
             else:
                 st.info(f'Sin registros de {titulo.lower()} para el período seleccionado.')
 
-    # 3. Odómetro (UMR), antes de los indicadores energéticos.
-    st.markdown('<div class="efe41-section">Odómetro (UMR)</div>',
-                unsafe_allow_html=True)
-    _v41_card('Kilometraje UMR',km,'km','#bb62ef')
+    # 3. Kilometraje: odómetro físico, Tren-Km comercial y UMR ponderado.
+    with st.container(key='v48_kilometraje'):
+        st.markdown('<div class="efe41-section">Kilometraje · UMR y Tren-Km</div>',
+                    unsafe_allow_html=True)
+        _km_cards=st.columns(3,gap='small')
+        with _km_cards[0]:
+            _v41_card('Kilometraje UMR (odómetro)',km,'km','#bb62ef',
+                      por_jornada=_v48_totales_jornada(_km_validos,'Odómetro [km]'),
+                      explicacion='Kilómetros físicos recorridos por la flota, según el resumen UMR.')
+        with _km_cards[1]:
+            _v41_card('Tren-Km UMR',tren_km,'km','#29ceb0',
+                      por_jornada=_v48_totales_jornada(_km_validos,'Tren-Km [km]'),
+                      explicacion='Kilómetros de operación comercial registrados en el UMR.')
+        with _km_cards[2]:
+            _v41_card('UMR global',umr_pct,'%','#f3b961',
+                      por_jornada=_v48_cociente_jornada(_km_validos,'Tren-Km [km]','Odómetro [km]',100),
+                      desglose_titulo='UMR POR TIPO DE DÍA',
+                      explicacion='UMR = Tren-Km ÷ Odómetro × 100. Es un cociente ponderado de km, '
+                                  'no la suma ni el promedio de porcentajes diarios.')
+        st.markdown('<div class="efe41-section">Evolución de Odómetro y Tren-Km</div>',
+                    unsafe_allow_html=True)
+        if not _km_validos.empty:
+            graf_km=_km_validos[['Fecha','Odómetro [km]','Tren-Km [km]']].copy()
+            if vista!='Diaria':
+                graf_km['Fecha']=graf_km['Fecha'].dt.to_period('M').dt.to_timestamp()
+                graf_km=graf_km.groupby('Fecha',as_index=False)[['Odómetro [km]','Tren-Km [km]']].sum(min_count=1)
+            fig_km=_go41.Figure()
+            for campo_km,titulo_km,tono_km in (
+                ('Odómetro [km]','Kilometraje UMR','#bb62ef'),
+                ('Tren-Km [km]','Tren-Km','#29ceb0')):
+                fig_km.add_trace(_go41.Bar(
+                    x=graf_km['Fecha'],y=graf_km[campo_km],name=titulo_km,
+                    marker_color=tono_km,
+                    hovertemplate='%{x|%d/%m/%Y}<br>%{y:,.2f} km<extra>'+titulo_km+'</extra>'))
+            fig_km.update_layout(
+                height=300,barmode='group',hovermode='x unified',
+                paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='#b7d4e9',size=11),
+                legend=dict(orientation='h',y=1.16,x=0,font=dict(color='#c7e0f3')),
+                margin=dict(l=10,r=10,t=40,b=10),
+                xaxis=dict(title='',showgrid=False,
+                           tickformat='%d/%m' if vista=='Diaria' else '%b'),
+                yaxis=dict(title='km',gridcolor='rgba(120,170,216,.13)',zeroline=False))
+            if vista!='Diaria':
+                anos=graf_km['Fecha'].dt.year.nunique()
+                fig_km.update_xaxes(dtick='M1',tickmode='array',tickvals=graf_km['Fecha'],
+                    ticktext=[_MES_CORTO_EJE[f.month-1]+(f' {f.year}' if anos>1 else '')
+                              for f in graf_km['Fecha']])
+            _pc(fig_km,width='stretch',key='_v48_odo_trenk')
+            st.caption('Odómetro = recorrido físico; Tren-Km = recorrido comercial, '
+                       'según UMR. Se excluyen lecturas negativas como en Resumen. '
+                       'Selecciona un mes o día para aplicar el filtro.')
+        else:
+            st.info('Sin odómetro y Tren-Km UMR comparables para el período seleccionado.')
 
     # 4. Consumo de energía: tarjetas y evolución temporal.
     st.markdown('<div class="efe41-section">Consumo energético (kWh)</div>',
                 unsafe_allow_html=True)
     energia_cols=st.columns(2,gap='small')
-    with energia_cols[0]:_v41_card('Energía total',e,'kWh','#13dac9')
-    with energia_cols[1]:_v41_card('Tracción',t,'kWh','#24a4f4')
+    with energia_cols[0]:
+        _v41_card('Energía total',e,'kWh','#13dac9',
+                  por_jornada=_v48_totales_jornada(datos,'E_Total'))
+    with energia_cols[1]:
+        _v41_card('Tracción',t,'kWh','#24a4f4',
+                  por_jornada=_v48_totales_jornada(datos,'E_Tr'))
 
     with st.container(key='v41_hero'):
         st.markdown('<div class="efe41-section">Evolución del consumo energético</div>',
@@ -6599,7 +6804,9 @@ def _v41_render_dashboard(df):
     _exp_ide=('Se consumen '+_ncl(ide,2)+' kWh de tracción por kilómetro registrado por el odómetro UMR. '
               'En condiciones operacionales comparables, un valor menor representa menor consumo específico.'
               if np.isfinite(ide) else 'Sin energía de tracción y kilometraje UMR comparables.')
-    _v41_card('IDE ponderado',ide,'kWh/km','#21dbc6',explicacion=_exp_ide,
+    _v41_card('IDE ponderado',ide,'kWh/km','#21dbc6',
+              por_jornada=_v48_cociente_jornada(datos,'E_Tr','Odómetro [km]'),
+              desglose_titulo='IDE POR TIPO DE DÍA',explicacion=_exp_ide,
               nota='Cálculo ponderado: suma de kWh de tracción ÷ suma de km UMR; no es promedio simple de los días.')
 
     # v46 · KPIs adicionales del Resumen, con interpretación dentro de cada tarjeta.
@@ -6626,10 +6833,18 @@ def _v41_render_dashboard(df):
     _pkm_total47=_ef46['Pax-km total']
     _pkm_nota47=(f"{_pkm_total47['dias']} día(s) del período con Carga V1/V2. "
                  'Para el indicador PAX-km/kWh se usan solo días con kWh de tracción comparables.')
+    _paxkm_diario48=_v46_paxkm_diario()
     _v41_card('PAX-km transportados',_pkm_total47['valor'],'pax-km','#f3b961',
+              por_jornada=_v48_paxkm_jornada(_paxkm_diario48,datos['Fecha']),
               explicacion='PAX-km = Σ (pasajeros a bordo en cada tramo × kilómetros de ese tramo). '
                           'Ejemplo: 150 pasajeros durante 12 km = 1.800 PAX-km.',
               nota=_pkm_nota47)
+    # Cada tipo de día reutiliza las mismas fuentes para ratios comparables.
+    _eficiencia_jornada48={}
+    for _codigo48,_nombre48 in _V40_JORNADAS:
+        _f48=datos['Fecha'].dt.date.map(get_tipo_dia).eq(_codigo48)
+        _eficiencia_jornada48[_nombre48]=_v46_indicadores_eficiencia(
+            datos[_f48],viajes=df_viajes,paxkm_diario=_paxkm_diario48,fuente=_fuente_kpi46)
     _cols46=st.columns(2,gap='small')
     for _idx46,(_campo46,_titulo46,_color46,_desc46,_nota46) in enumerate((
         ('Pax/kWh total','Pasajeros / kWh total','#10ded1',
@@ -6653,7 +6868,11 @@ def _v41_render_dashboard(df):
         with _cols46[_idx46%2]:
             _v41_card(_titulo46,_ratio46,
                       'pax/kWh' if _campo46!='Pax-km/kWh' else 'pax-km/kWh',
-                      _color46,explicacion=_descripcion46,nota=_origen46)
+                      _color46,
+                      por_jornada={_nombre48:_eficiencia_jornada48[_nombre48][_campo46]
+                                   for _,_nombre48 in _V40_JORNADAS},
+                      desglose_titulo='EFICIENCIA POR TIPO DE DÍA',
+                      explicacion=_descripcion46,nota=_origen46)
 
     lower=st.columns([1,1,1],gap='small')
     with lower[0]:
@@ -6725,8 +6944,9 @@ def _v41_render_dashboard(df):
 
     # Detalle verificable y exportable; datos originales sin redondeo destructivo.
     with st.expander('📋 Ver detalle diario y exportar datos',expanded=False):
-        tabla=datos[['Fecha','Tipo de jornada','E_Total','E_Tr','Odómetro [km]',
-                     'IDE (kWh/km)','PAX','Servicios']].copy()
+        tabla=datos[['Fecha','Tipo de jornada','Servicios','PAX',
+                     'Odómetro [km]','Tren-Km [km]','UMR (%)',
+                     'E_Total','E_Tr','IDE (kWh/km)']].copy()
         st.dataframe(tabla,hide_index=True,width='stretch')
         st.download_button('⬇️ Exportar CSV',
             data=tabla.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
