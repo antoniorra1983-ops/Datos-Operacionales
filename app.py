@@ -3210,7 +3210,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 _SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía",
-              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo"]
+              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "🌌 Dashboard"]
 
 # ===== OPTIMIZACIÓN INTEGRADA: GESTIÓN DE ARCHIVOS =====
 # El gestor sigue dentro del sidebar; las búsquedas y filtros no vuelven
@@ -3661,6 +3661,7 @@ _V29_DATOS_POR_SECCION = (
     ("df_serv_tipo", "df_pax_tipo", "df_bi_tiempos", "df_incid", "df_incid_full", "df_ide_lb",
       "all_tr", "df_oit", "_oit_diag", "_errores_proc", "_seat_dups"),
       # BI v33: UMR por tren para modelo IDE 100/M-SFE, incidentes, OIT y rutas.
+    ('df_incid',),  # v41: resumen visual, sin cargar THDR completo.
 )
 
 def _v29_necesarios():
@@ -3864,7 +3865,13 @@ f_carga_v1 = f_carga_v2 = f_viajes = f_ide = f_incid = f_oit = []
 with st.sidebar:
     st.markdown("### 🚆 Datos operacionales")
     st.caption("EFE Valparaíso · Navegación")
-    _seccion = st.radio("Secciones", _SECCIONES, key="_nav_seccion", horizontal=False, label_visibility="collapsed")
+    # v41: el dashboard es la portada; el orden de _SECCIONES no cambia para
+    # mantener las 15 condiciones históricas y sus índices de carga.
+    _v41_nav_opciones = [_SECCIONES[-1]] + _SECCIONES[:-1]
+    if '_nav_seccion' not in st.session_state:
+        st.session_state['_nav_seccion'] = _SECCIONES[-1]
+    _seccion = st.radio("Secciones", _v41_nav_opciones, key="_nav_seccion",
+                        horizontal=False, label_visibility="collapsed")
     st.divider()
     if _BI_ADMIN:
         with st.expander("📥 Cargar archivos", expanded=False):
@@ -6049,6 +6056,296 @@ if _seccion == '🎯 BI Ejecutivo':
             st.download_button('⬇️ Exportar controles CSV',
                                data=_qc.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
                                file_name='calidad_bi_operacional.csv',mime='text/csv',key='_bi_csv_calidad')
+
+
+# ===== v41 · DASHBOARD NEÓN EJECUTIVO: VISTA LIGERA SOBRE EL HISTORIAL =====
+# Solo se ejecuta cuando el visitante entra a la portada: no altera fuentes,
+# caché Parquet, la LB ni los 15 análisis previos. Utiliza df_ops ya filtrado.
+def _v41_css():
+    st.markdown("""<style>
+    [data-testid="stAppViewContainer"] {
+      background: radial-gradient(ellipse at 28% -8%,#06495c 0%,#071f3a 27%,#061327 67%,#060e21 100%) !important;
+      color: #e8f2ff !important;
+    }
+    [data-testid="stSidebar"] {
+      background:linear-gradient(165deg,#043e44 0%,#06263c 28%,#061128 70%,#080d23 100%) !important;
+      border-right:1px solid #17627b !important;
+    }
+    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,[data-testid="stSidebar"] span {
+      color:#cde6f5 !important;
+    }
+    [data-testid="stSidebar"] .st-key-_nav_seccion [role="radiogroup"] label:has(input:checked){
+      background:linear-gradient(90deg,rgba(0,221,205,.22),rgba(28,98,184,.2)) !important;
+      border:1px solid rgba(0,240,224,.49) !important;
+      box-shadow:0 0 14px rgba(0,210,207,.1);
+    }
+    [data-testid="stAppViewContainer"] h1,
+    [data-testid="stAppViewContainer"] h2,
+    [data-testid="stAppViewContainer"] h3,
+    [data-testid="stAppViewContainer"] p,
+    [data-testid="stAppViewContainer"] label {
+      color:#dbeaff;
+    }
+    .st-key-_contenido_cabecera{display:none!important;}
+    [data-testid="stAppViewContainer"] [data-testid="stVerticalBlockBorderWrapper"] {
+      border-color:rgba(40,118,160,.28)!important;
+    }
+    .st-key-v41_hero,
+    .st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right {
+       background:linear-gradient(145deg,rgba(4,24,51,.94),rgba(2,15,38,.96));
+       border:1px solid rgba(38,137,174,.39);
+       border-radius:15px;
+       padding:19px 21px 12px 21px;
+       box-shadow:0 13px 38px rgba(0,0,0,.17),inset 0 1px 0 rgba(78,200,232,.07);
+    }
+    .efe41-eyebrow{color:#22e3db;font-size:11px;font-weight:780;
+      letter-spacing:2.3px;text-transform:uppercase;margin-bottom:6px}
+    .efe41-hero-title{color:#f2faff!important;font-weight:760;
+      font-size:clamp(25px,3vw,38px);letter-spacing:-.7px;line-height:1.1;margin:0 0 7px 0}
+    .efe41-sub{color:#8fb2cb!important;line-height:1.4;font-size:13px}
+    .efe41-section{font-size:15px;font-weight:750;color:#e4f2ff;
+      padding:3px 0 3px 0;letter-spacing:.1px}
+    .efe41-kpi{position:relative;min-height:113px;
+      border:1px solid rgba(44,147,200,.36);border-radius:13px;
+      background:linear-gradient(155deg,rgba(5,29,64,.96),rgba(4,18,42,.98));
+      padding:15px 18px 13px;overflow:hidden;
+      box-shadow:0 9px 24px rgba(0,0,0,.15)}
+    .efe41-kpi:before{content:"";position:absolute;top:0;left:0;right:0;
+      height:2px;background:linear-gradient(90deg,var(--ac),transparent)}
+    .efe41-kpi-title{font-size:12px;font-weight:680;color:#9bb9d0;
+      line-height:1.25;margin-bottom:12px}
+    .efe41-kpi-number{font-size:clamp(19px,2.0vw,31px);font-weight:760;
+      color:#f2f8ff;letter-spacing:-.4px;line-height:1.13;
+      font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+    .efe41-kpi-unit{color:var(--ac);font-size:12px;margin-top:4px;font-weight:620}
+    .efe41-miniline{font-size:12px;color:#90aac4;margin-top:7px;line-height:1.3}
+    .efe41-track{height:7px;background:#112c49;border-radius:9px;overflow:hidden;margin:7px 0 11px}
+    .efe41-track span{display:block;height:100%;border-radius:9px;
+       background:linear-gradient(90deg,var(--ac),#368bf6)}
+    .efe41-jornada{display:flex;justify-content:space-between;gap:8px;
+      color:#c4daea;font-size:12px}
+    .efe41-pill{display:inline-block;border:1px solid rgba(0,218,202,.4);
+      border-radius:24px;padding:5px 10px;color:#62f0e5;font-size:11px;
+      letter-spacing:.2px;background:rgba(2,137,145,.11)}
+    .efe41-legend{color:#9ebdd1;font-size:11px;margin:3px 0}
+    .efe41-legend b{color:#ebf7ff;font-weight:700}
+    .st-key-v41_hero [data-testid="stPlotlyChart"]{margin-top:-6px;}
+    @media(max-width:1000px){
+      .efe41-kpi{padding:13px 12px;min-height:106px}
+      .efe41-kpi-number{font-size:clamp(18px,2.5vw,25px)}
+      .st-key-v41_hero,.st-key-v41_lower_left,.st-key-v41_lower_center,.st-key-v41_lower_right{padding:13px}
+    }
+    </style>""",unsafe_allow_html=True)
+
+
+def _v41_suma(df,campo):
+    if df is None or df.empty or campo not in df:
+        return float('nan')
+    return float(pd.to_numeric(df[campo],errors='coerce').sum(min_count=1))
+
+
+def _v41_card(titulo,valor,unidad,accent):
+    import html as _html41
+    if valor is None or not np.isfinite(float(valor)):
+        mostrado='—'
+    else:
+        mostrado=_ncl(float(valor),2)
+    st.markdown(
+        f'<div class="efe41-kpi" style="--ac:{accent}">'
+        f'<div class="efe41-kpi-title">{_html41.escape(titulo)}</div>'
+        f'<div class="efe41-kpi-number">{mostrado}</div>'
+        f'<div class="efe41-kpi-unit">{_html41.escape(unidad)}</div>'
+        f'</div>',unsafe_allow_html=True)
+
+
+def _v41_diario(df):
+    if df is None or df.empty or 'Fecha' not in df:
+        return pd.DataFrame()
+    campos=['E_Total','E_Tr','Odómetro [km]','PAX','Servicios']
+    sub=df[['Fecha']+[c for c in campos if c in df.columns]].copy()
+    sub['Fecha']=pd.to_datetime(sub['Fecha'],errors='coerce').dt.normalize()
+    sub=sub.dropna(subset=['Fecha'])
+    for c in campos:
+        if c not in sub.columns:sub[c]=np.nan
+        sub[c]=pd.to_numeric(sub[c],errors='coerce')
+    if sub.empty:return sub
+    # Una sola fila por fecha para evitar duplicar energía en uniones de fuentes.
+    sub=(sub.groupby('Fecha',as_index=False)[campos].sum(min_count=1)
+         .sort_values('Fecha').reset_index(drop=True))
+    sub['Tipo de jornada']=sub['Fecha'].dt.date.map(get_tipo_dia).map(
+        {'L':'Laboral','S':'Sábado','D/F':'Domingo y festivo'})
+    sub['IDE (kWh/km)']=np.where(sub['Odómetro [km]']>0,
+                                  sub['E_Tr']/sub['Odómetro [km]'],np.nan)
+    return sub
+
+
+def _v41_render_dashboard(df):
+    _v41_css()
+    st.markdown('<div class="efe41-eyebrow">EFE VALPARAÍSO · INTELIGENCIA OPERACIONAL</div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="efe41-hero-title">Dashboard ejecutivo</div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="efe41-sub">Una vista integrada de energía, eficiencia y operación. '
+                'Usa los filtros globales o selecciona un mes o día en los gráficos.</div>',
+                unsafe_allow_html=True)
+    datos=_v41_diario(df)
+    if datos.empty:
+        st.info('No hay registros operacionales para el período y las jornadas seleccionadas.')
+        return
+    e=_v41_suma(datos,'E_Total'); t=_v41_suma(datos,'E_Tr')
+    km=_v41_suma(datos,'Odómetro [km]')
+    pax=_v41_suma(datos,'PAX'); serv=_v41_suma(datos,'Servicios')
+    ide=t/km if np.isfinite(t) and np.isfinite(km) and km>0 else np.nan
+    fmin,fmax=datos['Fecha'].min(),datos['Fecha'].max()
+
+
+    with st.container(key='v41_hero'):
+        c1,c2=st.columns([3.4,1.4],vertical_alignment='center')
+        with c1:
+            st.markdown('<div class="efe41-section">Evolución del consumo energético</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f'<div class="efe41-miniline">{fmin:%d/%m/%Y} — {fmax:%d/%m/%Y} · '
+                        f'{len(datos)} fechas operacionales · Selecciona un punto para filtrar</div>',
+                        unsafe_allow_html=True)
+        with c2:
+            vista=st.segmented_control('Visualización',['Mensual','Diaria'],default='Mensual',
+                                     key='_v41_vista',label_visibility='collapsed')
+        plot=datos.copy()
+        if vista!='Diaria':
+            plot['Fecha']=plot['Fecha'].dt.to_period('M').dt.to_timestamp()
+            plot=plot.groupby('Fecha',as_index=False)[['E_Total','E_Tr']].sum(min_count=1)
+        else:
+            plot=plot[['Fecha','E_Total','E_Tr']].copy()
+        from plotly import graph_objects as _go41
+        fig=_go41.Figure()
+        for campo,titulo,color,fill in (
+            ('E_Total','Energía total','#13d4d1','rgba(12,177,212,.24)'),
+            ('E_Tr','Energía de tracción','#ac40df','rgba(160,50,212,.19)')):
+            if campo not in plot or plot[campo].notna().sum()==0:
+                continue
+            fig.add_trace(_go41.Scatter(
+                x=plot['Fecha'],y=plot[campo],name=titulo,
+                mode='lines+markers' if len(plot)<=60 else 'lines',
+                line=dict(color=color,width=2.7,shape='spline' if len(plot)<=60 else 'linear'),
+                marker=dict(size=6,color=color),fill='tozeroy',fillcolor=fill,
+                hovertemplate='%{x|%d/%m/%Y}<extra>'+titulo+'</extra><br>%{y:,.2f} kWh',
+            ))
+        fig.update_layout(
+            height=355,hovermode='x unified',
+            paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#b7d4e9',size=11),
+            legend=dict(orientation='h',y=1.13,x=0,font=dict(color='#c7e0f3')),
+            margin=dict(l=10,r=10,t=40,b=10),
+            xaxis=dict(title='',showgrid=False,showline=False,
+                       tickfont=dict(color='#80bdd4'),tickformat='%d/%m' if vista=='Diaria' else '%b'),
+            yaxis=dict(title='kWh',gridcolor='rgba(120,170,216,.13)',zeroline=False,
+                       tickfont=dict(color='#a2bfd5')),
+        )
+        if vista!='Diaria':fig.update_xaxes(dtick='M1')
+        # Reutiliza el filtro por clic de la v38 y las abreviaturas de mes v39.
+        _pc(fig,width='stretch',key='_v41_evolucion_energia')
+        _pax_v = _ncl(pax,2) if np.isfinite(pax) else '—'
+        _serv_v = _ncl(serv,2) if np.isfinite(serv) else '—'
+        st.markdown(
+            '<div class="efe41-legend" style="padding:4px 3px 12px;">'
+            f'👥 Pasajeros: <b>{_pax_v}</b> &nbsp;&nbsp; '
+            f'🚆 Servicios: <b>{_serv_v}</b> &nbsp;&nbsp; '
+            f'📅 Jornadas registradas: <b>{len(datos)}</b>'
+            '</div>',unsafe_allow_html=True)
+
+    # Tarjetas: las mismas magnitudes y fórmulas que el BI existente, 2 decimales.
+    kcols=st.columns(4,gap='small')
+    with kcols[0]:_v41_card('Energía total',e,'kWh','#13dac9')
+    with kcols[1]:_v41_card('Tracción',t,'kWh','#24a4f4')
+    with kcols[2]:_v41_card('Kilometraje UMR',km,'km','#bb62ef')
+    with kcols[3]:_v41_card('IDE ponderado',ide,'kWh/km','#21dbc6')
+
+
+    lower=st.columns([1,1,1],gap='small')
+    with lower[0]:
+        with st.container(key='v41_lower_left'):
+            st.markdown('<div class="efe41-section">Promedio diario por jornada</div>',
+                        unsafe_allow_html=True)
+            st.markdown('<div class="efe41-miniline">Consumo de energía · kWh/día</div>',
+                        unsafe_allow_html=True)
+            promedios=_v40_promedios(datos,'E_Total')
+            mejores=[x['valor'] for x in promedios.values() if np.isfinite(x['valor'])]
+            maxval=max(mejores) if mejores else 0
+            for nom,color in (('Laboral','#10ded1'),('Sábado','#289bfa'),
+                              ('Domingo y festivo','#bb5cf5')):
+                res=promedios[nom]; valor=res['valor']; ndias=res['dias']
+                porc=(max(0,min(100,100*valor/maxval)) if maxval>0 and np.isfinite(valor) else 0)
+                visto=f'{_ncl(valor,2)} kWh' if np.isfinite(valor) else '—'
+                st.markdown(f'<div class="efe41-jornada"><span>{nom}</span>'
+                            f'<span>{visto}</span></div>'
+                            f'<div class="efe41-track" style="--ac:{color}">'
+                            f'<span style="width:{porc:.2f}%"></span></div>'
+                            f'<div class="efe41-legend">{ndias} día(s) con dato</div>',
+                            unsafe_allow_html=True)
+    with lower[1]:
+        with st.container(key='v41_lower_center'):
+            st.markdown('<div class="efe41-section">IDE por jornada</div>',unsafe_allow_html=True)
+            st.markdown('<div class="efe41-miniline">Tracción / kilometraje · kWh/km</div>',
+                        unsafe_allow_html=True)
+            for nom,color in (('Laboral','#10ded1'),('Sábado','#289bfa'),
+                              ('Domingo y festivo','#bb5cf5')):
+                grupo=datos[datos['Tipo de jornada'].eq(nom)]
+                gtr=_v41_suma(grupo,'E_Tr');gkm=_v41_suma(grupo,'Odómetro [km]')
+                valor=gtr/gkm if np.isfinite(gtr) and np.isfinite(gkm) and gkm>0 else np.nan
+                visto=f'{_ncl(valor,2)}' if np.isfinite(valor) else '—'
+                st.markdown('<div style="display:flex;justify-content:space-between;'
+                            f'align-items:center;border-bottom:1px solid #173a50;padding:12px 0;">'
+                            f'<span style="font-size:13px;color:#b6cfe2">{nom}</span>'
+                            f'<span style="font-size:21px;font-weight:750;color:{color}">{visto}</span>'
+                            '</div>',unsafe_allow_html=True)
+            st.markdown('<div class="efe41-miniline">IDE ponderado según kilómetros de cada jornada; '
+                        'sin mezclar laborales, sábados ni domingos/festivos.</div>',
+                        unsafe_allow_html=True)
+    with lower[2]:
+        with st.container(key='v41_lower_right'):
+            st.markdown('<div class="efe41-section">Distribución del consumo</div>',
+                        unsafe_allow_html=True)
+            st.markdown('<div class="efe41-miniline">Energía total y participación de tracción</div>',
+                        unsafe_allow_html=True)
+            if np.isfinite(e) and e>0 and np.isfinite(t) and 0<=t<=e:
+                restante=e-t
+                figpie=_go41.Figure(_go41.Pie(
+                    labels=['Tracción','Otros usos'],values=[t,restante],hole=.72,
+                    marker=dict(colors=['#18dfcc','#7a3fe2'],line=dict(color='#061c38',width=2)),
+                    textinfo='none',hovertemplate='%{label}: %{value:,.2f} kWh · %{percent}<extra></extra>',
+                ))
+                figpie.update_layout(height=208,
+                    paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                    showlegend=False,margin=dict(l=0,r=0,t=3,b=3),
+                    annotations=[dict(text=f'{100*t/e:.2f}%<br><span style="font-size:11px">tracción</span>',
+                                      x=.5,y=.5,showarrow=False,font=dict(color='#e5fcff',size=23))],
+                )
+                # Gráfico circular no es fecha y no aplica filtro de mes/día.
+                st.plotly_chart(figpie,width='stretch',config={'displayModeBar':False})
+                st.markdown('<div class="efe41-legend">'
+                            f'<span style="color:#17dbc9">●</span> Tracción: <b>{_ncl(t,2)} kWh</b><br>'
+                            f'<span style="color:#a45ee6">●</span> Otros usos: <b>{_ncl(restante,2)} kWh</b>'
+                            '</div>',unsafe_allow_html=True)
+            else:
+                st.info('No hay energía total y tracción comparables para el período.')
+
+    # Detalle verificable y exportable; datos originales sin redondeo destructivo.
+    with st.expander('📋 Ver detalle diario y exportar datos',expanded=False):
+        tabla=datos[['Fecha','Tipo de jornada','E_Total','E_Tr','Odómetro [km]',
+                     'IDE (kWh/km)','PAX','Servicios']].copy()
+        st.dataframe(tabla,hide_index=True,width='stretch')
+        st.download_button('⬇️ Exportar CSV',
+            data=tabla.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+            file_name='dashboard_ejecutivo_efe.csv',mime='text/csv',
+            key='_v41_descargar_csv')
+    st.caption('Fuente: historial persistente UMR y energía jerarquizada (Factura > PRMTE > SEAT). '
+               'La energía de tracción y el kilometraje se usan para el IDE ponderado. '
+               'Las cifras corresponden únicamente a los días disponibles tras los filtros globales.')
+
+
+if _seccion == '🌌 Dashboard':
+    _v41_render_dashboard(df_ops)
 
 if _seccion == _SECCIONES[0]:
     _ep=st.session_state.get('_errores_proc',{})
