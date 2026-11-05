@@ -3358,17 +3358,33 @@ def _clima_ancho(clima, valores=('T_max', 'T_min', 'T_media'), unidad='[°C]'):
 
 # Pasajeros-km por día de la Carga de pasajeros (la usan 📊 Resumen, 📏 Línea base y la causa raíz)
 def _paxkm_por_dia(df):
-    """Pax-km por día de un export de Carga: en cada viaje, pasajeros a bordo de cada tramo × km del tramo."""
+    """PAX-km/día = Σ_viajes Σ_tramos (pasajeros a bordo × km del tramo).
+
+    Lee las columnas de estaciones en el orden real del export de Carga (V1 o V2).
+    El km del tramo es la distancia absoluta entre estaciones consecutivas,
+    y los pasajeros corresponden a los que viajan ENTRE esas estaciones.
+    No se multiplica el total diario de pasajeros por el odómetro de la flota:
+    ese producto no representa los kilómetros efectivamente transportados.
+    """
     if df is None or getattr(df, 'empty', True) or 'Fecha' not in df.columns:
         return pd.Series(dtype=float)
-    _kmc = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)] for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
+    # Mantener el orden de las estaciones del archivo: V2 puede ir invertida.
+    _kmc = {PAX_COL_CODE[_e]: _KM_ESTACION[_norm(_e)]
+            for _e in ESTACIONES if _norm(_e) in _KM_ESTACION}
     _cods = [c for c in df.columns if c in _kmc]
     if len(_cods) < 2:
         return pd.Series(dtype=float)
-    _L = df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(float)
-    _km = np.abs(np.diff(np.array([_kmc[c] for c in _cods], dtype=float)))
-    _f = pd.to_datetime(df['Fecha'], errors='coerce').dt.normalize()
-    return pd.Series((_L[:, :-1] * _km[None, :]).sum(axis=1), index=_f.values).groupby(level=0).sum()
+    _fechas = pd.to_datetime(df['Fecha'], errors='coerce').dt.normalize()
+    _pax = df[_cods].apply(pd.to_numeric, errors='coerce').fillna(0).clip(lower=0).to_numpy(dtype=float)
+    _km_est = np.array([_kmc[c] for c in _cods], dtype=float)
+    _km_tramo = np.abs(np.diff(_km_est))
+    # La carga de una estación describe los pasajeros a bordo para el
+    # recorrido hasta la siguiente estación; la última no tiene tramo saliente.
+    _pax_km_tramo = _pax[:, :-1] * _km_tramo[None, :]
+    _pax_km_viaje = _pax_km_tramo.sum(axis=1)
+    _serie = pd.Series(_pax_km_viaje, index=_fechas)
+    _serie = _serie[_serie.index.notna()]
+    return _serie.groupby(level=0).sum().sort_index()
 
 
 def _cargar_archivos_sin_interrumpir(_archivos, _lector, _tipo, _inicio, _fin, _errores):
@@ -6410,7 +6426,7 @@ def _v46_indicadores_eficiencia(datos,viajes=None,paxkm_diario=None,fuente='Carg
     Pax/kWh y Pax-km/kWh que se muestran en la pestaña Resumen.
     """
     vacio={'valor':float('nan'),'dias':0,'num':float('nan'),'den':float('nan')}
-    resultado={k:vacio.copy() for k in ('Pax/kWh total','Pax/kWh tracción','Pax-km/kWh')}
+    resultado={k:vacio.copy() for k in ('Pax/kWh total','Pax/kWh tracción','Pax-km total','Pax-km/kWh')}
     if datos is None or datos.empty:
         return resultado
     energia=datos[['Fecha','E_Total','E_Tr']].copy()
@@ -6436,6 +6452,13 @@ def _v46_indicadores_eficiencia(datos,viajes=None,paxkm_diario=None,fuente='Carg
         pkm['Fecha']=pd.to_datetime(pkm['Fecha'],errors='coerce').dt.normalize()
         pkm['Pax-km']=pd.to_numeric(pkm['Pax-km'],errors='coerce')
         pareados=energia.merge(pkm,on='Fecha',how='inner')
+        # El total de pasajeros-km no depende de tener energía medida ese día.
+        # Solo para el cociente pax-km/kWh se exigen días con tracción válida.
+        pkm_validos=pareados[pareados['Pax-km']>0]
+        if not pkm_validos.empty:
+            total_pkm=float(pkm_validos['Pax-km'].sum())
+            resultado['Pax-km total']={'valor':total_pkm,'dias':len(pkm_validos),
+                                       'num':total_pkm,'den':float('nan')}
         validos=pareados[(pareados['Pax-km']>0) & (pareados['E_Tr']>0)]
         if not validos.empty:
             num=float(validos['Pax-km'].sum());den=float(validos['E_Tr'].sum())
@@ -6598,6 +6621,15 @@ def _v41_render_dashboard(df):
         st.caption('No hay registros de pasajeros para calcular Pax/kWh.')
     _ef46=_v46_indicadores_eficiencia(
         datos,viajes=df_viajes,paxkm_diario=_v46_paxkm_diario(),fuente=_fuente_kpi46)
+    # v47 · Total de transporte realizado: pasajeros × kilómetros por tramo.
+    # Los mismos valores diarios alimentan el Resumen, el Dashboard y la línea base.
+    _pkm_total47=_ef46['Pax-km total']
+    _pkm_nota47=(f"{_pkm_total47['dias']} día(s) del período con Carga V1/V2. "
+                 'Para el indicador PAX-km/kWh se usan solo días con kWh de tracción comparables.')
+    _v41_card('PAX-km transportados',_pkm_total47['valor'],'pax-km','#f3b961',
+              explicacion='PAX-km = Σ (pasajeros a bordo en cada tramo × kilómetros de ese tramo). '
+                          'Ejemplo: 150 pasajeros durante 12 km = 1.800 PAX-km.',
+              nota=_pkm_nota47)
     _cols46=st.columns(2,gap='small')
     for _idx46,(_campo46,_titulo46,_color46,_desc46,_nota46) in enumerate((
         ('Pax/kWh total','Pasajeros / kWh total','#10ded1',
@@ -6608,7 +6640,8 @@ def _v41_render_dashboard(df):
          'Más alto suele ser mejor a igual nivel de servicio y tipo de operación.'),
         ('Pax-km/kWh','Pasajeros-km / kWh tracción','#f3b961',
          'pasajeros-kilómetro transportados por cada kWh de tracción',
-         'Un pasajero trasladado 10 km equivale a 10 pax-km; mayor suele indicar mayor productividad energética.'),
+         'Fórmula: Σ (pasajeros por tramo × km del tramo) ÷ Σ (kWh de tracción en los días coincidentes). '
+         'Mayor suele indicar mayor productividad energética.'),
     )):
         _indicador46=_ef46[_campo46];_ratio46=_indicador46['valor']
         _descripcion46=(f'El valor {_ncl(_ratio46,2)} significa {_ncl(_ratio46,2)} {_desc46}.'
@@ -7052,10 +7085,9 @@ if _seccion == _SECCIONES[0]:
 
                 # --- 9. Pasajeros-km por kWh de tracción. Pax-km de la Carga de pasajeros: pasajeros a bordo de cada tramo × km del tramo ---
                 st.markdown("**Pasajeros-km por kWh de tracción (Pax-km/kWh)**")
-                _pk_r = pd.Series(dtype=float)
-                for _dc in [d for d in [df_carga_v1, df_carga_v2] if d is not None and not d.empty and 'Fecha' in d.columns]:
-                    _s_pk = _paxkm_por_dia(_dc)
-                    _pk_r = _pk_r.add(_s_pk, fill_value=0) if len(_pk_r) else _s_pk
+                # v47 · Compartir el mismo cálculo pasajero × km por tramo con Dashboard.
+                # El filtro del Resumen se aplica al cruzar por fecha con la energía.
+                _pk_r = _v46_paxkm_diario()
                 _en_tr = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(), E_Tr=pd.to_numeric(df_resumen['E_Tr'], errors='coerce'))
                           .groupby('Fecha', as_index=False)['E_Tr'].sum().rename(columns={'E_Tr': 'Tracción'}))
                 _de_pk = _en_tr.merge(_pk_r.rename('Pax-km').rename_axis('Fecha').reset_index(), on='Fecha', how='inner') if len(_pk_r) else pd.DataFrame()
@@ -7072,6 +7104,11 @@ if _seccion == _SECCIONES[0]:
                     _v36_tarjeta(_mk[0], "Pax-km/kWh", _ncl(_pk_t / _tr_pk_t, 2))
                     _v36_tarjeta(_mk[1], "Pax-km (millones)", _ncl(_pk_t / 1e6, 2))
                     _v36_tarjeta(_mk[2], "Tracción (kWh)", _fmt_int(_tr_pk_t))
+                    _v36_tarjeta(_mk[3], "PAX-km transportados", _ncl(_pk_t, 0))
+                    st.caption("Fórmula verificada: **PAX-km = suma de (pasajeros a bordo de cada tramo × km de ese tramo)**. "
+                               "Se suman ambos sentidos (Carga V1 y V2). No se multiplica el total de pasajeros "
+                               "por el kilometraje total de los trenes. "
+                               "Aquí se muestran los PAX-km de los días que también tienen tracción válida.")
                     st.caption(f"Interpretación: {_ncl(_pk_t/_tr_pk_t,2)} Pax-km/kWh significa "
                                "pasajeros-kilómetro transportados por cada kWh de tracción. "
                                "Por ejemplo, 1 pasajero que viaja 10 km genera 10 pax-km; "
@@ -7087,7 +7124,7 @@ if _seccion == _SECCIONES[0]:
                     _eje_mes(fig_pk_kwh)
                     _pc(_no_huecos(fig_pk_kwh), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_paxkm_kwh")
                     _n_pk = len(_de_pk)
-                    st.caption("Pasajeros-km = pasajeros a bordo de cada tramo × km del tramo (Carga de pasajeros V1 y V2). Energía de tracción con la "
+                    st.caption("PAX-km = Σ(pasajeros a bordo por tramo × km del tramo), sumado por viaje y fecha (Carga V1 y V2). Energía de tracción con la "
                                "jerarquía de siempre (Factura; si no hay, PRMTE; si no, SEAT). "
                                + ("Solo cuenta 1 día con pasajeros-km y tracción" if _n_pk == 1 else f"Solo cuentan los {_n_pk} días con pasajeros-km y tracción")
                                + "; el valor global divide los totales del período (no promedia días).")
