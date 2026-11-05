@@ -12524,11 +12524,20 @@ def _v52_mostrar_regresion(ops):
     if vc.gt(10).any():
         st.warning('Multicolinealidad elevada (VIF > 10): algunos coeficientes pueden ser inestables.')
     betas=out['coef'].set_index('Variable')['Coeficiente']
-    formula=('Y = '+(f'{betas["Intercepto"]:,.4g}' if inter else '0'))
+    # Mostrar siempre 3 decimales (formato chileno) y nunca notación científica.
+    # El modelo y sus predicciones siguen utilizando los coeficientes completos.
+    formula=('Y = '+(_ncl(betas['Intercepto'],3) if inter else '0,000'))
+    _coef_redondeados=[]
     for c in x:
-        coef=float(betas[c]);formula+=f' {"+" if coef>=0 else "−"} {abs(coef):,.4g} × ({c})'
+        coef=float(betas[c])
+        formula+=f' {"+" if coef>=0 else "−"} {_ncl(abs(coef),3)} × ({c})'
+        if 0 < abs(coef) < 0.0005:
+            _coef_redondeados.append(c)
     st.markdown('**Ecuación estimada**')
     st.code(formula,language='text')
+    if _coef_redondeados:
+        st.caption('Nota: algún coeficiente pequeño se muestra como 0,000 al redondear a 3 decimales. '
+                   'El cálculo de la regresión conserva toda su precisión.')
     st.markdown('#### Coeficientes y significancia')
     st.dataframe(out['coef'].style.format({'Coeficiente':'{:,.6g}','Error estándar':'{:,.4g}',
         't':'{:,.3f}','p (bilateral)':'{:.4g}','IC95 inferior':'{:,.5g}',
