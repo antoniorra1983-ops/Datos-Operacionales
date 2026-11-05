@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """Notificar sobreconsumo de tracción vs LB mediante Issues de GitHub.
 
-No usa SMTP: GitHub envía sus notificaciones normales a la dirección
-verificada configurada en github.com/settings/notifications.
+No usa SMTP ni requiere usar Watch: cada Issue de alerta se asigna al
+propietario del repositorio (por defecto), de modo que GitHub pueda
+notificarlo como responsable en su correo verificado si tiene email habilitado.
 
 Ejecutar desde la raíz del repositorio:
   python alertas_energia_github.py --vista-previa
@@ -179,11 +180,25 @@ def _nombre_issue(fecha):
     return f"[SGE][LB] Sobreconsumo de tracción · {fecha}"
 
 
+def _usuario_a_notificar(repositorio):
+    """Asignatario de cada alerta. Por defecto es el dueño de este repositorio personal.
+
+    Puede modificarse con GITHUB_ALERT_ASSIGNEE sin tocar el programa.
+    La cuenta debe tener permiso para ser asignada a Issues del repositorio.
+    """
+    usuario = os.environ.get('GITHUB_ALERT_ASSIGNEE', '').strip() or repositorio.split('/', 1)[0]
+    if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?', usuario):
+        raise ValueError('Nombre de usuario GitHub no válido para recibir alertas')
+    return usuario
+
+
 def _detalle_issue(fila, repositorio):
     dia = pd.Timestamp(fila['Fecha']).strftime('%Y-%m-%d')
     exceso = float(fila['Exceso LB (kWh)'])
+    usuario = _usuario_a_notificar(repositorio)
     url = f"https://github.com/{repositorio}/actions"
     return (f"<!-- efe-alerta-lb:{dia} -->\n"
+            f"**Responsable de revisar esta anomalía:** @{usuario}\n\n"
             f"## Sobreconsumo energético frente a línea base — {dia}\n\n"
             "| Indicador | Resultado |\n|---|---:|\n"
             f"| Tipo de jornada | {_jornada(fila.get('Tipo Día'))} |\n"
@@ -261,14 +276,25 @@ def publicar_issues(alertas, repositorio, *, api_func=_api_github, existentes=No
             print(f'{dia}: aviso pendiente (vista previa)')
             publicados.append({'fecha': dia, 'simulado': True})
             continue
+        # Asignación directa: la notificación 'assigned' no requiere Watch.
+        # El responsable es el propietario del repositorio salvo configuración explícita.
+        usuario = _usuario_a_notificar(repositorio)
         creado = api_func(f'repos/{repositorio}/issues', metodo='POST', cuerpo={
             'title': _nombre_issue(dia),
             'body': _detalle_issue(fila, repositorio),
+            'assignees': [usuario],
         })
         if not creado.get('number'):
             raise RuntimeError(f'GitHub no confirmó la creación de la alerta del {dia}')
+        # GitHub puede aceptar una incidencia omitiendo un asignatario inválido.
+        # No afirmar que llegará un email si no se confirmó la asignación.
+        asignados = {str(a.get('login', '')).casefold() for a in creado.get('assignees', [])}
+        if usuario.casefold() not in asignados:
+            print(f'AVISO: la incidencia #{creado["number"]} se creó, pero GitHub no confirmó '
+                  f'la asignación a @{usuario}. Revisa si el usuario tiene acceso al repositorio.')
         anteriores.add(dia)
-        publicados.append({'fecha': dia, 'url': creado.get('html_url'), 'numero': creado['number']})
+        publicados.append({'fecha': dia, 'url': creado.get('html_url'), 'numero': creado['number'],
+                           'asignado': usuario.casefold() in asignados})
         print(f"{dia}: creada incidencia #{creado['number']} — {creado.get('html_url', '')}")
     return publicados
 
