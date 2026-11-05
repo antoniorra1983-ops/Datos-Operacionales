@@ -1107,7 +1107,7 @@ def _pc(_fig, key=None, **kw):
     if not modo:
         return st.plotly_chart(_fig, **kw)
     scope = ('thdr' if ('_SECCIONES' in globals() and '_seccion' in globals()
-                      and _seccion == _SECCIONES[4]) else 'global')
+                      and _seccion == _SECCIONES[3]) else 'global')
     _fig.update_layout(clickmode='event+select')
     kk = key if key is not None else _key_fig(_fig)
     return st.plotly_chart(_fig, on_select=lambda: _pcf_on_select(kk, modo, scope),
@@ -3356,7 +3356,7 @@ def _clima_ancho(clima, valores=('T_max', 'T_min', 'T_media'), unidad='[°C]'):
     return _pv.reset_index()
 
 
-# Pasajeros-km por día de la Carga de pasajeros (la usan 📊 Resumen, 📏 Línea base y la causa raíz)
+# Pasajeros-km por día de la Carga de pasajeros (la usan 🌌 Dashboard, 📏 Línea base y causa raíz)
 def _paxkm_por_dia(df):
     """PAX-km/día = Σ_viajes Σ_tramos (pasajeros a bordo × km del tramo).
 
@@ -3430,7 +3430,7 @@ st.markdown("""<style>
 }
 </style>""", unsafe_allow_html=True)
 
-_SECCIONES = ["📊 Resumen", "📑 Trenes", "⚡ Energía",
+_SECCIONES = [ "📑 Trenes", "⚡ Energía",
               "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "🌌 Dashboard"]
 
 # ===== OPTIMIZACIÓN INTEGRADA: GESTIÓN DE ARCHIVOS =====
@@ -3864,7 +3864,6 @@ _V29_CODIGOS_COMPATIBLES = {
     "21112a1e75bb36180c8dd11e0f6f5b18950f292882ba1fd76343c955431549e2",
 }
 _V29_DATOS_POR_SECCION = (
-    ('df_carga_v1', 'df_carga_v2', 'df_viajes', 'df_serv_tipo', 'df_pax_tipo', '_errores_proc'),
     ('df_thdr_v1', 'df_thdr_v2', 'df_incid', 'all_tr', 'all_kmserv', '_mot_inval'),
     ('all_fact_full', 'all_prmte_full', '_seat_dups', '_fichas_energia'),
     ('df_oit', 'all_prmte_full', 'all_prmte_2025', '_oit_diag'),
@@ -4088,10 +4087,11 @@ f_carga_v1 = f_carga_v2 = f_viajes = f_ide = f_incid = f_oit = []
 with st.sidebar:
     st.markdown("### 🚆 Datos operacionales")
     st.caption("EFE Valparaíso · Navegación")
-    # v41: el dashboard es la portada; el orden de _SECCIONES no cambia para
-    # mantener las 15 condiciones históricas y sus índices de carga.
+    # v51: Resumen principal eliminado; Dashboard es la portada.
+    # Los índices de navegación coinciden con la matriz _V29_DATOS_POR_SECCION.
     _v41_nav_opciones = [_SECCIONES[-1]] + _SECCIONES[:-1]
-    if '_nav_seccion' not in st.session_state:
+    # Limpiar selecciones antiguas que podrían seguir en session_state.
+    if st.session_state.get('_nav_seccion') not in _v41_nav_opciones:
         st.session_state['_nav_seccion'] = _SECCIONES[-1]
     _seccion = st.radio("Secciones", _v41_nav_opciones, key="_nav_seccion",
                         horizontal=False, label_visibility="collapsed")
@@ -4623,7 +4623,7 @@ elif df_ops.empty:
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
 _J_COD = {"Laboral": "L", "Sábado": "S", "Domingo y festivo": "D/F"}
-if not df_ops.empty and _seccion != _SECCIONES[4]:
+if not df_ops.empty and _seccion != _SECCIONES[3]:
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _dts_all = sorted(set(_ff.dropna().dt.date))
     _anios = sorted({d.year for d in _dts_all}, reverse=True)
@@ -7333,391 +7333,8 @@ def _v41_render_dashboard(df):
 if _seccion == '🌌 Dashboard':
     _v41_render_dashboard(df_ops)
 
+
 if _seccion == _SECCIONES[0]:
-    _ep=st.session_state.get('_errores_proc',{})
-    if _ep:
-        with st.expander(f"⚠️ {len(_ep)} archivo(s) con error",expanded=True):
-            for _n,_m in _ep.items(): st.error(f"**{_n}**: {_m}")
-    if not df_ops.empty:
-        # Jornada/Año/Fecha se filtran en la barra global (arriba).
-        
-        df_resumen = df_ops
-        
-        if 'drilldown_date' not in st.session_state:
-            st.session_state.drilldown_date = None
-            
-        if st.session_state.drilldown_date is not None:
-            df_resumen = df_resumen[df_resumen['Fecha'] == st.session_state.drilldown_date]
-        
-        if df_resumen.empty:
-            st.warning("No hay datos operacionales para los filtros seleccionados.")
-        else:
-            st.markdown("### 🚄 DATOS OPERACIONALES")
-            
-            if st.session_state.drilldown_date is not None:
-                c_info, c_btn = st.columns([4, 1])
-                c_info.info(f"🔍 **Modo Detalle Activo:** Estás viendo los datos exclusivos del día **{st.session_state.drilldown_date.strftime('%d-%m-%Y')}**.")
-                if c_btn.button("❌ Quitar filtro de día", use_container_width=True):
-                    st.session_state.drilldown_date = None
-                    st.rerun()
-            
-            hover_config = {}
-            if 'Fecha (ES)' in df_resumen.columns:
-                hover_config['Fecha'] = False       
-                hover_config['Fecha (ES)'] = True   
-            else:
-                hover_config['Fecha'] = True        
-                
-            for col in ['Tipo Día', 'Nombre Feriado']:
-                if col in df_resumen.columns: 
-                    hover_config[col] = True
-            def _hov(_df):
-                # En la vista mensual (_agr_mes) no existen 'Fecha (ES)', 'Tipo Día'...: solo se pasan las columnas presentes (si no, plotly se cae).
-                _h = {k: v for k, v in hover_config.items() if k in _df.columns}
-                if 'Fecha (ES)' not in _h: _h['Fecha'] = True
-                return _h
-            
-            # Si el rango abarca más de un mes, los gráficos se agrupan por mes
-            _multi_mes = pd.to_datetime(df_resumen['Fecha']).dt.to_period('M').nunique() > 1 if not df_resumen.empty else False
-            def _agr_mes(_df, _sum_cols, _ratios=None, _extra_group=None):
-                if not _multi_mes or _df.empty:
-                    return _df
-                _d = _df.copy()
-                _d['Fecha'] = pd.to_datetime(_d['Fecha']).dt.to_period('M').dt.to_timestamp()
-                _grp = (['Fecha'] + _extra_group) if _extra_group else ['Fecha']
-                _d = _d.groupby(_grp, as_index=False)[_sum_cols].sum()
-                if _ratios:
-                    for _col, (_num, _den, _fac) in _ratios.items():
-                        _d[_col] = _d[_num] / _d[_den].replace(0, np.nan) * _fac
-                return _d
-            def _eje_mes(_fig):
-                if _multi_mes:
-                    _fig.update_xaxes(tickformat='%b %Y', dtick='M1')
-                return _fig
-
-            # ====== Gráficos por tipo de servicio (uno por fila, con su tarjeta) ======
-            _fechas_ok = set(df_resumen['Fecha'])
-            _st = df_serv_tipo[df_serv_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_serv_tipo.empty else df_serv_tipo
-            _pt = df_pax_tipo[df_pax_tipo['Fecha'].isin(_fechas_ok)].copy() if not df_pax_tipo.empty else df_pax_tipo
-            _SHORT_INV = {v: k for k, v in SHORT_NAMES_DICT.items()}
-            _idx_est = {e: i for i, e in enumerate(ESTACIONES)}
-            def _via_de(_t):
-                # Sentido de circulación: origen antes que destino en la línea => Vía 1 (hacia Limache); al revés => Vía 2 (hacia Puerto).
-                _p = str(_t).split("→")
-                if len(_p) != 2:
-                    return 'Otros'
-                _o = _SHORT_INV.get(_p[0].strip(), _p[0].strip())
-                _d = _SHORT_INV.get(_p[1].strip(), _p[1].strip())
-                _io = _idx_est.get(_o)
-                _idd = _idx_est.get(_d)
-                if _io is None or _idd is None:
-                    return 'Otros'
-                if _io < _idd:
-                    return 'Vía 1'
-                if _io > _idd:
-                    return 'Vía 2'
-                return 'Otros'
-            _orden_via = {'Vía 1': 0, 'Vía 2': 1, 'Otros': 2}
-            _tot_tipo = df_serv_tipo.groupby('Tipo_Servicio')['Servicios'].sum() if not df_serv_tipo.empty else pd.Series(dtype=float)
-            _tipos = sorted(df_serv_tipo['Tipo_Servicio'].dropna().unique().tolist(), key=lambda t: (_orden_via.get(_via_de(t), 9), -float(_tot_tipo.get(t, 0)), t)) if not df_serv_tipo.empty else []
-            _pal_v1 = ['#005195', '#3B8BD0', '#9ECAE9', '#C6DBEF']
-            _pal_v2 = ['#E85500', '#F4A06B', '#FBD0B0', '#FDE3D0']
-            _pal_otros = ['#2CA02C', '#9467BD', '#8C564B']
-            _cmap = {}
-            _iv1 = _iv2 = _io = 0
-            for _t in _tipos:
-                _v = _via_de(_t)
-                if _v == 'Vía 1':
-                    _cmap[_t] = _pal_v1[_iv1 % len(_pal_v1)]; _iv1 += 1
-                elif _v == 'Vía 2':
-                    _cmap[_t] = _pal_v2[_iv2 % len(_pal_v2)]; _iv2 += 1
-                else:
-                    _cmap[_t] = _pal_otros[_io % len(_pal_otros)]; _io += 1
-            def _card_metric(_col, _label, _value, _unit="", _tip=""):
-                _u = ("<span style='font-size:.68rem;font-weight:600;color:#94a3b8;'>&nbsp;" + str(_unit) + "</span>") if _unit else ""
-                _html = ("<div style='padding:2px 8px 4px 2px;' title='" + str(_tip) + "'>"
-                         "<div style='font-size:.72rem;color:#64748b;font-weight:600;line-height:1.18;white-space:normal;word-break:break-word;min-height:2.4em;display:flex;align-items:flex-end;'>" + str(_label) + "</div>"
-                         "<div style='font-size:clamp(.94rem,1.55vw,1.15rem);font-weight:700;color:#0f172a;line-height:1.2;white-space:normal;overflow-wrap:anywhere;min-width:0;max-width:100%;'>" + str(_v36_texto_tarjeta(_value)) + _u + "</div></div>")
-                _col.markdown(_html, unsafe_allow_html=True)
-            def _tarjeta_por_via(_df, _col, _fmt, _label_total, _unit=""):
-                _serie = _df.groupby('Tipo_Servicio')[_col].sum() if (not _df.empty and _col in _df.columns) else None
-                _tipos_ord = []
-                if _serie is not None:
-                    for _vlbl in ['Vía 1', 'Vía 2', 'Otros']:
-                        _tipos_ord += sorted([t for t in _serie.index if _via_de(t) == _vlbl], key=lambda t: _serie[t], reverse=True)
-                with st.container(border=True):
-                    _cols = st.columns([1.3] + [1] * len(_tipos_ord))
-                    _card_metric(_cols[0], _label_total, _fmt(_df[_col].sum() if _serie is not None else 0), _unit)
-                    for _i, _t2 in enumerate(_tipos_ord):
-                        _card_metric(_cols[_i + 1], _t2, _fmt(_serie[_t2]), _unit, _via_de(_t2))
-            _fmt_int = lambda v: f"{_ncl(int(round(v)), 0)}"
-            _fmt_km = lambda v: f"{_ncl(v, 1)}"
-            def _tarjeta_solo_via(_df, _col, _fmt, _label_total, _unit=""):
-                if not _df.empty and _col in _df.columns:
-                    _tmp = _df.copy(); _tmp['_via'] = _tmp['Tipo_Servicio'].apply(_via_de)
-                    _pv = _tmp.groupby('_via')[_col].sum(); _tot = _df[_col].sum()
-                else:
-                    _pv = pd.Series(dtype=float); _tot = 0
-                _vias = [v for v in ['Vía 1', 'Vía 2', 'Otros'] if _pv.get(v, 0) > 0]
-                with st.container(border=True):
-                    _cols = st.columns([1.3] + [1] * max(len(_vias), 1))
-                    _card_metric(_cols[0], _label_total, _fmt(_tot), _unit)
-                    for _i, _v in enumerate(_vias):
-                        _card_metric(_cols[_i + 1], _v, _fmt(_pv[_v]), _unit, _v)
-            ev_serv = ev_pax = None
-
-            def _layout_tipo(_fig):
-                _fig.update_layout(margin=dict(t=10, b=80, l=0, r=0),
-                                   legend=dict(title="", orientation="h", yanchor="top", y=-0.28, xanchor="center", x=0.5,
-                                               font=dict(size=11)),
-                                   bargap=0.28, xaxis_title=None, yaxis_title=None)
-                return _fig
-
-            # --- 1. Servicios por vía ---
-            st.markdown("**Servicios por vía**")
-            _stv = _st.copy()
-            if not _stv.empty:
-                _stv['Vía'] = _stv['Tipo_Servicio'].apply(_via_de)
-                _pv_s = _stv.groupby('Vía')['Servicios'].sum()
-            else:
-                _pv_s = pd.Series(dtype=float)
-            _mc = st.columns(4)
-            _v36_tarjeta(_mc[0], "Total Servicios", _fmt_int(_st['Servicios'].sum() if not _st.empty else 0))
-            _v36_tarjeta(_mc[1], "Vía 1", _fmt_int(_pv_s.get('Vía 1', 0)))
-            _v36_tarjeta(_mc[2], "Vía 2", _fmt_int(_pv_s.get('Vía 2', 0)))
-            if not _stv.empty:
-                _stg = _stv.groupby(['Fecha', 'Vía'], as_index=False)['Servicios'].sum()
-                _stg = _agr_mes(_stg, ['Servicios'], _extra_group=['Vía'])
-                fig_serv = px.bar(_stg, x='Fecha', y='Servicios', color='Vía', barmode='stack',
-                                  color_discrete_map={'Vía 1': '#2563eb', 'Vía 2': '#f59e0b', 'Otros': '#94a3b8'},
-                                  category_orders={'Vía': ['Vía 1', 'Vía 2', 'Otros']})
-                fig_serv.update_traces(texttemplate='%{y:,.0f}', textposition='inside', textfont=dict(color='white', size=10))
-                _layout_tipo(fig_serv); _eje_mes(fig_serv)
-                ev_serv = _pc(_no_huecos(fig_serv), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_serv")
-            else:
-                st.info("Sin datos de servicios (THDR) para el filtro actual.")
-
-            st.divider()
-
-            # --- 2. Pasajeros (viajes por contrato) ---
-            st.markdown("**Pasajeros (viajes por contrato)**")
-            if not df_viajes.empty and 'Total Viajes' in df_viajes.columns:
-                _vd = df_viajes.groupby('Fecha', as_index=False)['Total Viajes'].sum().sort_values('Fecha')
-                _dias_vj = int(_vd['Fecha'].nunique())
-                _mc = st.columns(4)
-                _v36_tarjeta(_mc[0], "Total viajes", _fmt_int(_vd['Total Viajes'].sum()))
-                _v36_tarjeta(_mc[1], "Días con viajes", _fmt_int(_dias_vj))
-                _v40_desglose(_vd, 'Total Viajes', 'viajes/día', 'Viajes promedio')
-                _vd_g = _agr_mes(_vd, ['Total Viajes'])
-                fig_pax = px.bar(_vd_g, x='Fecha', y='Total Viajes')
-                fig_pax.update_traces(marker_color='#2563eb', texttemplate='%{y:,.0f}', textposition='inside', textangle=-90, textfont=dict(color='white', size=10), hovertemplate='%{x}: %{y:,.0f} viajes<extra></extra>')
-                _layout_tipo(fig_pax); _eje_mes(fig_pax)
-                ev_pax = _pc(_no_huecos(fig_pax), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax")
-            else:
-                st.info("Sin datos de viajes por contrato. Carga el archivo **Viajes por Contrato** en la barra lateral.")
-
-            st.divider()
-
-            # --- 3. Odómetro y Tren-Km (UMR) en un solo gráfico ---
-            st.markdown("**Odómetro y Tren-Km (UMR)**")
-            _tiene_tk = 'Tren-Km [km]' in df_resumen.columns
-            _tiene_od = 'Odómetro [km]' in df_resumen.columns
-            _df_ot = df_resumen.copy()
-            if _tiene_od: _df_ot = _df_ot[_df_ot['Odómetro [km]'] >= 0]
-            if _tiene_tk: _df_ot = _df_ot[_df_ot['Tren-Km [km]'] >= 0]
-            _tot_od = float(_df_ot['Odómetro [km]'].sum()) if _tiene_od else 0.0
-            _tot_tk = float(_df_ot['Tren-Km [km]'].sum()) if _tiene_tk else 0.0
-            _dif_ot = _tot_od - _tot_tk
-            _mc = st.columns(4)
-            _v36_tarjeta(_mc[0], "Odómetro Total", f"{_ncl(_tot_od, 0)} km")
-            _v36_tarjeta(_mc[1], "Tren-Km Total", f"{_ncl(_tot_tk, 0)} km")
-            _v36_tarjeta(_mc[2], "UMR Global", f"{_ncl(_tot_tk / _tot_od * 100 if _tot_od > 0 else 0, 1)} %")
-            _v36_tarjeta(_mc[3], "Vacío / maniobras", f"{_ncl(_dif_ot, 0)} km")
-            if not _df_ot.empty and (_tiene_od or _tiene_tk):
-                _cols_ot = [c for c in ['Odómetro [km]', 'Tren-Km [km]'] if c in _df_ot.columns]
-                _df_ot_g = _agr_mes(_df_ot, _cols_ot)
-                _melt_ot = _df_ot_g.melt(id_vars='Fecha', value_vars=_cols_ot, var_name='Métrica', value_name='km')
-                _melt_ot['Métrica'] = _melt_ot['Métrica'].map({'Odómetro [km]': 'Odómetro', 'Tren-Km [km]': 'Tren-Km'})
-                fig_ot = px.bar(_melt_ot, x='Fecha', y='km', color='Métrica', barmode='group',
-                                color_discrete_map={'Odómetro': '#005195', 'Tren-Km': '#0a7d3e'},
-                                title="Odómetro vs Tren-Km Real (UMR)")
-                fig_ot.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=9))
-                fig_ot.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                     bargap=0.25, bargroupgap=0.05, uniformtext=dict(minsize=7, mode='hide'),
-                                     legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-                _eje_mes(fig_ot)
-                _pc(_no_huecos(fig_ot), use_container_width=True, config={'locale': 'es'})
-            else:
-                st.info("Sin datos de Odómetro / Tren-Km (UMR) para el filtro actual.")
-            st.caption("Del archivo Resumen UMR. Odómetro = recorrido físico total; Tren-Km = recorrido comercial. La diferencia es movimiento sin servicio (vacío, maniobras). Se omiten días con valor negativo (lectura errónea).")
-
-            st.divider()
-
-            # --- 5. Tasa de acoplamiento (UMR %) ---
-            st.markdown("**Tasa de acoplamiento (UMR %)**")
-            _tot_tk_umr = df_resumen['Tren-Km [km]'].sum(); _tot_odo_umr = df_resumen['Odómetro [km]'].sum()
-            umr_global = (_tot_tk_umr / _tot_odo_umr * 100) if _tot_odo_umr > 0 else 0
-            _mc = st.columns(4)
-            _v36_tarjeta(_mc[0], "Tasa UMR Global", f"{_ncl(umr_global, 2)} %")
-            _df_umr_g = _agr_mes(df_resumen, ['Tren-Km [km]', 'Odómetro [km]'], _ratios={'UMR (%)': ('Tren-Km [km]', 'Odómetro [km]', 100)})
-            fig_umr = px.bar(_df_umr_g, x='Fecha', y='UMR (%)', color_discrete_sequence=["#E85500"],
-                             hover_data=_hov(_df_umr_g), title="Tasa de Acoplamiento (UMR %)")
-            fig_umr.update_traces(texttemplate='%{y:.1f}%', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
-            fig_umr.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                  bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-            _eje_mes(fig_umr)
-            ev_umr = _pc(_no_huecos(fig_umr), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_umr")
-
-            st.divider()
-
-            # --- 6. Consumo energético (Tracción + Baja Tensión) ---
-            st.markdown("**Consumo energético (kWh)**")
-            df_ener_src = df_resumen.copy()
-            _fuentes_disp = []
-            if 'E_Seat_T' in df_ener_src.columns and df_ener_src['E_Seat_T'].sum() > 0: _fuentes_disp.append('SEAT')
-            if 'E_Prmte' in df_ener_src.columns and df_ener_src['E_Prmte'].sum() > 0: _fuentes_disp.append('PRMTE')
-            if 'E_Fact' in df_ener_src.columns and df_ener_src['E_Fact'].sum() > 0: _fuentes_disp.append('Factura')
-            if not _fuentes_disp: _fuentes_disp = ['SEAT']
-            _fuente_e = st.radio("Fuente de energía", _fuentes_disp, horizontal=True, key="_ener_fuente")
-            _col_f = {'SEAT': 'E_Seat_T', 'PRMTE': 'E_Prmte', 'Factura': 'E_Fact'}[_fuente_e]
-            df_ener_src['Total E'] = df_ener_src[_col_f] if _col_f in df_ener_src.columns else 0.0
-            df_ener_src['Tracción'] = df_ener_src['Total E'] * df_ener_src['% Tracción'] / 100
-            df_ener_src['Baja Tensión'] = df_ener_src['Total E'] * df_ener_src['% 12 kV'] / 100
-            _tot_e = df_ener_src['Total E'].sum(); _tot_tr_e = df_ener_src['Tracción'].sum(); _tot_12_e = df_ener_src['Baja Tensión'].sum()
-            _mc = st.columns(4)
-            _v36_tarjeta(_mc[0], "Total Energía", f"{_ncl(_tot_e, 1)} kWh")
-            _v36_tarjeta(_mc[1], "Tracción", f"{_ncl(_tot_tr_e, 1)} kWh")
-            _v36_tarjeta(_mc[2], "Baja Tensión", f"{_ncl(_tot_12_e, 1)} kWh")
-            _de_g = _agr_mes(df_ener_src, ['Tracción', 'Baja Tensión'])
-            fig_ener = px.bar(_de_g, x='Fecha', y=['Tracción', 'Baja Tensión'], barmode='stack',
-                              color_discrete_map={'Tracción': '#E85500', 'Baja Tensión': '#005195'},
-                              hover_data=_hov(_de_g), title=f"Consumo Energético — {_fuente_e} (kWh)")
-            fig_ener.update_traces(texttemplate='%{y:,.0f}', textposition='inside', insidetextanchor='middle', textangle=-90, textfont=dict(color='white', size=10))
-            fig_ener.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                   legend=dict(title="", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                   bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-            _eje_mes(fig_ener)
-            ev_ener = _pc(_no_huecos(fig_ener), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ener")
-            if _fuente_e != 'SEAT':
-                st.caption("Tracción y Baja Tensión se estiman aplicando la proporción del SEAT al total de la fuente (solo el SEAT mide el desglose).")
-
-            st.divider()
-
-            # --- 7. Desempeño energético (kWh/km tracción) según la fuente ---
-            st.markdown(f"**Desempeño energético (kWh/km tracción) — {_fuente_e}**")
-            df_ener_src['kWh/km'] = df_ener_src['Tracción'] / df_ener_src['Odómetro [km]'].replace(0, np.nan)
-            _tot_odo_ide = df_resumen['Odómetro [km]'].sum()
-            ide_global = (_tot_tr_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
-            _mc = st.columns(4)
-            _v36_tarjeta(_mc[0], f"kWh/km tracción {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
-            st.caption(f"Interpretación del IDE: {_ncl(ide_global,2)} kWh/km significa que se consumen "
-                       f"{_ncl(ide_global,2)} kWh de tracción por cada kilómetro UMR. "
-                       "Un valor menor suele indicar mejor eficiencia solo al comparar condiciones operacionales semejantes.")
-            _de_ide_g = _agr_mes(df_ener_src, ['Tracción', 'Odómetro [km]'], _ratios={'kWh/km': ('Tracción', 'Odómetro [km]', 1)})
-            fig_ide_bar = px.bar(_de_ide_g, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
-                                 hover_data=_hov(_de_ide_g), title=f"Desempeño Energético — Tracción {_fuente_e} (kWh/km)")
-            fig_ide_bar.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11))
-            fig_ide_bar.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                      bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-            _eje_mes(fig_ide_bar)
-            ev_ide_bar = _pc(_no_huecos(fig_ide_bar), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_ide")
-
-            st.divider()
-
-            # --- 8. Pasajeros por kWh (Pax/kWh). Energía con la jerarquía de siempre: Factura > PRMTE > SEAT ---
-            st.markdown("**Pasajeros por kWh (Pax/kWh)**")
-            _fuentes_pax = []
-            if not df_viajes.empty and 'Total Viajes' in df_viajes.columns and df_viajes['Total Viajes'].sum() > 0: _fuentes_pax.append('Viajes por contrato')
-            if 'PAX' in df_resumen.columns and df_resumen['PAX'].sum() > 0: _fuentes_pax.append('Carga a bordo')
-            if not _fuentes_pax:
-                st.info("Sin datos de pasajeros. Carga **Viajes por Contrato** o **Carga de pasajeros** en la barra lateral.")
-            else:
-                if st.session_state.get('_pax_fuente') not in _fuentes_pax: st.session_state['_pax_fuente'] = _fuentes_pax[0]
-                _fuente_p = st.radio("Fuente de pasajeros", _fuentes_pax, horizontal=True, key="_pax_fuente")
-                if _fuente_p == 'Viajes por contrato':
-                    _pax_d = df_viajes[['Fecha', 'Total Viajes']].rename(columns={'Total Viajes': 'Pasajeros'})
-                else:
-                    _pax_d = df_resumen[['Fecha', 'PAX']].rename(columns={'PAX': 'Pasajeros'})
-                _pax_d = _pax_d.assign(Fecha=pd.to_datetime(_pax_d['Fecha']).dt.normalize(), Pasajeros=pd.to_numeric(_pax_d['Pasajeros'], errors='coerce')).groupby('Fecha', as_index=False)['Pasajeros'].sum()
-                # E_Total y E_Tr ya vienen con la jerarquía por día (Factura si hay; si no PRMTE; si no SEAT) y 'Fuente' dice cuál se usó.
-                _de_px = (df_resumen.assign(Fecha=pd.to_datetime(df_resumen['Fecha']).dt.normalize(),
-                                            E_Total=pd.to_numeric(df_resumen['E_Total'], errors='coerce'), E_Tr=pd.to_numeric(df_resumen['E_Tr'], errors='coerce'))
-                          .groupby('Fecha', as_index=False).agg({'E_Total': 'sum', 'E_Tr': 'sum', 'Fuente': 'first'})
-                          .rename(columns={'E_Total': 'Total E', 'E_Tr': 'Tracción'}))
-                _de_px = _de_px.merge(_pax_d, on='Fecha', how='inner')
-                # Solo días con pasajeros Y energía: si falta uno de los dos, el cociente queda distorsionado.
-                _de_px = _de_px[(_de_px['Pasajeros'] > 0) & (_de_px['Total E'] > 0)].sort_values('Fecha')
-                if _de_px.empty:
-                    st.info(f"No hay días con pasajeros ({_fuente_p}) y energía a la vez para el filtro actual.")
-                else:
-                    _pax_t = float(_de_px['Pasajeros'].sum()); _e_px_t = float(_de_px['Total E'].sum()); _tr_px_t = float(_de_px['Tracción'].sum())
-                    _mc = st.columns(4)
-                    _v36_tarjeta(_mc[0], "Pax/kWh total", _ncl(_pax_t / _e_px_t, 2))
-                    _v36_tarjeta(_mc[1], "Pax/kWh tracción", _ncl(_pax_t / _tr_px_t, 2) if _tr_px_t > 0 else "—")
-                    _v36_tarjeta(_mc[2], "Pasajeros", _fmt_int(_pax_t))
-                    _v36_tarjeta(_mc[3], "Energía total (kWh)", _fmt_int(_e_px_t))
-                    st.caption(f"Interpretación: {_ncl(_pax_t/_e_px_t,2)} Pax/kWh representa pasajeros "
-                               "registrados por cada kWh de energía total. Más alto suele implicar "
-                               "mayor aprovechamiento energético en condiciones comparables. "
-                               "No son necesariamente pasajeros únicos.")
-                    _de_px['Pax/kWh'] = _de_px['Pasajeros'] / _de_px['Total E']
-                    _de_px_g = _agr_mes(_de_px, ['Pasajeros', 'Total E'], _ratios={'Pax/kWh': ('Pasajeros', 'Total E', 1)})
-                    fig_pax_kwh = px.bar(_de_px_g, x='Fecha', y='Pax/kWh', custom_data=['Pasajeros', 'Total E'],
-                                         color_discrete_sequence=['#0a7c6e'], title=f"Pasajeros por kWh — {_fuente_p}")
-                    fig_pax_kwh.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11),
-                                              hovertemplate='%{x}<br>%{y:.2f} pax/kWh<br>Pasajeros: %{customdata[0]:,.0f}<br>Energía: %{customdata[1]:,.0f} kWh<extra></extra>')
-                    fig_pax_kwh.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                              bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                    _eje_mes(fig_pax_kwh)
-                    _pc(_no_huecos(fig_pax_kwh), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_pax_kwh")
-                    _n_px = len(_de_px); _cnt_f = _de_px['Fuente'].value_counts()
-                    _det_f = " · ".join(f"{_s} {int(_cnt_f[_s])} {'día' if int(_cnt_f[_s]) == 1 else 'días'}" for _s in ['Factura', 'PRMTE', 'SEAT'] if _cnt_f.get(_s, 0) > 0)
-                    st.caption(f"Energía de cada día con la jerarquía de siempre: Factura; si no hay, PRMTE; si no, SEAT ({_det_f}). "
-                               + ("Solo cuenta 1 día con pasajeros y energía" if _n_px == 1 else f"Solo cuentan los {_n_px} días con pasajeros y energía")
-                               + "; el valor global divide los totales del período (no promedia días).")
-
-                # --- 9. Pasajeros-km por kWh de tracción. Pax-km de la Carga de pasajeros: pasajeros a bordo de cada tramo × km del tramo ---
-                st.markdown("**Pasajeros-km por kWh de tracción (Pax-km/kWh)**")
-                # v50: usar el mismo cálculo y filtro de días comparables que Dashboard.
-                _pk_r = _v46_paxkm_diario()
-                _de_pk = _v50_paxkm_resumen(df_resumen, _pk_r)
-                if not len(_pk_r):
-                    st.info("Sin pasajeros-km: carga **Carga de pasajeros** (V1 y V2) en la barra lateral.")
-                elif _de_pk.empty:
-                    st.info("No hay días con pasajeros-km y energía de tracción a la vez para el filtro actual.")
-                else:
-                    _pk_t, _tr_pk_t = float(_de_pk['Pax-km'].sum()), float(_de_pk['Tracción'].sum())
-                    _mk = st.columns(4)
-                    _v36_tarjeta(_mk[0], "Pax-km/kWh", _ncl(_pk_t / _tr_pk_t, 2))
-                    _v36_tarjeta(_mk[1], "Pax-km (millones)", _ncl(_pk_t / 1e6, 2))
-                    _v36_tarjeta(_mk[2], "Tracción (kWh)", _fmt_int(_tr_pk_t))
-                    _v36_tarjeta(_mk[3], "PAX-km transportados", _ncl(_pk_t, 0))
-                    st.caption("Fórmula verificada: **PAX-km = suma de (pasajeros a bordo de cada tramo × km de ese tramo)**. "
-                               "Se suman ambos sentidos (Carga V1 y V2). No se multiplica el total de pasajeros "
-                               "por el kilometraje total de los trenes. "
-                               "Aquí se muestran los PAX-km de los días que también tienen tracción válida.")
-                    st.caption(f"Interpretación: {_ncl(_pk_t/_tr_pk_t,2)} Pax-km/kWh significa "
-                               "pasajeros-kilómetro transportados por cada kWh de tracción. "
-                               "Por ejemplo, 1 pasajero que viaja 10 km genera 10 pax-km; "
-                               "a igualdad de operación, un valor mayor suele ser mejor.")
-                    _de_pk['Pax-km/kWh'] = _de_pk['Pax-km'] / _de_pk['Tracción']
-                    _de_pk_g = _agr_mes(_de_pk, ['Pax-km', 'Tracción'], _ratios={'Pax-km/kWh': ('Pax-km', 'Tracción', 1)})
-                    fig_pk_kwh = px.bar(_de_pk_g, x='Fecha', y='Pax-km/kWh', custom_data=['Pax-km', 'Tracción'],
-                                        color_discrete_sequence=['#005195'], title="Pasajeros-km por kWh de tracción")
-                    fig_pk_kwh.update_traces(texttemplate='%{y:.2f}', textposition='inside', insidetextanchor='middle', textfont=dict(color='white', size=11),
-                                             hovertemplate='%{x}<br>%{y:.2f} pax-km/kWh<br>Pasajeros-km: %{customdata[0]:,.0f}<br>Tracción: %{customdata[1]:,.0f} kWh<extra></extra>')
-                    fig_pk_kwh.update_layout(margin=dict(t=50, b=0, l=0, r=0), title=dict(font=dict(size=15), automargin=True),
-                                             bargap=0.2, uniformtext=dict(minsize=8, mode='hide'))
-                    _eje_mes(fig_pk_kwh)
-                    _pc(_no_huecos(fig_pk_kwh), use_container_width=True, config={'locale': 'es'}, on_select="rerun", key="chart_paxkm_kwh")
-                    _n_pk = len(_de_pk)
-                    st.caption("PAX-km = Σ(pasajeros a bordo por tramo × km del tramo), sumado por viaje y fecha (Carga V1 y V2). Energía de tracción con la "
-                               "jerarquía de siempre (Factura; si no hay, PRMTE; si no, SEAT). "
-                               + ("Solo cuenta 1 día con pasajeros-km y tracción" if _n_pk == 1 else f"Solo cuentan los {_n_pk} días con pasajeros-km y tracción")
-                               + "; el valor global divide los totales del período (no promedia días).")
-    else: st.info("📂 Sube archivos desde el panel lateral para ver el resumen.")
-
-if _seccion == _SECCIONES[1]:
     if all_tr:
         _res_tr, _flota_tr, _pivk_tr = _km_por_tren(all_tr)
         if _res_tr.empty:
@@ -8361,7 +7978,7 @@ if _seccion == _SECCIONES[1]:
             _at_ks['Fecha'] = _at_ks['Fecha'].dt.strftime('%d-%m-%Y')
             _st_df(_at_ks, use_container_width=True, hide_index=True)
 
-if _seccion == _SECCIONES[2]:
+if _seccion == _SECCIONES[1]:
     if not df_ops.empty and 'E_Total' in df_ops.columns and df_ops['E_Total'].sum() > 0:
         st.header("🔋 Comparación de energías: Total · Tracción · 12 kV")
         _de = df_ops[df_ops['E_Total'] > 0].copy()
@@ -8611,7 +8228,7 @@ if _seccion == _SECCIONES[2]:
                 _st_df(_tc, use_container_width=True, hide_index=True)
 
 
-if _seccion == _SECCIONES[3]:
+if _seccion == _SECCIONES[2]:
     st.markdown("### 🌙 Consumo Base Nocturno (Mediana)")
     if all_prmte_full:
         st.caption("Ventana nocturna por tipo de día — Laboral: 00:00–06:00 · Sábado: 00:00–07:00 · Domingo/Festivo: 00:00–08:00. Se usa la mediana porque es robusta frente a días atípicos.")
@@ -8974,7 +8591,7 @@ if _seccion == _SECCIONES[3]:
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key="_dl_oit")
 
-if _seccion == _SECCIONES[4]:
+if _seccion == _SECCIONES[3]:
     st.markdown("### 📋 THDR — Servicios y Tiempos de Viaje")
     st.markdown("<style>.tv-card{border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;background:linear-gradient(135deg,#ffffff,#f7fafc);box-shadow:0 1px 4px rgba(15,23,42,.07)}.tv-head{font-weight:800;color:#005195;font-size:1.02rem;margin-bottom:.55rem;display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}.tv-badge{background:#005195;color:#fff;font-size:.68rem;padding:2px 9px;border-radius:999px;font-weight:700}.tv-badge-alt{background:#0a7c6e}.tv-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.tv-stat{background:#fff;border:1px solid #eef2f7;border-radius:10px;padding:7px 10px;text-align:center}.tv-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.5px}.tv-val{font-size:1.22rem;font-weight:800;color:#0f172a;font-variant-numeric:tabular-nums}.tv-foot{margin-top:.5rem;font-size:.74rem;color:#64748b;text-align:right}</style>", unsafe_allow_html=True)
     df_thdr_v1, df_thdr_v2, _thdr_mk = _thdr_filtros()
@@ -9166,7 +8783,7 @@ if _seccion == _SECCIONES[4]:
             st.caption("Mostrando hasta 50 registros.")
         else: st.info("No se ha cargado/procesado THDR Vía 2.")
 
-if _seccion == _SECCIONES[5]:
+if _seccion == _SECCIONES[4]:
     st.write("### Flujo y Carga de Pasajeros")
     if (isinstance(df_ops,pd.DataFrame) and not df_ops.empty and 'PAX' in df_ops
             and pd.to_numeric(df_ops['PAX'],errors='coerce').gt(0).any()):
@@ -9417,7 +9034,7 @@ if _seccion == _SECCIONES[5]:
                                        file_name=f"pasajeros_por_servicio_{_jp.split()[0].lower()}.xlsx",
                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_ps")
 
-if _seccion == _SECCIONES[6]:
+if _seccion == _SECCIONES[5]:
     if (isinstance(df_ops,pd.DataFrame) and not df_ops.empty and 'Servicios' in df_ops
             and pd.to_numeric(df_ops['Servicios'],errors='coerce').gt(0).any()):
         st.markdown('#### 🚆 Servicios · promedio por jornada')
@@ -9716,7 +9333,7 @@ if _seccion == _SECCIONES[6]:
             _st_df(pd.crosstab(_det_sv['Tipo de tren'], _det_sv['Composicion'], margins=True, margins_name='Total'), use_container_width=True)
 
 # --- Pestaña: Ahorro de energía (UMR vs meta) ---
-if _seccion == _SECCIONES[7]:
+if _seccion == _SECCIONES[6]:
     st.header("💡 Ahorro de energía")
     if df_ops is None or df_ops.empty or float(df_ops['Odómetro [km]'].sum()) <= 0:
         st.info("No hay datos de odómetro/energía cargados en el período para calcular el ahorro.")
@@ -9994,7 +9611,7 @@ if _seccion == _SECCIONES[7]:
                                    file_name="ahorros_energia.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-if _seccion == _SECCIONES[8]:
+if _seccion == _SECCIONES[7]:
     st.header("🧱 Constructor de datos por fecha")
     st.caption("Armá tu propia tabla: elegí qué datos incluir y descargala en Excel. Una fila por fecha, respeta los filtros de arriba.")
     if df_ops is None or df_ops.empty:
@@ -10277,7 +9894,7 @@ if _seccion == _SECCIONES[8]:
                                key="_dl_master")
 
 
-if _seccion == _SECCIONES[9]:
+if _seccion == _SECCIONES[8]:
     st.header("🔮 Proyección de energía")
     _fuente = st.radio("Fuente de energía", ["SEAT (tracción + 12 kV)", "Limache (SAF LI)"], horizontal=True, key="_proj_fuente")
     _es_seat = _fuente.startswith("SEAT")
@@ -10454,7 +10071,7 @@ if _seccion == _SECCIONES[9]:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="_dl_projtd")
 
 
-if _seccion == _SECCIONES[10]:
+if _seccion == _SECCIONES[9]:
     st.header("🔎 Análisis de sobreconsumo IDE")
     st.caption("Cuando el ahorro del IDE es negativo (el IDE real supera la línea base), aquí se analizan todos los datos disponibles de esos días para entender la causa.")
     if df_ops.empty or 'IDE (kWh/km)' not in df_ops.columns or df_ops['IDE (kWh/km)'].sum() <= 0:
@@ -10671,7 +10288,7 @@ if _seccion == _SECCIONES[10]:
 # ===== BI: carga de trenes (Carga de pasajeros) vs consumo PRMTE cada 15 min =====
 # Metas del seguimiento (punto de partida = valores de ene–jul 2026). Cámbialas aquí para dejarlas fijas; en la pestaña se ajustan durante la sesión.
 _METAS_BI = {'pkm_kwh': 23.0, 'kwh_unidad': 32.0, 'sobre_esperado': 2.0, 'tolerancia': 3.0}
-if _seccion == _SECCIONES[11]:
+if _seccion == _SECCIONES[10]:
     st.markdown("### 🔗 BI · Carga de trenes vs consumo PRMTE (cada 15 min)")
     _c_bi = [d for d in [df_carga_v1, df_carga_v2] if d is not None and not d.empty and 'Fecha' in d.columns]
     if not all_prmte_full or not _c_bi:
@@ -11085,7 +10702,7 @@ def _regresion_lb(pk, en):
             'cv': float(np.sqrt((_ru ** 2).sum() / max(len(_yu) - 4, 1)) / _yu.mean() * 100), 'n': int(_usa.sum()),
             'atipicos': [pd.Timestamp(_f) for _f in _m.index[~_usa]], 'datos': _m.rename_axis('Fecha').reset_index().assign(Usado=_usa)}
 
-if _seccion == _SECCIONES[12]:
+if _seccion == _SECCIONES[11]:
     st.markdown("### 📏 Línea base: kWh de tracción vs pax-km (regresión lineal)")
     st.caption("La línea base de cada año es una regresión lineal ajustada con los días del año anterior: kWh de tracción del día = a + b × pax-km + ajuste sábado + ajuste domingo/festivo. "
                "Con ella se calcula la tracción esperada de cada día del período y su pax-km por kWh de línea base (pax-km ÷ tracción esperada). "
@@ -11856,7 +11473,7 @@ def _rca_fecha_txt(f, anio=True):
     return f"{_RCA_DIAS[f.dayofweek]} {f.strftime('%d-%m-%Y' if anio else '%d-%m')}"
 
 
-if _seccion == _SECCIONES[13]:
+if _seccion == _SECCIONES[12]:
     st.markdown("### 🧭 Causa raíz del consumo de energía")
     st.caption("Explica por qué cada día consume lo que consume y qué cambió entre dos períodos, siempre por tipo de jornada (laboral, "
                "sábado, domingo y festivo), con todas las variables que hay en data/ de GitHub: UMR (km, trenes dobles y trenes SFE), SEAT, "
