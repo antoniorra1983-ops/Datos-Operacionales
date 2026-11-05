@@ -6287,6 +6287,9 @@ def _v41_css():
       color:#f2f8ff;letter-spacing:-.4px;line-height:1.13;
       font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
     .efe41-kpi-unit{color:var(--ac);font-size:12px;margin-top:4px;font-weight:620}
+    .efe46-kpi-explain{color:#c1d9e9;font-size:12px;line-height:1.48;
+      margin-top:11px;padding-top:10px;border-top:1px solid rgba(65,154,192,.26)}
+    .efe46-kpi-note{color:#8fb4cb;font-size:11px;margin-top:7px;line-height:1.4}
     .efe44-kpi-average{margin-top:12px;padding-top:9px;border-top:1px solid rgba(65,154,192,.26)}
     .efe44-kpi-average-title{font-size:10px;font-weight:760;letter-spacing:.5px;color:#8eb6cf;margin-bottom:6px}
     .efe44-kpi-average-row{display:flex;justify-content:space-between;align-items:baseline;gap:7px;font-size:11px;color:#b7d6e9;line-height:1.65}
@@ -6317,7 +6320,7 @@ def _v41_suma(df,campo):
     return float(pd.to_numeric(df[campo],errors='coerce').sum(min_count=1))
 
 
-def _v41_card(titulo,valor,unidad,accent,promedios=None,unidad_promedio=None):
+def _v41_card(titulo,valor,unidad,accent,promedios=None,unidad_promedio=None,explicacion=None,nota=None):
     """Indicador con desglose opcional dentro de la MISMA tarjeta.
 
     No repone el selector global «Indicador promedio» de la parte superior.
@@ -6343,12 +6346,16 @@ def _v41_card(titulo,valor,unidad,accent,promedios=None,unidad_promedio=None):
         desglose=('<div class="efe44-kpi-average">'
                   f'<div class="efe44-kpi-average-title">PROMEDIO POR JORNADA · {unidad_p}</div>'
                   + ''.join(filas) + '</div>')
+    explicacion_html=('<div class="efe46-kpi-explain">'
+                      + _html41.escape(explicacion) + '</div>') if explicacion else ''
+    nota_html=('<div class="efe46-kpi-note">'
+               + _html41.escape(nota) + '</div>') if nota else ''
     st.markdown(
         f'<div class="efe41-kpi" style="--ac:{accent}">'
         f'<div class="efe41-kpi-title">{_html41.escape(titulo)}</div>'
         f'<div class="efe41-kpi-number">{mostrado}</div>'
         f'<div class="efe41-kpi-unit">{_html41.escape(unidad)}</div>'
-        f'{desglose}'
+        f'{desglose}{explicacion_html}{nota_html}'
         f'</div>',unsafe_allow_html=True)
 
 
@@ -6371,6 +6378,69 @@ def _v41_diario(df):
     sub['IDE (kWh/km)']=np.where(sub['Odómetro [km]']>0,
                                   sub['E_Tr']/sub['Odómetro [km]'],np.nan)
     return sub
+
+
+def _v46_paxkm_diario():
+    """Pax-km desde Carga de pasajeros V1/V2, procesados una sola vez por sesión.
+
+    El resultado cubre todo el historial guardado en sesión; los filtros se
+    aplican después, al cruzarlo con las fechas visibles del Dashboard.
+    No se abre ningún Excel ni se recalcula el historial persistente.
+    """
+    cargas=[st.session_state.get(k,pd.DataFrame()) for k in ('df_carga_v1','df_carga_v2')]
+    firma=(st.session_state.get('_cache_key'),st.session_state.get('_v28_creado_utc'),
+           tuple((id(d),len(d)) for d in cargas if isinstance(d,pd.DataFrame)))
+    if st.session_state.get('_v46_paxkm_firma')==firma:
+        return st.session_state.get('_v46_paxkm_diario',pd.Series(dtype=float))
+    pax_km=pd.Series(dtype=float)
+    for carga in cargas:
+        if isinstance(carga,pd.DataFrame) and not carga.empty and 'Fecha' in carga.columns:
+            tramo=_paxkm_por_dia(carga)
+            if len(tramo):
+                pax_km=pax_km.add(tramo,fill_value=0) if len(pax_km) else tramo
+    st.session_state['_v46_paxkm_diario']=pax_km
+    st.session_state['_v46_paxkm_firma']=firma
+    return pax_km
+
+
+def _v46_indicadores_eficiencia(datos,viajes=None,paxkm_diario=None,fuente='Carga a bordo'):
+    """Cocientes ponderados: suma numerador / suma denominador, solo días coincidentes.
+
+    Sin ceros ficticios por falta de fuentes. Comparables con los indicadores
+    Pax/kWh y Pax-km/kWh que se muestran en la pestaña Resumen.
+    """
+    vacio={'valor':float('nan'),'dias':0,'num':float('nan'),'den':float('nan')}
+    resultado={k:vacio.copy() for k in ('Pax/kWh total','Pax/kWh tracción','Pax-km/kWh')}
+    if datos is None or datos.empty:
+        return resultado
+    energia=datos[['Fecha','E_Total','E_Tr']].copy()
+    energia['Fecha']=pd.to_datetime(energia['Fecha'],errors='coerce').dt.normalize()
+    for campo in ('E_Total','E_Tr'):
+        energia[campo]=pd.to_numeric(energia[campo],errors='coerce')
+    if fuente=='Viajes por contrato' and isinstance(viajes,pd.DataFrame) and not viajes.empty and {'Fecha','Total Viajes'} <= set(viajes.columns):
+        pasajeros=viajes[['Fecha','Total Viajes']].rename(columns={'Total Viajes':'Pasajeros'}).copy()
+        pasajeros['Fecha']=pd.to_datetime(pasajeros['Fecha'],errors='coerce').dt.normalize()
+        pasajeros['Pasajeros']=pd.to_numeric(pasajeros['Pasajeros'],errors='coerce')
+        pasajeros=pasajeros.dropna(subset=['Fecha']).groupby('Fecha',as_index=False)['Pasajeros'].sum(min_count=1)
+    else:
+        pasajeros=datos[['Fecha','PAX']].rename(columns={'PAX':'Pasajeros'}).copy()
+    if not pasajeros.empty:
+        pareados=energia.merge(pasajeros,on='Fecha',how='inner')
+        for nombre,denominador in (('Pax/kWh total','E_Total'),('Pax/kWh tracción','E_Tr')):
+            validos=pareados[(pareados['Pasajeros']>0) & (pareados[denominador]>0)]
+            if not validos.empty:
+                num=float(validos['Pasajeros'].sum()); den=float(validos[denominador].sum())
+                resultado[nombre]={'valor':num/den,'dias':len(validos),'num':num,'den':den}
+    if paxkm_diario is not None and len(paxkm_diario):
+        pkm=(paxkm_diario.rename('Pax-km').rename_axis('Fecha').reset_index())
+        pkm['Fecha']=pd.to_datetime(pkm['Fecha'],errors='coerce').dt.normalize()
+        pkm['Pax-km']=pd.to_numeric(pkm['Pax-km'],errors='coerce')
+        pareados=energia.merge(pkm,on='Fecha',how='inner')
+        validos=pareados[(pareados['Pax-km']>0) & (pareados['E_Tr']>0)]
+        if not validos.empty:
+            num=float(validos['Pax-km'].sum());den=float(validos['E_Tr'].sum())
+            resultado['Pax-km/kWh']={'valor':num/den,'dias':len(validos),'num':num,'den':den}
+    return resultado
 
 
 def _v41_render_dashboard(df):
@@ -6503,7 +6573,54 @@ def _v41_render_dashboard(df):
     # 5. Desempeño energético (IDE) después de Consumo, como en Resumen.
     st.markdown('<div class="efe41-section">Desempeño energético</div>',
                 unsafe_allow_html=True)
-    _v41_card('IDE ponderado',ide,'kWh/km','#21dbc6')
+    _exp_ide=('Se consumen '+_ncl(ide,2)+' kWh de tracción por kilómetro registrado por el odómetro UMR. '
+              'En condiciones operacionales comparables, un valor menor representa menor consumo específico.'
+              if np.isfinite(ide) else 'Sin energía de tracción y kilometraje UMR comparables.')
+    _v41_card('IDE ponderado',ide,'kWh/km','#21dbc6',explicacion=_exp_ide,
+              nota='Cálculo ponderado: suma de kWh de tracción ÷ suma de km UMR; no es promedio simple de los días.')
+
+    # v46 · KPIs adicionales del Resumen, con interpretación dentro de cada tarjeta.
+    # Pax/kWh usa la MISMA selección de fuente de la pestaña Resumen.
+    _fuentes_pax46=[]
+    if (isinstance(df_viajes,pd.DataFrame) and not df_viajes.empty and
+            'Total Viajes' in df_viajes and
+            pd.to_numeric(df_viajes['Total Viajes'],errors='coerce').gt(0).any()):
+        _fuentes_pax46.append('Viajes por contrato')
+    if datos['PAX'].gt(0).any():
+        _fuentes_pax46.append('Carga a bordo')
+    if _fuentes_pax46:
+        if st.session_state.get('_pax_fuente') not in _fuentes_pax46:
+            st.session_state['_pax_fuente']=_fuentes_pax46[0]
+        _fuente_kpi46=st.radio('Fuente de pasajeros para los KPI de eficiencia',
+                              _fuentes_pax46,horizontal=True,key='_pax_fuente')
+    else:
+        _fuente_kpi46='Carga a bordo'
+        st.caption('No hay registros de pasajeros para calcular Pax/kWh.')
+    _ef46=_v46_indicadores_eficiencia(
+        datos,viajes=df_viajes,paxkm_diario=_v46_paxkm_diario(),fuente=_fuente_kpi46)
+    _cols46=st.columns(2,gap='small')
+    for _idx46,(_campo46,_titulo46,_color46,_desc46,_nota46) in enumerate((
+        ('Pax/kWh total','Pasajeros / kWh total','#10ded1',
+         'pasajeros registrados por cada kWh de energía total',
+         'Más alto suele indicar mayor aprovechamiento de la energía; depende de la demanda y la operación.'),
+        ('Pax/kWh tracción','Pasajeros / kWh tracción','#35bde9',
+         'pasajeros registrados por cada kWh consumido por tracción',
+         'Más alto suele ser mejor a igual nivel de servicio y tipo de operación.'),
+        ('Pax-km/kWh','Pasajeros-km / kWh tracción','#f3b961',
+         'pasajeros-kilómetro transportados por cada kWh de tracción',
+         'Un pasajero trasladado 10 km equivale a 10 pax-km; mayor suele indicar mayor productividad energética.'),
+    )):
+        _indicador46=_ef46[_campo46];_ratio46=_indicador46['valor']
+        _descripcion46=(f'El valor {_ncl(_ratio46,2)} significa {_ncl(_ratio46,2)} {_desc46}.'
+                       if np.isfinite(_ratio46) else
+                       'Sin días que tengan simultáneamente pasajeros o pax-km y energía válida. No se asigna cero.')
+        _origen46=(f'Fuente: {_fuente_kpi46}. ' if _campo46!='Pax-km/kWh'
+                   else 'Pax-km: Carga V1/V2, pasajeros por tramo × kilómetros de cada tramo. ')
+        _origen46+=f"{_indicador46['dias']} día(s) comparables. " + _nota46
+        with _cols46[_idx46%2]:
+            _v41_card(_titulo46,_ratio46,
+                      'pax/kWh' if _campo46!='Pax-km/kWh' else 'pax-km/kWh',
+                      _color46,explicacion=_descripcion46,nota=_origen46)
 
     lower=st.columns([1,1,1],gap='small')
     with lower[0]:
@@ -6867,6 +6984,9 @@ if _seccion == _SECCIONES[0]:
             ide_global = (_tot_tr_e / _tot_odo_ide) if _tot_odo_ide > 0 else 0
             _mc = st.columns(4)
             _v36_tarjeta(_mc[0], f"kWh/km tracción {_fuente_e} (global)", f"{_ncl(ide_global, 2)} kWh/km")
+            st.caption(f"Interpretación del IDE: {_ncl(ide_global,2)} kWh/km significa que se consumen "
+                       f"{_ncl(ide_global,2)} kWh de tracción por cada kilómetro UMR. "
+                       "Un valor menor suele indicar mejor eficiencia solo al comparar condiciones operacionales semejantes.")
             _de_ide_g = _agr_mes(df_ener_src, ['Tracción', 'Odómetro [km]'], _ratios={'kWh/km': ('Tracción', 'Odómetro [km]', 1)})
             fig_ide_bar = px.bar(_de_ide_g, x='Fecha', y='kWh/km', color_discrete_sequence=["#E85500"],
                                  hover_data=_hov(_de_ide_g), title=f"Desempeño Energético — Tracción {_fuente_e} (kWh/km)")
@@ -6910,6 +7030,10 @@ if _seccion == _SECCIONES[0]:
                     _v36_tarjeta(_mc[1], "Pax/kWh tracción", _ncl(_pax_t / _tr_px_t, 2) if _tr_px_t > 0 else "—")
                     _v36_tarjeta(_mc[2], "Pasajeros", _fmt_int(_pax_t))
                     _v36_tarjeta(_mc[3], "Energía total (kWh)", _fmt_int(_e_px_t))
+                    st.caption(f"Interpretación: {_ncl(_pax_t/_e_px_t,2)} Pax/kWh representa pasajeros "
+                               "registrados por cada kWh de energía total. Más alto suele implicar "
+                               "mayor aprovechamiento energético en condiciones comparables. "
+                               "No son necesariamente pasajeros únicos.")
                     _de_px['Pax/kWh'] = _de_px['Pasajeros'] / _de_px['Total E']
                     _de_px_g = _agr_mes(_de_px, ['Pasajeros', 'Total E'], _ratios={'Pax/kWh': ('Pasajeros', 'Total E', 1)})
                     fig_pax_kwh = px.bar(_de_px_g, x='Fecha', y='Pax/kWh', custom_data=['Pasajeros', 'Total E'],
@@ -6948,6 +7072,10 @@ if _seccion == _SECCIONES[0]:
                     _v36_tarjeta(_mk[0], "Pax-km/kWh", _ncl(_pk_t / _tr_pk_t, 2))
                     _v36_tarjeta(_mk[1], "Pax-km (millones)", _ncl(_pk_t / 1e6, 2))
                     _v36_tarjeta(_mk[2], "Tracción (kWh)", _fmt_int(_tr_pk_t))
+                    st.caption(f"Interpretación: {_ncl(_pk_t/_tr_pk_t,2)} Pax-km/kWh significa "
+                               "pasajeros-kilómetro transportados por cada kWh de tracción. "
+                               "Por ejemplo, 1 pasajero que viaja 10 km genera 10 pax-km; "
+                               "a igualdad de operación, un valor mayor suele ser mejor.")
                     _de_pk['Pax-km/kWh'] = _de_pk['Pax-km'] / _de_pk['Tracción']
                     _de_pk_g = _agr_mes(_de_pk, ['Pax-km', 'Tracción'], _ratios={'Pax-km/kWh': ('Pax-km', 'Tracción', 1)})
                     fig_pk_kwh = px.bar(_de_pk_g, x='Fecha', y='Pax-km/kWh', custom_data=['Pax-km', 'Tracción'],
