@@ -6393,83 +6393,29 @@ def _v41_render_dashboard(df):
     fmin,fmax=datos['Fecha'].min(),datos['Fecha'].max()
 
 
-    with st.container(key='v41_hero'):
-        c1,c2=st.columns([3.4,1.4],vertical_alignment='center')
-        with c1:
-            st.markdown('<div class="efe41-section">Evolución del consumo energético</div>',
-                        unsafe_allow_html=True)
-            st.markdown(f'<div class="efe41-miniline">{fmin:%d/%m/%Y} — {fmax:%d/%m/%Y} · '
-                        f'{len(datos)} fechas operacionales · Selecciona un punto para filtrar</div>',
-                        unsafe_allow_html=True)
-        with c2:
-            vista=st.segmented_control('Visualización',['Mensual','Diaria'],default='Mensual',
-                                     key='_v41_vista',label_visibility='collapsed')
-        plot=datos.copy()
-        if vista!='Diaria':
-            plot['Fecha']=plot['Fecha'].dt.to_period('M').dt.to_timestamp()
-            plot=plot.groupby('Fecha',as_index=False)[['E_Total','E_Tr']].sum(min_count=1)
-        else:
-            plot=plot[['Fecha','E_Total','E_Tr']].copy()
-        from plotly import graph_objects as _go41
-        fig=_go41.Figure()
-        for campo,titulo,color,fill in (
-            ('E_Total','Energía total','#13d4d1','rgba(12,177,212,.24)'),
-            ('E_Tr','Energía de tracción','#ac40df','rgba(160,50,212,.19)')):
-            if campo not in plot or plot[campo].notna().sum()==0:
-                continue
-            fig.add_trace(_go41.Scatter(
-                x=plot['Fecha'],y=plot[campo],name=titulo,
-                mode='lines+markers' if len(plot)<=60 else 'lines',
-                line=dict(color=color,width=2.7,shape='spline' if len(plot)<=60 else 'linear'),
-                marker=dict(size=6,color=color),fill='tozeroy',fillcolor=fill,
-                hovertemplate='%{x|%d/%m/%Y}<extra>'+titulo+'</extra><br>%{y:,.2f} kWh',
-            ))
-        fig.update_layout(
-            height=355,hovermode='x unified',
-            paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='#b7d4e9',size=11),
-            legend=dict(orientation='h',y=1.13,x=0,font=dict(color='#c7e0f3')),
-            margin=dict(l=10,r=10,t=40,b=10),
-            xaxis=dict(title='',showgrid=False,showline=False,
-                       tickfont=dict(color='#80bdd4'),tickformat='%d/%m' if vista=='Diaria' else '%b'),
-            yaxis=dict(title='kWh',gridcolor='rgba(120,170,216,.13)',zeroline=False,
-                       tickfont=dict(color='#a2bfd5')),
-        )
-        if vista!='Diaria':fig.update_xaxes(dtick='M1')
-        # Reutiliza el filtro por clic de la v38 y las abreviaturas de mes v39.
-        _pc(fig,width='stretch',key='_v41_evolucion_energia')
-        _pax_v = _ncl(pax,2) if np.isfinite(pax) else '—'
-        _serv_v = _ncl(serv,2) if np.isfinite(serv) else '—'
-        st.markdown(
-            '<div class="efe41-legend" style="padding:4px 3px 12px;">'
-            f'👥 Pasajeros: <b>{_pax_v}</b> &nbsp;&nbsp; '
-            f'🚆 Servicios: <b>{_serv_v}</b> &nbsp;&nbsp; '
-            f'📅 Jornadas registradas: <b>{len(datos)}</b>'
-            '</div>',unsafe_allow_html=True)
+    # v45: mismo orden que la pestaña Resumen, sin alterar los filtros ni los cálculos.
+    # Servicios -> Pasajeros -> Odómetro -> Energía -> IDE.
+    controles=st.columns([3.4,1.4],vertical_alignment='center')
+    with controles[0]:
+        st.markdown(f'<div class="efe41-miniline">{fmin:%d/%m/%Y} — {fmax:%d/%m/%Y} · '
+                    f'{len(datos)} fechas operacionales · Selecciona un punto para filtrar</div>',
+                    unsafe_allow_html=True)
+    with controles[1]:
+        vista=st.segmented_control('Visualización',['Mensual','Diaria'],default='Mensual',
+                                  key='_v41_vista',label_visibility='collapsed')
+    from plotly import graph_objects as _go41
 
-    # Tarjetas: las mismas magnitudes y fórmulas que el BI existente, 2 decimales.
-    kcols=st.columns(4,gap='small')
-    with kcols[0]:_v41_card('Energía total',e,'kWh','#13dac9')
-    with kcols[1]:_v41_card('Tracción',t,'kWh','#24a4f4')
-    with kcols[2]:_v41_card('Kilometraje UMR',km,'km','#bb62ef')
-    with kcols[3]:_v41_card('IDE ponderado',ide,'kWh/km','#21dbc6')
-
-    # v44 · PAX primero y Servicios después, con sus promedios en cada indicador.
-    opcols = st.columns(2, gap='small')
-    with opcols[0]:
-        _v41_card('Pasajeros (PAX)',pax,'pasajeros','#10ded1',
-                  promedios=_v40_promedios(datos,'PAX'),unidad_promedio='pax/día')
-    with opcols[1]:
-        _v41_card('Servicios',serv,'servicios','#bb62ef',
-                  promedios=_v40_promedios(datos,'Servicios'),unidad_promedio='servicios/día')
-
-    # La entrega v43 solo incluía tarjetas. Ahora ambos indicadores tienen
-    # evolución temporal interactiva, PAX primero y después Servicios.
+    # 1. Servicios, 2. Pasajeros: la misma secuencia que en «📊 Resumen».
     for campo,titulo,unidad,color,contenedor,clave in (
-        ('PAX','Pasajeros (PAX)','pax','#10ded1','v44_pax','_v44_evolucion_pax'),
         ('Servicios','Servicios','servicios','#bb62ef','v44_servicios','_v44_evolucion_servicios'),
+        ('PAX','Pasajeros (PAX)','pax','#10ded1','v44_pax','_v44_evolucion_pax'),
     ):
         with st.container(key=contenedor):
+            valor=serv if campo=='Servicios' else pax
+            unidad_media='servicios/día' if campo=='Servicios' else 'pax/día'
+            _v41_card(titulo,valor,unidad,color,
+                      promedios=_v40_promedios(datos,campo),
+                      unidad_promedio=unidad_media)
             st.markdown(f'<div class="efe41-section">Evolución de {titulo.lower()}</div>',
                         unsafe_allow_html=True)
             st.markdown('<div class="efe41-miniline">Haz clic en una barra para filtrar el mes o el día.</div>',
@@ -6504,6 +6450,60 @@ def _v41_render_dashboard(df):
                 _pc(fig_op,width='stretch',key=clave)
             else:
                 st.info(f'Sin registros de {titulo.lower()} para el período seleccionado.')
+
+    # 3. Odómetro (UMR), antes de los indicadores energéticos.
+    st.markdown('<div class="efe41-section">Odómetro (UMR)</div>',
+                unsafe_allow_html=True)
+    _v41_card('Kilometraje UMR',km,'km','#bb62ef')
+
+    # 4. Consumo de energía: tarjetas y evolución temporal.
+    st.markdown('<div class="efe41-section">Consumo energético (kWh)</div>',
+                unsafe_allow_html=True)
+    energia_cols=st.columns(2,gap='small')
+    with energia_cols[0]:_v41_card('Energía total',e,'kWh','#13dac9')
+    with energia_cols[1]:_v41_card('Tracción',t,'kWh','#24a4f4')
+
+    with st.container(key='v41_hero'):
+        st.markdown('<div class="efe41-section">Evolución del consumo energético</div>',
+                    unsafe_allow_html=True)
+        plot=datos.copy()
+        if vista!='Diaria':
+            plot['Fecha']=plot['Fecha'].dt.to_period('M').dt.to_timestamp()
+            plot=plot.groupby('Fecha',as_index=False)[['E_Total','E_Tr']].sum(min_count=1)
+        else:
+            plot=plot[['Fecha','E_Total','E_Tr']].copy()
+        fig=_go41.Figure()
+        for campo,titulo,color,fill in (
+            ('E_Total','Energía total','#13d4d1','rgba(12,177,212,.24)'),
+            ('E_Tr','Energía de tracción','#ac40df','rgba(160,50,212,.19)')):
+            if campo not in plot or plot[campo].notna().sum()==0:
+                continue
+            fig.add_trace(_go41.Scatter(
+                x=plot['Fecha'],y=plot[campo],name=titulo,
+                mode='lines+markers' if len(plot)<=60 else 'lines',
+                line=dict(color=color,width=2.7,shape='spline' if len(plot)<=60 else 'linear'),
+                marker=dict(size=6,color=color),fill='tozeroy',fillcolor=fill,
+                hovertemplate='%{x|%d/%m/%Y}<extra>'+titulo+'</extra><br>%{y:,.2f} kWh',
+            ))
+        fig.update_layout(
+            height=355,hovermode='x unified',
+            paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#b7d4e9',size=11),
+            legend=dict(orientation='h',y=1.13,x=0,font=dict(color='#c7e0f3')),
+            margin=dict(l=10,r=10,t=40,b=10),
+            xaxis=dict(title='',showgrid=False,showline=False,
+                       tickfont=dict(color='#80bdd4'),tickformat='%d/%m' if vista=='Diaria' else '%b'),
+            yaxis=dict(title='kWh',gridcolor='rgba(120,170,216,.13)',zeroline=False,
+                       tickfont=dict(color='#a2bfd5')),
+        )
+        if vista!='Diaria':fig.update_xaxes(dtick='M1')
+        # Reutiliza el filtro por clic de la v38 y las abreviaturas de mes v39.
+        _pc(fig,width='stretch',key='_v41_evolucion_energia')
+
+    # 5. Desempeño energético (IDE) después de Consumo, como en Resumen.
+    st.markdown('<div class="efe41-section">Desempeño energético</div>',
+                unsafe_allow_html=True)
+    _v41_card('IDE ponderado',ide,'kWh/km','#21dbc6')
 
     lower=st.columns([1,1,1],gap='small')
     with lower[0]:
