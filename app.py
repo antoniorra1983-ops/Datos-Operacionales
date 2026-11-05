@@ -6438,6 +6438,23 @@ def _v48_paxkm_jornada(paxkm_diario,fechas_visibles):
     return _v48_totales_jornada(tmp,'PAX-km')
 
 
+
+def _v49_filtrar_paxkm(paxkm_diario,fechas_visibles):
+    """PAX-km de Carga V1/V2 exclusivamente en fechas filtradas, sin exigir energía.
+
+    Sin valores reales se devuelve tabla vacía, nunca un cero inventado.
+    """
+    vacio=pd.DataFrame(columns=['Fecha','PAX-km'])
+    if paxkm_diario is None or not len(paxkm_diario):
+        return vacio
+    s=pd.to_numeric(paxkm_diario,errors='coerce')
+    tabla=s.rename('PAX-km').rename_axis('Fecha').reset_index()
+    tabla['Fecha']=pd.to_datetime(tabla['Fecha'],errors='coerce').dt.normalize()
+    visibles=pd.DatetimeIndex(pd.to_datetime(fechas_visibles,errors='coerce')).normalize()
+    tabla=tabla[tabla['Fecha'].isin(visibles)].dropna(subset=['Fecha','PAX-km'])
+    tabla=tabla[tabla['PAX-km']>=0]
+    return tabla.groupby('Fecha',as_index=False)['PAX-km'].sum(min_count=1).sort_values('Fecha')
+
 def _v41_card(titulo,valor,unidad,accent,por_jornada=None,
               desglose_titulo='TOTAL POR TIPO DE DÍA',explicacion=None,nota=None):
     """KPI del Dashboard: total global y totales por jornada, o cociente por jornada."""
@@ -6569,6 +6586,188 @@ def _v46_indicadores_eficiencia(datos,viajes=None,paxkm_diario=None,fuente='Carg
     return resultado
 
 
+
+def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista):
+    """PowerPoint ejecutivo editable con los filtros ACTUALES del Dashboard.
+
+    Utiliza python-pptx ya presente en requirements.txt. No necesita Kaleido,
+    capturas de pantalla ni conexión adicional. Los gráficos son editables.
+    """
+    from io import BytesIO as _Bytes49
+    from pptx import Presentation as _Presentation49
+    from pptx.util import Inches as _In49, Pt as _Pt49
+    from pptx.dml.color import RGBColor as _RGB49
+    from pptx.enum.shapes import MSO_SHAPE as _Shape49
+    from pptx.enum.text import PP_ALIGN as _Align49
+    from pptx.chart.data import CategoryChartData as _ChartData49
+    from pptx.enum.chart import XL_CHART_TYPE as _ChartType49
+    from pptx.enum.chart import XL_LEGEND_POSITION as _Leg49
+    pres=_Presentation49()
+    pres.slide_width=_In49(13.333)
+    pres.slide_height=_In49(7.5)
+    navy=_RGB49(5,19,41); blue=_RGB49(13,38,71)
+    white=_RGB49(237,248,255); muted=_RGB49(155,183,208)
+    teal=_RGB49(22,216,202); orange=_RGB49(247,183,85)
+    violet=_RGB49(183,119,240)
+    def txt(sl,x,y,w,h,value,size=16,color=None,bold=False):
+        shape=sl.shapes.add_textbox(_In49(x),_In49(y),_In49(w),_In49(h))
+        tf=shape.text_frame;tf.clear();tf.word_wrap=True
+        p=tf.paragraphs[0];p.text=str(value)
+        p.font.name='Aptos';p.font.size=_Pt49(size)
+        p.font.color.rgb=color or white;p.font.bold=bold
+        return shape
+    def base(titulo,sub=''):
+        sl=pres.slides.add_slide(pres.slide_layouts[6]);sl.background.fill.solid()
+        sl.background.fill.fore_color.rgb=navy
+        txt(sl,.55,.3,12,.45,titulo,25,white,True)
+        if sub:txt(sl,.6,.83,12,.5,sub,12,muted)
+        bar=sl.shapes.add_shape(_Shape49.RECTANGLE,_In49(.55),_In49(1.30),_In49(12.2),_In49(.045))
+        bar.fill.solid();bar.fill.fore_color.rgb=teal;bar.line.fill.background()
+        txt(sl,.65,7.10,12,.22,'EFE Valparaíso · Dashboard operacional · Información filtrada',9,muted)
+        return sl
+    def fmt(v,dec=2):
+        try:
+            n=float(v)
+            if not np.isfinite(n):return 'S/D'
+            return f'{n:,.{dec}f}'.replace(',','X').replace('.',',').replace('X','.')
+        except (ValueError,TypeError):return 'S/D'
+    def tile(sl,x,y,w,h,label,value,unit='',accent=None):
+        shape=sl.shapes.add_shape(_Shape49.ROUNDED_RECTANGLE,
+             _In49(x),_In49(y),_In49(w),_In49(h))
+        shape.fill.solid();shape.fill.fore_color.rgb=blue
+        shape.line.color.rgb=accent or teal
+        txt(sl,x+.15,y+.17,w-.26,.35,label,13,muted)
+        txt(sl,x+.15,y+.60,w-.26,.60,fmt(value),25,white,True)
+        if unit:txt(sl,x+.15,y+h-.39,w-.26,.25,unit,11,accent or teal)
+    def periodos(tabla,campos):
+        if tabla is None or tabla.empty:return [],[[] for _ in campos],False
+        t=tabla[['Fecha']+campos].copy()
+        t['Fecha']=pd.to_datetime(t['Fecha'],errors='coerce').dt.normalize()
+        t=t.dropna(subset=['Fecha']).sort_values('Fecha')
+        mensual=(vista!='Diaria' or t['Fecha'].nunique()>35)
+        if mensual:t['Fecha']=t['Fecha'].dt.to_period('M').dt.to_timestamp()
+        t=t.groupby('Fecha',as_index=False)[campos].sum(min_count=1)
+        if len(t)>30: t=t.tail(30)
+        labels=[f.strftime('%m/%Y') if mensual else f.strftime('%d/%m') for f in t['Fecha']]
+        return labels,[[float(v) if pd.notna(v) else 0. for v in t[c]] for c in campos],mensual
+    def chart(sl,df,campos,etiquetas,x,y,w,h,tipo='bar',colors=None):
+        cats,series,agregado=periodos(df,campos)
+        if not cats:
+            txt(sl,x,y,w,.7,'No hay datos comparables para este gráfico.',15,muted)
+            return
+        data=_ChartData49();data.categories=cats
+        for name,values in zip(etiquetas,series):data.add_series(name,values)
+        ct=(_ChartType49.LINE_MARKERS if tipo=='line' else _ChartType49.COLUMN_CLUSTERED)
+        ch=sl.shapes.add_chart(ct,_In49(x),_In49(y),_In49(w),_In49(h),data).chart
+        ch.has_legend=len(etiquetas)>1
+        if ch.has_legend:
+            ch.legend.position=_Leg49.BOTTOM;ch.legend.include_in_layout=False
+            ch.legend.font.size=_Pt49(11)
+        ch.chart_style=10
+        if colors:
+            for serie,color in zip(ch.series,colors):
+                try:
+                    serie.format.fill.solid();serie.format.fill.fore_color.rgb=color
+                    serie.format.line.color.rgb=color
+                except (AttributeError,ValueError):pass
+        if agregado and vista=='Diaria':
+            txt(sl,x,y+h+.02,w,.22,'Para legibilidad, el gráfico agrupa por mes.',10,muted)
+    def block(sl,x,y,head,body,w=5.8):
+        txt(sl,x,y,w,.36,head,16,teal,True)
+        txt(sl,x,y+.43,w,1.2,body,13,white)
+    def table_day(sl,campos,x=.65,y=1.7):
+        nrows=len(campos)+1
+        tb=sl.shapes.add_table(nrows,4,_In49(x),_In49(y),_In49(11.95),
+                               _In49(.55*nrows)).table
+        names=['Indicador','Laboral','Sábado','Domingo/festivo']
+        for j,h in enumerate(names):tb.cell(0,j).text=h
+        for i,(nombre,df,campo,unidad) in enumerate(campos,1):
+            tb.cell(i,0).text=nombre
+            vals=_v48_totales_jornada(df,campo)
+            for j,cl in enumerate(('Laboral','Sábado','Domingo y festivo'),1):
+                tb.cell(i,j).text=fmt(vals[cl]['valor'])+(' '+unidad if unidad else '')
+        for i in range(nrows):
+            for j in range(4):
+                cell=tb.cell(i,j);cell.fill.solid()
+                cell.fill.fore_color.rgb=(blue if i==0 or i%2==0 else navy)
+                for p in cell.text_frame.paragraphs:
+                    p.font.name='Aptos';p.font.size=_Pt49(12)
+                    p.font.bold=(i==0)
+                    p.font.color.rgb=(teal if i==0 else white)
+        return tb
+    fi=pd.to_datetime(datos['Fecha']).min();ff=pd.to_datetime(datos['Fecha']).max()
+    pkm=_v41_suma(paxkm_tabla,'PAX-km')
+    km=datos[(datos['Odómetro [km]']>=0)&(datos['Tren-Km [km]']>=0)]
+    odo=_v41_suma(km,'Odómetro [km]');trenk=_v41_suma(km,'Tren-Km [km]')
+    total_tr=_v41_suma(datos,'E_Tr');total_e=_v41_suma(datos,'E_Total')
+    ide=total_tr/odo if np.isfinite(total_tr) and np.isfinite(odo) and odo>0 else np.nan
+    # 1. Resumen ejecutivo.
+    sl=base('Dashboard ejecutivo · Datos operacionales',
+            f'Período: {fi:%d/%m/%Y} al {ff:%d/%m/%Y} · {len(datos)} jornadas')
+    for x,y,label,value,unit,col in (
+        (.7,1.75,'Servicios',_v41_suma(datos,'Servicios'),'servicios',violet),
+        (4.85,1.75,'Pasajeros',_v41_suma(datos,'PAX'),'PAX',teal),
+        (9.0,1.75,'PAX-km transportados',pkm,'pax-km',orange),
+        (.7,4.0,'Odómetro UMR',odo,'km',violet),
+        (4.85,4.0,'Energía total',total_e,'kWh',teal),
+        (9.0,4.0,'IDE',ide,'kWh/km',orange),
+    ):tile(sl,x,y,3.63,1.7,label,value,unit,col)
+    # 2. Servicios por vía.
+    sl=base('Servicios por sentido','Servicios operacionales por Vía 1, Vía 2 y otros')
+    if not servicios_via.empty:
+        v=servicios_via.pivot_table(index='Fecha',columns='Vía',values='Servicios',aggfunc='sum').reset_index()
+        for k in ('Vía 1','Vía 2','Otros'):
+            if k not in v:v[k]=0
+        chart(sl,v,['Vía 1','Vía 2','Otros'],['Vía 1','Vía 2','Otros'],.7,1.6,11.9,4.3,
+              colors=[_RGB49(58,151,242),orange,muted])
+        txt(sl,.8,6.0,11.5,.55,'Totales por vía: '+', '.join(
+            f'{q}: {fmt(servicios_via.loc[servicios_via["Vía"].eq(q),"Servicios"].sum(),0)}'
+            for q in ('Vía 1','Vía 2','Otros')),12,white)
+    else:
+        chart(sl,datos,['Servicios'],['Servicios totales'],.7,1.6,11.9,4.5)
+        txt(sl,.8,6.2,11.5,.35,'Sin desglose por vía disponible para las fechas filtradas.',12,muted)
+    # 3. PAX-km y pasajeros.
+    sl=base('Pasajeros y PAX-km','Transporte realizado: pasajeros × distancia de cada tramo')
+    tile(sl,.7,1.6,3.8,1.7,'Pasajeros',_v41_suma(datos,'PAX'),'PAX',teal)
+    tile(sl,4.75,1.6,3.8,1.7,'PAX-km transportados',pkm,'pax-km',orange)
+    block(sl,8.85,1.64,'Fórmula PAX-km',
+          'Σ (pasajeros a bordo por tramo × km recorridos en ese tramo). '
+          'Se suman los viajes de Carga V1 y V2.',3.55)
+    chart(sl,paxkm_tabla,['PAX-km'],['PAX-km'],.7,3.55,11.85,2.6,colors=[orange])
+    # 4. UMR.
+    sl=base('Kilometraje · Odómetro y Tren-Km','Comparación UMR en kilómetros')
+    tile(sl,.7,1.55,3.6,1.5,'Odómetro UMR',odo,'km',violet)
+    tile(sl,4.65,1.55,3.6,1.5,'Tren-Km',trenk,'km',teal)
+    tile(sl,8.6,1.55,3.6,1.5,'UMR global',100*trenk/odo if np.isfinite(odo) and odo>0 else np.nan,'%',orange)
+    chart(sl,km,['Odómetro [km]','Tren-Km [km]'],['Odómetro','Tren-Km'],.75,3.35,11.8,2.85,
+          colors=[violet,teal])
+    # 5. Energía.
+    sl=base('Consumo energético','Energía total y energía de tracción')
+    tile(sl,1.0,1.55,5.2,1.5,'Energía total',total_e,'kWh',teal)
+    tile(sl,7.1,1.55,5.2,1.5,'Tracción',total_tr,'kWh',violet)
+    chart(sl,datos,['E_Total','E_Tr'],['Energía total','Tracción'],.7,3.25,11.85,3.05,'line',
+          colors=[teal,violet])
+    # 6. Eficiencia.
+    sl=base('Desempeño energético','Cocientes ponderados calculados solo con días comparables')
+    for x,y,label,value,unit,col in (
+        (.65,1.6,'IDE',ide,'kWh/km',teal),
+        (4.8,1.6,'PAX/kWh total',eficiencia.get('Pax/kWh total',{}).get('valor'),'pax/kWh',violet),
+        (8.95,1.6,'PAX-km/kWh tracción',eficiencia.get('Pax-km/kWh',{}).get('valor'),'pax-km/kWh',orange),
+    ):tile(sl,x,y,3.7,1.75,label,value,unit,col)
+    block(sl,.9,4.0,'kWh/km','Tracción (kWh) ÷ Odómetro (km). Un valor menor implica menor consumo específico, a igual operación.',5.4)
+    block(sl,6.9,4.0,'PAX-km/kWh','PAX-km de días con datos de tracción ÷ kWh de tracción de esos mismos días. Mayor suele ser mejor.',5.3)
+    txt(sl,.9,6.4,11.8,.36,'Fuente PAX/kWh: '+str(fuente)+'. Valores sin datos comparables se muestran S/D.',11,muted)
+    # 7. Totales por jornada.
+    sl=base('Totales por tipo de día','Se muestran sumas, no promedios; festivos se clasifican con domingo/festivo')
+    table_day(sl,[
+        ('Servicios',datos,'Servicios',''),('Pasajeros',datos,'PAX',''),
+        ('PAX-km',paxkm_tabla,'PAX-km',''),
+        ('Odómetro',km,'Odómetro [km]',''),('Tren-Km',km,'Tren-Km [km]',''),
+        ('Energía total',datos,'E_Total',''),('Tracción',datos,'E_Tr','')],y=1.63)
+    txt(sl,.8,6.65,11.7,.3,'S/D significa sin dato disponible; no se completa con cero.',11,muted)
+    out=_Bytes49();pres.save(out)
+    return out.getvalue()
+
 def _v41_render_dashboard(df):
     _v41_css()
     st.markdown('<div class="efe41-eyebrow">EFE VALPARAÍSO · INTELIGENCIA OPERACIONAL</div>',
@@ -6608,6 +6807,14 @@ def _v41_render_dashboard(df):
     # El desglose toma los servicios THDR por sentido; el total viene de df_ops.
     servicios_via=_v48_servicios_via(df_serv_tipo,datos['Fecha'])
 
+    # v49 · PAX-km es transporte real: Σ (pasajeros por tramo × km de ese tramo).
+    # Se calcula desde Carga V1/V2, sin exigir energía para mostrar su TOTAL.
+    # Filtra por las mismas fechas visibles y NO multiplica el total PAX por km UMR.
+    _paxkm_diario49=_v46_paxkm_diario()
+    _paxkm_tabla49=_v49_filtrar_paxkm(_paxkm_diario49,datos['Fecha'])
+    _total_paxkm49=_v41_suma(_paxkm_tabla49,'PAX-km')
+    _paxkm_jornada49=_v48_totales_jornada(_paxkm_tabla49,'PAX-km')
+
     # 2. Pasajeros se presenta después de Servicios, igual que en Resumen.
     for campo,titulo,unidad,color,contenedor,clave in (
         ('Servicios','Servicios','servicios','#bb62ef','v44_servicios','_v44_evolucion_servicios'),
@@ -6615,8 +6822,26 @@ def _v41_render_dashboard(df):
     ):
         with st.container(key=contenedor):
             valor=serv if campo=='Servicios' else pax
-            _v41_card(titulo+' · total' if campo=='Servicios' else titulo,
-                      valor,unidad,color,por_jornada=_v48_totales_jornada(datos,campo))
+            if campo=='PAX':
+                st.markdown('<div class="efe41-section">Pasajeros y transporte realizado</div>',
+                            unsafe_allow_html=True)
+                _pax_cards49=st.columns(2,gap='small')
+                with _pax_cards49[0]:
+                    _v41_card('Pasajeros (PAX)',pax,'pax','#10ded1',
+                              por_jornada=_v48_totales_jornada(datos,'PAX'),
+                              explicacion='Pasajeros registrados en el período filtrado.')
+                with _pax_cards49[1]:
+                    _v41_card('PAX-km transportados',_total_paxkm49,'pax-km','#f3b961',
+                              por_jornada=_paxkm_jornada49,
+                              explicacion='Σ (pasajeros a bordo en cada tramo × kilómetros de ese tramo); '
+                                          'se suman ambos sentidos, Vía 1 y Vía 2.',
+                              nota='Dato de Carga V1/V2, independiente de disponer de kWh de tracción.')
+                if _paxkm_tabla49.empty:
+                    st.warning('Sin PAX-km de Carga V1/V2 para las fechas seleccionadas. '
+                               'Revisa que estén disponibles los archivos de carga con estaciones y ocupación.')
+            else:
+                _v41_card('Servicios · total',valor,unidad,color,
+                          por_jornada=_v48_totales_jornada(datos,campo))
             if campo=='Servicios':
                 if not servicios_via.empty:
                     vias=['Vía 1','Vía 2']
@@ -6694,6 +6919,33 @@ def _v41_render_dashboard(df):
                 _pc(fig_op,width='stretch',key=clave)
             else:
                 st.info(f'Sin registros de {titulo.lower()} para el período seleccionado.')
+
+            if campo=='PAX' and not _paxkm_tabla49.empty:
+                st.markdown('<div class="efe41-section">Evolución de PAX-km transportados</div>',
+                            unsafe_allow_html=True)
+                _serie_pk49=_paxkm_tabla49.copy()
+                if vista!='Diaria':
+                    _serie_pk49['Fecha']=_serie_pk49['Fecha'].dt.to_period('M').dt.to_timestamp()
+                    _serie_pk49=_serie_pk49.groupby('Fecha',as_index=False)['PAX-km'].sum(min_count=1)
+                _fig_pk49=_go41.Figure(_go41.Bar(
+                    x=_serie_pk49['Fecha'],y=_serie_pk49['PAX-km'],
+                    marker_color='#f3b961',name='PAX-km',
+                    hovertemplate='%{x|%d/%m/%Y}<br>%{y:,.0f} pax-km<extra></extra>'))
+                _fig_pk49.update_layout(
+                    height=270,showlegend=False,hovermode='closest',
+                    paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#b7d4e9',size=11),margin=dict(l=10,r=10,t=8,b=8),
+                    xaxis=dict(title='',showgrid=False,
+                               tickformat='%d/%m' if vista=='Diaria' else '%b'),
+                    yaxis=dict(title='pax-km',gridcolor='rgba(120,170,216,.13)',zeroline=False))
+                if vista!='Diaria':
+                    _anos_pk49=_serie_pk49['Fecha'].dt.year.nunique()
+                    _fig_pk49.update_xaxes(tickmode='array',tickvals=_serie_pk49['Fecha'],
+                        ticktext=[_MES_CORTO_EJE[f.month-1]+(f' {f.year}' if _anos_pk49>1 else '')
+                                  for f in _serie_pk49['Fecha']])
+                _pc(_fig_pk49,width='stretch',key='_v49_evolucion_paxkm')
+                st.caption('PAX-km: suma de pasajeros × distancia de cada tramo. '
+                           'El gráfico acepta clic para filtrar mes o día.')
 
     # 3. Kilometraje: odómetro físico, Tren-Km comercial y UMR ponderado.
     with st.container(key='v48_kilometraje'):
@@ -6827,18 +7079,9 @@ def _v41_render_dashboard(df):
         _fuente_kpi46='Carga a bordo'
         st.caption('No hay registros de pasajeros para calcular Pax/kWh.')
     _ef46=_v46_indicadores_eficiencia(
-        datos,viajes=df_viajes,paxkm_diario=_v46_paxkm_diario(),fuente=_fuente_kpi46)
-    # v47 · Total de transporte realizado: pasajeros × kilómetros por tramo.
-    # Los mismos valores diarios alimentan el Resumen, el Dashboard y la línea base.
-    _pkm_total47=_ef46['Pax-km total']
-    _pkm_nota47=(f"{_pkm_total47['dias']} día(s) del período con Carga V1/V2. "
-                 'Para el indicador PAX-km/kWh se usan solo días con kWh de tracción comparables.')
-    _paxkm_diario48=_v46_paxkm_diario()
-    _v41_card('PAX-km transportados',_pkm_total47['valor'],'pax-km','#f3b961',
-              por_jornada=_v48_paxkm_jornada(_paxkm_diario48,datos['Fecha']),
-              explicacion='PAX-km = Σ (pasajeros a bordo en cada tramo × kilómetros de ese tramo). '
-                          'Ejemplo: 150 pasajeros durante 12 km = 1.800 PAX-km.',
-              nota=_pkm_nota47)
+        datos,viajes=df_viajes,paxkm_diario=_paxkm_diario49,fuente=_fuente_kpi46)
+    # PAX-km total se presenta junto a Pasajeros, más arriba, sin duplicar tarjetas.
+    _paxkm_diario48=_paxkm_diario49
     # Cada tipo de día reutiliza las mismas fuentes para ratios comparables.
     _eficiencia_jornada48={}
     for _codigo48,_nombre48 in _V40_JORNADAS:
@@ -6942,11 +7185,41 @@ def _v41_render_dashboard(df):
             else:
                 st.info('No hay energía total y tracción comparables para el período.')
 
+    # v49 · Exportación PowerPoint de los filtros visibles, bajo demanda.
+    # Dos clics: preparar y descargar; evita construir un PPTX en cada rerun.
+    st.markdown('#### 📊 Descargar este Dashboard en PowerPoint')
+    st.caption('Incluye tarjetas, PAX-km por tramo, gráficos editables, servicios por vía, '
+               'Odómetro/Tren-Km, energía y totales por tipo de día.')
+    _firma_pptx49=(str(fmin),str(fmax),len(datos),vista,_fuente_kpi46,
+                   float(_v41_suma(datos,'PAX')),float(_v41_suma(datos,'Servicios')),
+                   float(_v41_suma(datos,'E_Total')),float(_v41_suma(datos,'E_Tr')),
+                   float(_total_paxkm49) if np.isfinite(_total_paxkm49) else None,
+                   str(st.session_state.get('_cache_key')))
+    if st.button('📑 Preparar presentación PPTX',key='_v49_preparar_pptx'):
+        try:
+            with st.spinner('Generando PowerPoint del período filtrado...'):
+                st.session_state['_v49_pptx_bytes']=_v49_dashboard_pptx(
+                    datos,servicios_via,_paxkm_tabla49,_ef46,_fuente_kpi46,vista)
+                st.session_state['_v49_pptx_firma']=_firma_pptx49
+        except Exception as _error_pptx49:
+            st.error(f'No se pudo generar el PowerPoint: {_error_pptx49}')
+    if (st.session_state.get('_v49_pptx_firma')==_firma_pptx49 and
+            st.session_state.get('_v49_pptx_bytes')):
+        st.download_button('⬇️ Descargar Dashboard (.pptx)',
+            data=st.session_state['_v49_pptx_bytes'],
+            file_name=f'Dashboard_Operacional_{fmin:%Y%m%d}_{fmax:%Y%m%d}.pptx',
+            mime='application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            key='_v49_descargar_pptx')
+    else:
+        st.caption('Presiona «Preparar presentación PPTX» para habilitar la descarga '
+                   'con los filtros actuales.')
+
     # Detalle verificable y exportable; datos originales sin redondeo destructivo.
     with st.expander('📋 Ver detalle diario y exportar datos',expanded=False):
         tabla=datos[['Fecha','Tipo de jornada','Servicios','PAX',
                      'Odómetro [km]','Tren-Km [km]','UMR (%)',
                      'E_Total','E_Tr','IDE (kWh/km)']].copy()
+        tabla=tabla.merge(_paxkm_tabla49,on='Fecha',how='left')
         st.dataframe(tabla,hide_index=True,width='stretch')
         st.download_button('⬇️ Exportar CSV',
             data=tabla.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
