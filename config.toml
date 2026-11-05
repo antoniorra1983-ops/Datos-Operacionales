@@ -1,5 +1,4 @@
-# Tema nativo para la aplicación completa (v42).
-# Alineado con el Dashboard Neon de v41. No contiene contraseñas.
+
 [theme]
 base = "dark"
 primaryColor = "#1BDFD2"
