@@ -7551,6 +7551,61 @@ def _v56_comparacion_anual(anual, referencia):
     return pd.DataFrame(filas)
 
 
+# ===== v58 · DIFERENCIAS POR TIPO DE JORNADA PARA TODOS LOS KPI =====
+def _v58_variaciones_jornadas(jornadas, anios, referencia):
+    """Compara CADA tipo de jornada con el mismo tipo del año base.
+
+    El valor de IDE/UMR/eficiencia ya viene ponderado de _v56_agregar.
+    No se imputan ceros si un año carece de registros o una medición es nula.
+    La variación relativa utiliza abs(valor base), por coherencia con el
+    indicador de variación interanual global.
+    """
+    cols=['Indicador','Unidad','Tipo de jornada','Año','Valor',
+          'Año base','Valor base','Diferencia numérica','Diferencia porcentual (%)',
+          'Días del año','Días del año base']
+    if jornadas is None or jornadas.empty:
+        return pd.DataFrame(columns=cols)
+    idx=jornadas.set_index(['Año','Tipo de jornada'])
+    orden=['Laboral','Sábado','Domingo y festivo']
+    filas=[]
+    for campo,nombre,unidad in _V56_METRICAS:
+        for jornada in orden:
+            clave_base=(int(referencia),jornada)
+            vb=(pd.to_numeric(pd.Series([idx.loc[clave_base,campo]]),errors='coerce').iloc[0]
+                if clave_base in idx.index and campo in idx.columns else np.nan)
+            db=(int(idx.loc[clave_base,'Días operacionales'])
+                if clave_base in idx.index and 'Días operacionales' in idx.columns else np.nan)
+            for anio in anios:
+                clave=(int(anio),jornada)
+                v=(pd.to_numeric(pd.Series([idx.loc[clave,campo]]),errors='coerce').iloc[0]
+                   if clave in idx.index and campo in idx.columns else np.nan)
+                dias=(int(idx.loc[clave,'Días operacionales'])
+                      if clave in idx.index and 'Días operacionales' in idx.columns else np.nan)
+                dif=float(v-vb) if pd.notna(v) and pd.notna(vb) else np.nan
+                pct=float(dif/abs(vb)*100) if pd.notna(dif) and vb!=0 else np.nan
+                filas.append({'Indicador':nombre,'Unidad':unidad,
+                              'Tipo de jornada':jornada,'Año':int(anio),
+                              'Valor':float(v) if pd.notna(v) else np.nan,
+                              'Año base':int(referencia),
+                              'Valor base':float(vb) if pd.notna(vb) else np.nan,
+                              'Diferencia numérica':dif,
+                              'Diferencia porcentual (%)':pct,
+                              'Días del año':dias,'Días del año base':db})
+    return pd.DataFrame(filas,columns=cols)
+
+
+def _v58_delta_texto(valor, decimales=2):
+    if pd.isna(valor):
+        return '—'
+    try:
+        numero=float(valor)
+    except (TypeError,ValueError):
+        return '—'
+    if not np.isfinite(numero):
+        return '—'
+    return ('+' if numero>0 else '') + _v57_formato(numero,decimales)
+
+
 # ===== v57 · PRESENTACIÓN INTERANUAL CON EL ESTILO DEL DASHBOARD EJECUTIVO =====
 _V57_PALETA = ('#10ded1','#59a8ff','#f3b961','#ba77f2','#fb7791',
                '#74d5ac','#ff9b71','#90b2f2','#b4d56e')
@@ -7612,6 +7667,7 @@ def _v57_css():
     .efe57-kpi-day {font-size:10px;margin-top:9px;padding-top:7px;
        border-top:1px solid rgba(91,155,189,.18);color:#a8c8df;line-height:1.6}
     .efe57-kpi-day b {color:#edf6ff}
+    .efe57-kpi-day .efe58-var {color:#8cbedb;font-size:10px;white-space:normal}
     .efe57-metric-heading {font-size:13px;font-weight:730;color:#cde8f8;
        margin:12px 0 8px 1px;letter-spacing:.1px}
     .efe57-legend-note {font-size:11px;color:#96b7ce;line-height:1.45}
@@ -7665,15 +7721,25 @@ def _v57_tarjetas(anual, jornadas, anios, referencia, campo, unidad, color,
                 day_html=''
                 if ver_jornadas and not jorn.empty:
                     partes=[]
+                    dec=3 if unidad in ('%','kWh/km','pax/kWh','pax-km/kWh') else 2
                     for tipo,abr in (('Laboral','Laboral'),('Sábado','Sábado'),
                                      ('Domingo y festivo','Dom./fest.')):
                         clave=(anio,tipo)
-                        if clave in jorn.index and campo in jorn:
-                            jv=jorn.loc[clave,campo]
-                            if isinstance(jv,pd.Series):jv=jv.iloc[0]
-                            jtexto=_v57_formato(jv,3 if unidad in ('%','kWh/km','pax/kWh','pax-km/kWh') else 2)
-                        else:jtexto='—'
-                        partes.append(f'{abr}: <b>{jtexto}</b>')
+                        clave_ref=(referencia,tipo)
+                        jv=(jorn.loc[clave,campo] if clave in jorn.index and campo in jorn else np.nan)
+                        rv=(jorn.loc[clave_ref,campo] if clave_ref in jorn.index and campo in jorn else np.nan)
+                        if isinstance(jv,pd.Series):jv=jv.iloc[0]
+                        if isinstance(rv,pd.Series):rv=rv.iloc[0]
+                        jtexto=_v57_formato(jv,dec)
+                        if pd.notna(jv) and pd.notna(rv):
+                            dif=float(jv-rv)
+                            var=100*dif/abs(float(rv)) if float(rv)!=0 else np.nan
+                            var_txt=_v58_delta_texto(var,2)+' %' if pd.notna(var) else 'n/c'
+                            extra=(f'<span class="efe58-var"> · Δ {_v58_delta_texto(dif,dec)}'
+                                   f' ({var_txt})</span>')
+                        else:
+                            extra='<span class="efe58-var"> · sin base comparable</span>'
+                        partes.append(f'{abr}: <b>{jtexto}</b>{extra}')
                     day_html='<div class="efe57-kpi-day">'+'<br>'.join(partes)+'</div>'
                 st.markdown(
                     f'<div class="efe57-kpi" style="--ac:{colores[anio]}">'
@@ -7815,7 +7881,7 @@ def _v56_mostrar_comparacion(ops):
                         key='_v56_mismo_corte',
                         help='Ejemplo: si el último año llega hasta el día 6, compara cada mes hasta ese día.')
         with a3:
-            ver_jornadas=st.checkbox('Desglose por jornada en tarjetas',value=False,
+            ver_jornadas=st.checkbox('Mostrar jornadas y diferencias en tarjetas',value=False,
                         key='_v57_desglose_tarjetas')
         fuente_pax=st.radio('Fuente para índices PAX/kWh',fuentes,
                 index=fuentes.index(preferida) if preferida in fuentes else 0,
@@ -7833,6 +7899,7 @@ def _v56_mostrar_comparacion(ops):
     anual=_v56_agregar(d,['Año'])
     mensual=_v56_agregar(d,['Año','Mes'])
     jornadas_tabla=_v56_agregar(d,['Año','Tipo de jornada'])
+    variaciones_jornadas=_v58_variaciones_jornadas(jornadas_tabla,anios,ref)
     deltas=_v56_comparacion_anual(anual,ref)
     if not all(a in anual['Año'].values for a in anios):
         st.warning('Algún año no tiene datos tras aplicar los filtros; no se completan con ceros.')
@@ -7907,6 +7974,30 @@ def _v56_mostrar_comparacion(ops):
                  xaxis=dict(title='Tipo de día'))
         st.plotly_chart(_v42_tema_plotly(fig_j),width='stretch',
                         config={'locale':'es','displayModeBar':True})
+        # Comparación visible de cada jornada y año para el indicador elegido.
+        # Cada año se enfrenta a la MISMA jornada del año de referencia.
+        nombre_d=next(n for c,n,u in _V56_METRICAS if c==campo_d)
+        tabla_j=variaciones_jornadas[variaciones_jornadas['Indicador'].eq(nombre_d)].copy()
+        tabla_j=tabla_j[['Tipo de jornada','Año','Valor','Valor base',
+                         'Diferencia numérica','Diferencia porcentual (%)',
+                         'Días del año','Días del año base']]
+        tabla_j=tabla_j.rename(columns={'Valor':f'Valor ({unidad_d})',
+                          'Valor base':f'Base {ref} ({unidad_d})',
+                          'Diferencia numérica':f'Diferencia ({unidad_d})',
+                          'Diferencia porcentual (%)':'Variación vs base (%)'})
+        decimales_j=3 if unidad_d in ('%','kWh/km','pax/kWh','pax-km/kWh') else 2
+        st.markdown(f'**Diferencia numérica y porcentual por jornada · año base {ref}**')
+        st.dataframe(tabla_j,hide_index=True,width='stretch',
+                     column_config={
+                         f'Valor ({unidad_d})':st.column_config.NumberColumn(format=f'%.{decimales_j}f'),
+                         f'Base {ref} ({unidad_d})':st.column_config.NumberColumn(format=f'%.{decimales_j}f'),
+                         f'Diferencia ({unidad_d})':st.column_config.NumberColumn(format=f'%+.{decimales_j}f'),
+                         'Variación vs base (%)':st.column_config.NumberColumn(format='%+.2f %%'),
+                     })
+        st.caption('Diferencia = valor del año − valor del año base, para la misma jornada. '
+                   'Variación = diferencia / |valor base| × 100. '
+                   'Si la base es cero o faltan datos, el porcentaje no es calculable. '
+                   'Los días incluidos se indican para advertir coberturas distintas.')
     with st.container(key='v57_tablas'):
         st.markdown('<div class="efe41-section">Tablas verificables y exportación</div>',
                     unsafe_allow_html=True)
@@ -7928,6 +8019,8 @@ def _v56_mostrar_comparacion(ops):
             st.dataframe(mm,hide_index=True,width='stretch')
         with st.expander('Totales e índices por tipo de jornada'):
             st.dataframe(jornadas_tabla,hide_index=True,width='stretch')
+        with st.expander('Diferencias numéricas y porcentuales por jornada · todos los indicadores'):
+            st.dataframe(variaciones_jornadas,hide_index=True,width='stretch')
         with st.expander('Datos diarios utilizados en la comparación'):
             c=['Fecha','Año','Mes','Tipo de jornada']+[k for k,_,_ in _V56_METRICAS if k in d]
             st.dataframe(d[c],hide_index=True,width='stretch')
@@ -7938,6 +8031,7 @@ def _v56_mostrar_comparacion(ops):
             mensual.to_excel(wr,sheet_name='Comparacion mensual',index=False)
             deltas.to_excel(wr,sheet_name='Variaciones vs base',index=False)
             jornadas_tabla.to_excel(wr,sheet_name='Jornadas',index=False)
+            variaciones_jornadas.to_excel(wr,sheet_name='Diferencias jornadas',index=False)
             cobertura.to_excel(wr,sheet_name='Cobertura',index=False)
             d.to_excel(wr,sheet_name='Dias comparados',index=False)
             pd.DataFrame([{'Años':', '.join(map(str,anios)),'Año referencia':ref,
