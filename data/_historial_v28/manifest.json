@@ -1,9 +1,9 @@
 {
   "schema": 2,
-  "source_sha256": "383ce40ca0cd3e5348be7841089cb29f35699c99033a68b8651a5eb009ebb40f",
+  "source_sha256": "c15abe301f7f4233922beeceb56b595a0b3ee693371410d4e58c4a1ba6ef07f7",
   "code_sha256": "89d31a0b3b0b539469e3b0946c3cba290abecd03c55d8f90a59c793876fa99ce",
-  "source_files": 1351,
-  "created_utc": "2026-11-06T14:10:34.103146+00:00",
+  "source_files": 1352,
+  "created_utc": "2026-11-06T14:13:57.854637+00:00",
   "types": {
     "df_ops": "frame",
     "df_thdr_v1": "frame_json",
@@ -36,7 +36,7 @@
     {
       "name": "historial_000.part",
       "bytes": 16777216,
-      "sha256": "f17fa523350c328503e6f9dce3fd34f16dd176c9a6c10bd744b60f91327b48d2"
+      "sha256": "3565888c05aa0c18a38d5521312be1bfd68d604426fa585e25cc1b59f43688b8"
     },
     {
       "name": "historial_001.part",
@@ -46,17 +46,17 @@
     {
       "name": "historial_002.part",
       "bytes": 16777216,
-      "sha256": "11a7fff5bc1baf7bf05b11f97d6333527e45b075df59d6806cccdb3eb0b84379"
+      "sha256": "b19c01ddbba63df43e58cb7a5bb24fc23e1a8e972517d15fb68c54e35bdf77e9"
     },
     {
       "name": "historial_003.part",
       "bytes": 16777216,
-      "sha256": "9ae5990af1557cf0c0458d563feafece57c8e93253a87b79b8a64c149f58eafe"
+      "sha256": "23e074414bec5b420445b8b6b771e0ebe30f185b75416ac4f49fef88382d681f"
     },
     {
       "name": "historial_004.part",
-      "bytes": 5704755,
-      "sha256": "1624d994a0e64aa265a7488f0bb0e0f658b33b0c32884cf4056e052a75f4ca8f"
+      "bytes": 5713468,
+      "sha256": "91b6b6e5e0c349582a04018632c8e6962575a237e2eb186a991a32cab28c0ee3"
     }
   ]
 }
