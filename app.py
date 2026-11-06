@@ -3437,7 +3437,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 _SECCIONES = [ "📑 Trenes", "⚡ Energía",
-              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "📉 Regresión lineal", "🌌 Dashboard"]
+              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "📉 Regresión lineal", "📊 Comparación entre años", "🌌 Dashboard"]
 
 # ===== OPTIMIZACIÓN INTEGRADA: GESTIÓN DE ARCHIVOS =====
 # El gestor sigue dentro del sidebar; las búsquedas y filtros no vuelven
@@ -3893,6 +3893,9 @@ _V29_DATOS_POR_SECCION = (
     ('df_carga_v1','df_carga_v2','df_viajes','df_serv_tipo','df_pax_tipo',
      'df_incid','df_incid_full','df_oit','df_ide_lb','df_bi_tiempos',
      'all_tr','all_kmserv'),
+    # Comparación multi-año: exactamente los agregados del Dashboard, en años
+    # no consecutivos; pasajeros-km exige Carga V1/V2 y servicios por vía THDR.
+    ('df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes'),
     ('df_incid', 'df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes'),
 )
 
@@ -4633,7 +4636,7 @@ elif df_ops.empty:
 # ===== BARRA DE FILTROS GLOBAL (post-carga, visible en todas las pestañas) =====
 st.markdown("<style>.barra-filtros-tit{font-size:1.02rem;font-weight:700;color:#005195;margin:.1rem 0 .35rem 0}</style>", unsafe_allow_html=True)
 _J_COD = {"Laboral": "L", "Sábado": "S", "Domingo y festivo": "D/F"}
-if not df_ops.empty and _seccion != _SECCIONES[3]:
+if not df_ops.empty and _seccion not in (_SECCIONES[3], '📊 Comparación entre años'):
     _ff = pd.to_datetime(df_ops['Fecha'], errors='coerce')
     _dts_all = sorted(set(_ff.dropna().dt.date))
     _anios = sorted({d.year for d in _dts_all}, reverse=True)
@@ -7386,6 +7389,364 @@ def _v41_render_dashboard(df):
 
 if _seccion == '🌌 Dashboard':
     _v41_render_dashboard(df_ops)
+
+
+# ===== v56 · COMPARACIÓN INTERANUAL DEL DASHBOARD =====
+# Datos propios de esta pestaña: siempre el historial completo, sin filtrar
+# por el año del control global. Esto permite elegir 2024 y 2026 a la vez.
+_V56_MESES = ('Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic')
+_V56_METRICAS = (
+    ('Servicios', 'Servicios totales', 'servicios'),
+    ('Servicios Vía 1', 'Servicios Vía 1', 'servicios'),
+    ('Servicios Vía 2', 'Servicios Vía 2', 'servicios'),
+    ('PAX', 'Pasajeros', 'pax'),
+    ('PAX-km', 'PAX-km transportados', 'pax-km'),
+    ('Odómetro [km]', 'Odómetro UMR', 'km'),
+    ('Tren-Km [km]', 'Tren-Km', 'km'),
+    ('UMR (%)', 'Relación Tren-Km / odómetro UMR', '%'),
+    ('E_Total', 'Energía total', 'kWh'),
+    ('E_Tr', 'Energía de tracción', 'kWh'),
+    ('E_12', 'Baja tensión / auxiliares 12 kV', 'kWh'),
+    ('IDE (kWh/km)', 'IDE ponderado', 'kWh/km'),
+    ('Pax/kWh total', 'PAX por kWh total', 'pax/kWh'),
+    ('Pax/kWh tracción', 'PAX por kWh de tracción', 'pax/kWh'),
+    ('Pax-km/kWh', 'PAX-km por kWh de tracción', 'pax-km/kWh'),
+)
+_V56_SUMAS = ('Servicios','Servicios Vía 1','Servicios Vía 2','PAX','PAX-km',
+              'Odómetro [km]','Tren-Km [km]','E_Total','E_Tr','E_12')
+
+
+def _v56_base(ops, paxkm_diario=None, serv_tipo=None, viajes=None, fuente_pax='Carga a bordo'):
+    """Replica los datos DIARIOS del Dashboard, sin aumentar filas por uniones."""
+    d = _v41_diario(ops)
+    if d.empty:
+        return d
+    if paxkm_diario is not None and len(paxkm_diario):
+        pkm = _v50_paxkm_resumen(d, paxkm_diario)
+        if not pkm.empty:
+            d = d.merge(pkm[['Fecha','Pax-km']].rename(columns={'Pax-km':'PAX-km'}),
+                        on='Fecha',how='left',validate='one_to_one')
+    if 'PAX-km' not in d: d['PAX-km'] = np.nan
+    # La tarjeta de PAX del Dashboard siempre viene de df_ops; sus ratios
+    # pueden usar el selector «Viajes por contrato / Carga a bordo».
+    # Se conserva la fuente seleccionada para que las eficiencias coincidan.
+    if (fuente_pax=='Viajes por contrato' and isinstance(viajes,pd.DataFrame)
+            and not viajes.empty and {'Fecha','Total Viajes'}<=set(viajes.columns)):
+        pas=viajes[['Fecha','Total Viajes']].copy()
+        pas['Fecha']=pd.to_datetime(pas['Fecha'],errors='coerce').dt.normalize()
+        pas['Total Viajes']=pd.to_numeric(pas['Total Viajes'],errors='coerce')
+        pas=(pas.dropna(subset=['Fecha'])
+             .groupby('Fecha',as_index=False)['Total Viajes'].sum(min_count=1))
+        d=d.merge(pas.rename(columns={'Total Viajes':'PAX eficiencia'}),
+                  on='Fecha',how='left',validate='one_to_one')
+    else:
+        d['PAX eficiencia']=d['PAX']
+    if isinstance(serv_tipo,pd.DataFrame) and not serv_tipo.empty:
+        vias=_v48_servicios_via(serv_tipo,d['Fecha'])
+        if not vias.empty:
+            pv=(vias.pivot_table(index='Fecha',columns='Vía',values='Servicios',
+                                 aggfunc='sum').reset_index())
+            pv=pv.rename(columns={'Vía 1':'Servicios Vía 1',
+                                  'Vía 2':'Servicios Vía 2'})
+            cols=['Fecha']+[c for c in ('Servicios Vía 1','Servicios Vía 2') if c in pv]
+            d=d.merge(pv[cols],on='Fecha',how='left',validate='one_to_one')
+            # Cuando hay detalle THDR de ese día, una vía sin servicios equivale a 0.
+            tiene_vias=d['Fecha'].isin(pv['Fecha'])
+            for campo in ('Servicios Vía 1','Servicios Vía 2'):
+                if campo not in d: d[campo]=np.nan
+                d.loc[tiene_vias,campo]=d.loc[tiene_vias,campo].fillna(0)
+    for campo in ('Servicios Vía 1','Servicios Vía 2'):
+        if campo not in d: d[campo]=np.nan
+    d['Año']=d['Fecha'].dt.year.astype(int)
+    d['Mes']=d['Fecha'].dt.month.astype(int)
+    d['Día']=d['Fecha'].dt.day.astype(int)
+    return d
+
+
+def _v56_filtrar(base, anios, meses=(), jornadas=(), comunes=True, mismo_corte=True):
+    """Filtra años independientes; si hay un mes parcial, iguala el último día.
+
+    La cobertura mensual se determina ANTES del filtro de jornada, para no
+    cortar un mes completo por tener último día sábado/domingo en uno de los años.
+    """
+    if base is None or base.empty or len(anios)<2:
+        return pd.DataFrame(), [], {}
+    d=base[base['Año'].isin([int(y) for y in anios])].copy()
+    if meses:
+        d=d[d['Mes'].isin([int(m) for m in meses])].copy()
+    meses_presencia={int(a):set(d.loc[d['Año']==int(a),'Mes']) for a in anios}
+    if comunes:
+        compartidos=set.intersection(*meses_presencia.values()) if meses_presencia else set()
+        d=d[d['Mes'].isin(compartidos)].copy()
+    else:
+        compartidos=set.union(*meses_presencia.values()) if meses_presencia else set()
+    cortes={}
+    if mismo_corte and not d.empty:
+        limites=d.groupby(['Año','Mes'])['Día'].max().reset_index()
+        cortes={int(m):int(g['Día'].min()) for m,g in limites.groupby('Mes')}
+        d=d[d['Día']<=d['Mes'].map(cortes)].copy()
+    if jornadas:
+        d=d[d['Tipo de jornada'].isin(jornadas)].copy()
+    return d.sort_values('Fecha').reset_index(drop=True),sorted(compartidos),cortes
+
+
+def _v56_agregar(d, grupos):
+    """Totales + ratios ponderados a partir de días pareados y válidos.
+
+    No se promedian IDE, UMR ni PAX/kWh. Los indicadores sin fuente son NaN,
+    nunca cero; PAX-km coincide con el KPI de Dashboard solo días con E_Tr > 0.
+    """
+    cols=list(grupos)+['Días operacionales','Días con PAX-km']+[c for c,_,_ in _V56_METRICAS]
+    if d is None or d.empty: return pd.DataFrame(columns=cols)
+    filas=[]
+    def _suma(df,c):
+        s=pd.to_numeric(df[c],errors='coerce') if c in df else pd.Series(dtype=float)
+        return float(s.sum(min_count=1)) if s.notna().any() else float('nan')
+    def _cociente(df,num,den,factor=1.0,modo='positivo'):
+        if num not in df or den not in df:return float('nan')
+        n=pd.to_numeric(df[num],errors='coerce')
+        q=pd.to_numeric(df[den],errors='coerce')
+        ok=n.notna() & q.notna() & q.gt(0)
+        ok &= n.ge(0) if modo=='no_negativo' else n.gt(0)
+        if not ok.any():return float('nan')
+        return float(factor*n[ok].sum()/q[ok].sum())
+    for llave,g in d.groupby(list(grupos),sort=True,dropna=False):
+        llave=llave if isinstance(llave,tuple) else (llave,)
+        res=dict(zip(grupos,llave))
+        res['Días operacionales']=int(g['Fecha'].nunique())
+        res['Días con PAX-km']=int(pd.to_numeric(g['PAX-km'],errors='coerce').gt(0).sum())
+        for c in _V56_SUMAS:
+            if c in ('Odómetro [km]','Tren-Km [km]'):
+                valid=(pd.to_numeric(g['Odómetro [km]'],errors='coerce').ge(0)
+                       & pd.to_numeric(g['Tren-Km [km]'],errors='coerce').ge(0))
+                res[c]=_suma(g.loc[valid],c)
+            else:
+                res[c]=_suma(g,c)
+        res['UMR (%)']=_cociente(g,'Tren-Km [km]','Odómetro [km]',100,'no_negativo')
+        res['IDE (kWh/km)']=_cociente(g,'E_Tr','Odómetro [km]')
+        # Misma selección de fuente de los indicadores de eficiencia del Dashboard.
+        pax_num='PAX eficiencia' if 'PAX eficiencia' in g else 'PAX'
+        res['Pax/kWh total']=_cociente(g,pax_num,'E_Total')
+        res['Pax/kWh tracción']=_cociente(g,pax_num,'E_Tr')
+        res['Pax-km/kWh']=_cociente(g,'PAX-km','E_Tr')
+        filas.append(res)
+    return pd.DataFrame(filas).reindex(columns=cols)
+
+
+def _v56_comparacion_anual(anual, referencia):
+    """Tabla larga: cambio absoluto y porcentual contra año referencia."""
+    filas=[]
+    if anual is None or anual.empty:return pd.DataFrame()
+    base=anual[anual['Año'].eq(int(referencia))]
+    if base.empty:return pd.DataFrame()
+    for c,nombre,unidad in _V56_METRICAS:
+        bv=pd.to_numeric(base[c],errors='coerce').iloc[0]
+        for _,r in anual.iterrows():
+            v=float(r[c]) if pd.notna(r[c]) else np.nan
+            delta=v-bv if pd.notna(v) and pd.notna(bv) else np.nan
+            pct=100*delta/abs(bv) if pd.notna(delta) and bv!=0 else np.nan
+            filas.append({'Indicador':nombre,'Unidad':unidad,'Año':int(r['Año']),
+                          'Valor':v,'Año base':int(referencia),
+                          'Valor base':bv,'Diferencia vs base':delta,'Variación vs base (%)':pct})
+    return pd.DataFrame(filas)
+
+
+def _v56_mostrar_comparacion(ops):
+    """Comparación entre N años del Dashboard sobre el historial original."""
+    _v41_css()
+    st.markdown('<div class="efe41-eyebrow">EFE VALPARAÍSO · INTELIGENCIA OPERACIONAL</div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="efe41-hero-title">Comparación entre años</div>',
+                unsafe_allow_html=True)
+    st.caption('Compara 2, 3 o más años, consecutivos o no (por ejemplo 2024 y 2026). '
+               'Utiliza el mismo cálculo diario del Dashboard, sobre TODO el historial. '
+               'Los filtros de esta pestaña son independientes de los filtros globales.')
+    if ops is None or ops.empty:
+        st.info('No existen registros operacionales disponibles para comparar.')
+        return
+    viajes=st.session_state.get('df_viajes',pd.DataFrame())
+    fuentes=['Carga a bordo']
+    if (isinstance(viajes,pd.DataFrame) and not viajes.empty and
+          'Total Viajes' in viajes and
+          pd.to_numeric(viajes['Total Viajes'],errors='coerce').gt(0).any()):
+        fuentes.insert(0,'Viajes por contrato')
+    preferida=st.session_state.get('_pax_fuente','Viajes por contrato')
+    fuente_pax=st.radio('Fuente de pasajeros para los índices PAX/kWh',
+        fuentes,index=fuentes.index(preferida) if preferida in fuentes else 0,
+        horizontal=True,key='_v56_fuente_pax',
+        help='El total PAX es el mismo del Dashboard. Este selector solo cambia '
+             'el numerador de PAX/kWh, igual que el selector del Dashboard.')
+    try:
+        base=_v56_base(ops,_v46_paxkm_diario(),
+                       st.session_state.get('df_serv_tipo',pd.DataFrame()),
+                       viajes,fuente_pax)
+    except Exception as exc:
+        st.error(f'No se pudo preparar la comparación interanual: {exc}')
+        return
+    anios_disponibles=sorted(int(x) for x in base['Año'].dropna().unique())
+    if len(anios_disponibles)<2:
+        st.info('Se necesitan registros de por lo menos dos años distintos.')
+        return
+    c_a,c_ref=st.columns([2.4,1.1])
+    with c_a:
+        sugeridos=anios_disponibles[-min(3,len(anios_disponibles)):]
+        anios=st.multiselect('Años a comparar (puedes seleccionar más de dos)',
+                             anios_disponibles,default=sugeridos,key='_v56_anios')
+    if len(anios)<2:
+        st.warning('Selecciona al menos dos años para realizar la comparación.')
+        return
+    anios=sorted(int(x) for x in anios)
+    with c_ref:
+        ref=st.selectbox('Año de referencia para las variaciones',anios,
+                         index=0,key='_v56_anio_referencia')
+    c_m,c_j=st.columns([1.7,1.3])
+    with c_m:
+        _mes_ops=list(range(1,13))
+        meses=st.multiselect('Meses que deseas comparar (vacío = todos)',
+                             _mes_ops,format_func=lambda m:_V56_MESES[int(m)-1],
+                             default=[],key='_v56_meses')
+    with c_j:
+        jornadas=st.multiselect('Tipos de jornada',
+                    ['Laboral','Sábado','Domingo y festivo'],
+                    default=['Laboral','Sábado','Domingo y festivo'],key='_v56_jornadas')
+    if not jornadas:
+        st.info('Selecciona al menos un tipo de jornada.')
+        return
+    p1,p2=st.columns(2)
+    with p1:
+        comunes=st.checkbox('Usar solo meses disponibles en todos los años',
+                            value=True,key='_v56_meses_comunes',
+                            help='Recomendado para evitar comparar 2024 completo con 2026 parcial.')
+    with p2:
+        mismo_corte=st.checkbox('Igualar el día de corte en cada mes',
+                               value=True,key='_v56_mismo_corte',
+                               help='Si noviembre llega hasta el día 6 en 2026, compara '
+                                    'hasta el día 6 de noviembre en los otros años.')
+    d,meses_usados,cortes=_v56_filtrar(base,anios,meses,jornadas,comunes,mismo_corte)
+    if d.empty:
+        st.warning('No hay meses/días comparables con los filtros elegidos.')
+        return
+    anual=_v56_agregar(d,['Año'])
+    mensual=_v56_agregar(d,['Año','Mes'])
+    jornadas_tabla=_v56_agregar(d,['Año','Tipo de jornada'])
+    st.caption('Meses incluidos: '+(', '.join(_V56_MESES[m-1] for m in meses_usados) if meses_usados else 'ninguno')
+               + ' · El corte por día se calcula con la última fecha disponible de cada mes, '
+               'antes de filtrar jornadas.' if mismo_corte else
+               'Meses incluidos: '+(', '.join(_V56_MESES[m-1] for m in meses_usados) if meses_usados else 'ninguno'))
+    if not all(a in anual['Año'].values for a in anios):
+        st.warning('Algún año seleccionado no tiene días disponibles tras aplicar filtros; '
+                   'sus indicadores no se inventan como cero.')
+    if len(meses_usados)<12:
+        st.info('La comparación corresponde a los meses seleccionados/disponibles, '
+                'NO al año calendario completo. Revisa los días disponibles por año.')
+    cobertura=anual[['Año','Días operacionales','Días con PAX-km']].copy()
+    cobertura['Meses con registros']=cobertura['Año'].map(
+        mensual.groupby('Año')['Mes'].nunique().to_dict())
+    st.markdown('#### Cobertura de los años comparados')
+    st.dataframe(cobertura,hide_index=True,width='stretch')
+    st.caption('Las diferencias en días disponibles pueden afectar los totales. '
+               'Los índices (UMR, IDE y eficiencia) se calculan como cocientes ponderados, '
+               'no como promedios simples.')
+    st.markdown('#### Indicador y comparación visual')
+    mapeo={nombre:campo for campo,nombre,_ in _V56_METRICAS}
+    nombres=list(mapeo.keys())
+    por_defecto='Energía de tracción'
+    elegido=st.selectbox('Indicador del Dashboard que deseas comparar',nombres,
+                          index=nombres.index(por_defecto),key='_v56_indicador')
+    campo=mapeo[elegido]
+    unidad=next(u for c,n,u in _V56_METRICAS if c==campo)
+    deltas=_v56_comparacion_anual(anual,ref)
+    sub=deltas[deltas['Indicador'].eq(elegido)].sort_values('Año')
+    cols=st.columns(len(anios))
+    por_anio=sub.set_index('Año')
+    for i,a in enumerate(anios):
+        with cols[i]:
+            if a not in por_anio.index:
+                st.metric(f'{a} · {elegido}','Sin datos')
+            else:
+                r=por_anio.loc[a]
+                valor=r['Valor'];var=r['Variación vs base (%)']
+                st.metric(str(a),_ncl(valor,2)+' '+unidad if pd.notna(valor) else '—',
+                          None if a==ref or pd.isna(var) else
+                          ('+' if var>0 else '')+_ncl(var,2)+' % vs '+str(ref),
+                          delta_color='off')
+    import plotly.graph_objects as _go56
+    fig=_go56.Figure()
+    paleta=['#10ded1','#289bfa','#eebc54','#b66eff','#ff6887','#5ccedb','#81c784']
+    for i,a in enumerate(anios):
+        serie=mensual[mensual['Año'].eq(a)].sort_values('Mes')
+        if serie.empty:continue
+        # Completar el eje Ene–Dic con NaN: no dibujar líneas falsas entre
+        # meses faltantes (por ejemplo, comparar solo marzo y octubre).
+        eje_mes=pd.Series(pd.to_numeric(serie[campo],errors='coerce').values,
+                          index=serie['Mes'].astype(int).values).reindex(range(1,13))
+        fig.add_trace(_go56.Scatter(
+             x=list(range(1,13)),y=eje_mes.values,name=str(a),mode='lines+markers',
+             marker=dict(size=9),line=dict(width=3,color=paleta[i%len(paleta)]),
+             connectgaps=False,
+             hovertemplate='%{x}<br>%{y:,.2f} '+unidad+'<extra>Año '+str(a)+'</extra>'))
+    fig.update_layout(height=370,xaxis=dict(title='Mes',tickmode='array',
+                      tickvals=list(range(1,13)),ticktext=list(_V56_MESES),
+                      range=[.7,12.3],dtick=1),
+                      yaxis=dict(title=unidad,gridcolor='rgba(120,170,216,.17)'),
+                      hovermode='x unified',legend=dict(orientation='h',y=1.14,x=0),
+                      paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+                      font=dict(color='#b7d4e9'),margin=dict(l=10,r=10,t=38,b=20))
+    st.plotly_chart(_v42_tema_plotly(fig),width='stretch',
+                    config={'locale':'es','displayModeBar':True})
+    st.caption('Cada línea corresponde a un año seleccionado. Los meses aparecen '
+               'en el mismo eje Ene–Dic, incluso si comparas 2024 directamente con 2026.')
+    st.markdown('#### Tabla comparativa · todos los indicadores del Dashboard')
+    st.dataframe(anual.rename(columns={
+          'E_Total':'Energía total (kWh)','E_Tr':'Tracción (kWh)',
+          'E_12':'Baja tensión / auxiliares 12 kV (kWh)',
+          'PAX':'Pasajeros','PAX-km':'PAX-km (tracción comparable)',
+          'IDE (kWh/km)':'IDE ponderado (kWh/km)',
+          'Servicios':'Servicios totales'}),hide_index=True,width='stretch')
+    with st.expander('Variación de CADA indicador respecto del año base',expanded=False):
+        st.dataframe(deltas,hide_index=True,width='stretch')
+    with st.expander('Comparación por tipo de jornada',expanded=False):
+        st.dataframe(jornadas_tabla,hide_index=True,width='stretch')
+    with st.expander('Tabla mensual y días utilizados',expanded=False):
+        mensual_v=mensual.copy()
+        mensual_v['Mes nombre']=mensual_v['Mes'].map(lambda m:_V56_MESES[int(m)-1])
+        st.dataframe(mensual_v,hide_index=True,width='stretch')
+        st.caption('Para PAX-km se utiliza Carga V1 + V2 por tramo × distancia y '
+                   'solo días con tracción válida, tal como en Dashboard. '
+                   'Servicios por vía provienen de THDR.')
+    with st.expander('Ver los datos diarios que entran en la comparación',expanded=False):
+        cols=['Fecha','Año','Mes','Tipo de jornada']+[c for c,_,_ in _V56_METRICAS if c in d]
+        st.dataframe(d[cols],hide_index=True,width='stretch')
+    st.markdown('#### Descargar comparación')
+    from io import BytesIO as _BytesIO56
+    buf=_BytesIO56()
+    with pd.ExcelWriter(buf,engine='openpyxl') as wr:
+        anual.to_excel(wr,sheet_name='Comparacion anual',index=False)
+        mensual.to_excel(wr,sheet_name='Comparacion mensual',index=False)
+        deltas.to_excel(wr,sheet_name='Variaciones vs base',index=False)
+        jornadas_tabla.to_excel(wr,sheet_name='Jornadas',index=False)
+        d.to_excel(wr,sheet_name='Dias comparados',index=False)
+        pd.DataFrame([{'Años':', '.join(map(str,anios)),'Año referencia':ref,
+             'Meses incluidos':', '.join(_V56_MESES[m-1] for m in meses_usados),
+             'Solo meses comunes':comunes,'Mismo día de corte':mismo_corte,
+             'Jornadas':', '.join(jornadas),
+             'Fuente PAX para ratios':fuente_pax}]).to_excel(wr,sheet_name='Criterios',index=False)
+    st.download_button('⬇️ Descargar comparación de años (.xlsx)',
+          data=buf.getvalue(),
+          file_name='Comparacion_Interanual_Datos_Operacionales.xlsx',
+          mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          key='_v56_descargar_comparacion')
+    st.caption('Fuente: los mismos datos diarios y reglas de Dashboard. '
+               'PAX/kWh usa '+fuente_pax+'. '
+               'Energía total y tracción conservan prioridad Factura > PRMTE > SEAT. '
+               'La llamada baja tensión/auxiliares corresponde a E_12 de SEAT '
+               '(12 kV; NO medición independiente a 220/380 V). '
+               'La comparación no altera ningún dato ni las alertas LB.')
+
+
+if _seccion == '📊 Comparación entre años':
+    # El estado de df_ops guarda el historial antes de filtros globales.
+    _v56_mostrar_comparacion(st.session_state.get('df_ops',df_ops))
 
 
 if _seccion == _SECCIONES[0]:
