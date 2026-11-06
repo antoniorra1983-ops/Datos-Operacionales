@@ -6551,7 +6551,7 @@ def _v41_card(titulo,valor,unidad,accent,por_jornada=None,
 def _v41_diario(df):
     if df is None or df.empty or 'Fecha' not in df:
         return pd.DataFrame()
-    campos=['E_Total','E_Tr','Odómetro [km]','Tren-Km [km]','PAX','Servicios']
+    campos=['E_Total','E_Tr','E_12','Odómetro [km]','Tren-Km [km]','PAX','Servicios']
     sub=df[['Fecha']+[c for c in campos if c in df.columns]].copy()
     sub['Fecha']=pd.to_datetime(sub['Fecha'],errors='coerce').dt.normalize()
     sub=sub.dropna(subset=['Fecha'])
@@ -6817,6 +6817,7 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
     km=datos[(datos['Odómetro [km]']>=0)&(datos['Tren-Km [km]']>=0)]
     odo=_v41_suma(km,'Odómetro [km]');trenk=_v41_suma(km,'Tren-Km [km]')
     total_tr=_v41_suma(datos,'E_Tr');total_e=_v41_suma(datos,'E_Total')
+    total_aux=_v41_suma(datos,'E_12')  # Auxiliares 12 kV (componente disponible para BT)
     ide=total_tr/odo if np.isfinite(total_tr) and np.isfinite(odo) and odo>0 else np.nan
     # 1. Resumen ejecutivo.
     sl=base('Dashboard ejecutivo · Datos operacionales',
@@ -6858,12 +6859,16 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
     tile(sl,8.6,1.55,3.6,1.5,'UMR global',100*trenk/odo if np.isfinite(odo) and odo>0 else np.nan,'%',orange)
     chart(sl,km,['Odómetro [km]','Tren-Km [km]'],['Odómetro','Tren-Km'],.75,3.35,11.8,2.85,
           colors=[violet,teal],unidad_y='Kilómetros (km)')
-    # 5. Energía.
-    sl=base('Consumo energético','Energía total y energía de tracción')
-    tile(sl,1.0,1.55,5.2,1.5,'Energía total',total_e,'kWh',teal)
-    tile(sl,7.1,1.55,5.2,1.5,'Tracción',total_tr,'kWh',violet)
-    chart(sl,datos,['E_Total','E_Tr'],['Energía total','Tracción'],.7,3.25,11.85,3.05,'line',
-          colors=[teal,violet],unidad_y='Energía (kWh)')
+    # 5. Energía (tres componentes, mismo origen jerarquizado que pestaña Energía).
+    sl=base('Consumo energético','Total, tracción y auxiliares 12 kV (fuente para baja tensión)')
+    tile(sl,.75,1.55,3.8,1.5,'Energía total',total_e,'kWh',teal)
+    tile(sl,4.80,1.55,3.8,1.5,'Tracción',total_tr,'kWh',violet)
+    tile(sl,8.85,1.55,3.8,1.5,'BT / auxiliares 12 kV',total_aux,'kWh',orange)
+    chart(sl,datos,['E_Total','E_Tr','E_12'],
+          ['Energía total','Tracción','Auxiliares 12 kV'],
+          .7,3.25,11.85,3.05,'line',colors=[teal,violet,orange],unidad_y='Energía (kWh)')
+    txt(sl,.8,6.63,11.8,.25,
+        'BT: referencia auxiliar E_12 de SEAT; no es una medición independiente a 220/380 V.',10,muted)
     # 6. Eficiencia.
     sl=base('Desempeño energético','Cocientes ponderados calculados solo con días comparables')
     for x,y,label,value,unit,col in (
@@ -6880,7 +6885,8 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         ('Servicios',datos,'Servicios',''),('Pasajeros',datos,'PAX',''),
         ('PAX-km',paxkm_tabla,'PAX-km',''),
         ('Odómetro',km,'Odómetro [km]',''),('Tren-Km',km,'Tren-Km [km]',''),
-        ('Energía total',datos,'E_Total',''),('Tracción',datos,'E_Tr','')],y=1.63)
+        ('Energía total',datos,'E_Total',''),('Tracción',datos,'E_Tr',''),
+        ('BT / auxiliares 12 kV',datos,'E_12','')],y=1.63)
     txt(sl,.8,6.65,11.7,.3,'S/D significa sin dato disponible; no se completa con cero.',11,muted)
     out=_Bytes49();pres.save(out)
     return out.getvalue()
@@ -6898,7 +6904,7 @@ def _v41_render_dashboard(df):
     if datos.empty:
         st.info('No hay registros operacionales para el período y las jornadas seleccionadas.')
         return
-    e=_v41_suma(datos,'E_Total'); t=_v41_suma(datos,'E_Tr')
+    e=_v41_suma(datos,'E_Total'); t=_v41_suma(datos,'E_Tr'); bt=_v41_suma(datos,'E_12')
     # Misma fuente UMR y misma regla de días sin km negativos que «Resumen».
     _km_validos=datos[(datos['Odómetro [km]']>=0)&(datos['Tren-Km [km]']>=0)].copy()
     km=_v41_suma(_km_validos,'Odómetro [km]')
@@ -7132,13 +7138,17 @@ def _v41_render_dashboard(df):
     # 4. Consumo de energía: tarjetas y evolución temporal.
     st.markdown('<div class="efe41-section">Consumo energético (kWh)</div>',
                 unsafe_allow_html=True)
-    energia_cols=st.columns(2,gap='small')
+    energia_cols=st.columns(3,gap='small')
     with energia_cols[0]:
         _v41_card('Energía total',e,'kWh','#13dac9',
                   por_jornada=_v48_totales_jornada(datos,'E_Total'))
     with energia_cols[1]:
         _v41_card('Tracción',t,'kWh','#24a4f4',
                   por_jornada=_v48_totales_jornada(datos,'E_Tr'))
+    with energia_cols[2]:
+        _v41_card('Baja tensión / auxiliares',bt,'kWh','#f4b350',
+                  por_jornada=_v48_totales_jornada(datos,'E_12'),
+                  nota='Fuente: energía auxiliar E_12 (12 kV) del SEAT; no es una medición BT independiente.')
 
     with st.container(key='v41_hero'):
         st.markdown('<div class="efe41-section">Evolución del consumo energético</div>',
@@ -7146,20 +7156,22 @@ def _v41_render_dashboard(df):
         plot=datos.copy()
         if vista!='Diaria':
             plot['Fecha']=plot['Fecha'].dt.to_period('M').dt.to_timestamp()
-            plot=plot.groupby('Fecha',as_index=False)[['E_Total','E_Tr']].sum(min_count=1)
+            plot=plot.groupby('Fecha',as_index=False)[['E_Total','E_Tr','E_12']].sum(min_count=1)
         else:
-            plot=plot[['Fecha','E_Total','E_Tr']].copy()
+            plot=plot[['Fecha','E_Total','E_Tr','E_12']].copy()
         fig=_go41.Figure()
         for campo,titulo,color,fill in (
-            ('E_Total','Energía total','#13d4d1','rgba(12,177,212,.24)'),
-            ('E_Tr','Energía de tracción','#ac40df','rgba(160,50,212,.19)')):
+            ('E_Total','Energía total','#13d4d1','rgba(12,177,212,.18)'),
+            ('E_Tr','Energía de tracción','#ac40df',None),
+            ('E_12','Baja tensión / auxiliares 12 kV','#f4b350',None)):
             if campo not in plot or plot[campo].notna().sum()==0:
                 continue
             fig.add_trace(_go41.Scatter(
                 x=plot['Fecha'],y=plot[campo],name=titulo,
                 mode='lines+markers' if len(plot)<=60 else 'lines',
                 line=dict(color=color,width=2.7,shape='spline' if len(plot)<=60 else 'linear'),
-                marker=dict(size=6,color=color),fill='tozeroy',fillcolor=fill,
+                marker=dict(size=6,color=color),
+                fill='tozeroy' if fill else None,fillcolor=fill,
                 hovertemplate='%{x|%d/%m/%Y}<extra>'+titulo+'</extra><br>%{y:,.2f} kWh',
             ))
         fig.update_layout(
@@ -7288,13 +7300,22 @@ def _v41_render_dashboard(df):
         with st.container(key='v41_lower_right'):
             st.markdown('<div class="efe41-section">Distribución del consumo</div>',
                         unsafe_allow_html=True)
-            st.markdown('<div class="efe41-miniline">Energía total y participación de tracción</div>',
+            st.markdown('<div class="efe41-miniline">Energía total: tracción y auxiliares (12 kV)</div>',
                         unsafe_allow_html=True)
-            if np.isfinite(e) and e>0 and np.isfinite(t) and 0<=t<=e:
-                restante=e-t
+            if np.isfinite(e) and e>0 and np.isfinite(t) and 0<=t<=e and np.isfinite(bt) and bt>=0:
+                # Si las proporciones de fuente no cierran exactamente, no atribuir
+                # automáticamente el resto a baja tensión.
+                componentes=['Tracción','Auxiliares 12 kV']
+                cantidades=[t,bt]
+                tonos=['#18dfcc','#f4b350']
+                resto=e-t-bt
+                if resto>max(0.01,e*0.001):
+                    componentes.append('Otros usos sin desglosar')
+                    cantidades.append(resto)
+                    tonos.append('#7a3fe2')
                 figpie=_go41.Figure(_go41.Pie(
-                    labels=['Tracción','Otros usos'],values=[t,restante],hole=.72,
-                    marker=dict(colors=['#18dfcc','#7a3fe2'],line=dict(color='#061c38',width=2)),
+                    labels=componentes,values=cantidades,hole=.72,
+                    marker=dict(colors=tonos,line=dict(color='#061c38',width=2)),
                     textinfo='none',hovertemplate='%{label}: %{value:,.2f} kWh · %{percent}<extra></extra>',
                 ))
                 figpie.update_layout(height=208,
@@ -7307,10 +7328,12 @@ def _v41_render_dashboard(df):
                 st.plotly_chart(_v42_tema_plotly(figpie),width='stretch',config={'displayModeBar':False})
                 st.markdown('<div class="efe41-legend">'
                             f'<span style="color:#17dbc9">●</span> Tracción: <b>{_ncl(t,2)} kWh</b><br>'
-                            f'<span style="color:#a45ee6">●</span> Otros usos: <b>{_ncl(restante,2)} kWh</b>'
-                            '</div>',unsafe_allow_html=True)
+                            f'<span style="color:#f4b350">●</span> Auxiliares 12 kV: <b>{_ncl(bt,2)} kWh</b>'
+                            + (f'<br><span style="color:#a45ee6">●</span> Otros: <b>{_ncl(resto,2)} kWh</b>'
+                               if resto>max(0.01,e*0.001) else '')
+                            + '</div>',unsafe_allow_html=True)
             else:
-                st.info('No hay energía total y tracción comparables para el período.')
+                st.info('No hay desglose total/tracción/auxiliares comparable para este período.')
 
     # v49 · Exportación PowerPoint de los filtros visibles, bajo demanda.
     # Dos clics: preparar y descargar; evita construir un PPTX en cada rerun.
@@ -7320,6 +7343,7 @@ def _v41_render_dashboard(df):
     _firma_pptx49=(str(fmin),str(fmax),len(datos),vista,_fuente_kpi46,
                    float(_v41_suma(datos,'PAX')),float(_v41_suma(datos,'Servicios')),
                    float(_v41_suma(datos,'E_Total')),float(_v41_suma(datos,'E_Tr')),
+                   float(_v41_suma(datos,'E_12')),
                    float(_total_paxkm49) if np.isfinite(_total_paxkm49) else None,
                    str(st.session_state.get('_cache_key')))
     if st.button('📑 Preparar presentación PPTX',key='_v49_preparar_pptx'):
@@ -7345,7 +7369,7 @@ def _v41_render_dashboard(df):
     with st.expander('📋 Ver detalle diario y exportar datos',expanded=False):
         tabla=datos[['Fecha','Tipo de jornada','Servicios','PAX',
                      'Odómetro [km]','Tren-Km [km]','UMR (%)',
-                     'E_Total','E_Tr','IDE (kWh/km)']].copy()
+                     'E_Total','E_Tr','E_12','IDE (kWh/km)']].copy()
         tabla=tabla.merge(_paxkm_tabla49.rename(columns={'PAX-km':'PAX-km (Resumen)'}),on='Fecha',how='left')
         tabla=tabla.merge(_paxkm_carga50.rename(columns={'PAX-km':'PAX-km (toda Carga)'}),on='Fecha',how='left')
         st.dataframe(tabla,hide_index=True,width='stretch')
@@ -7354,6 +7378,8 @@ def _v41_render_dashboard(df):
             file_name='dashboard_ejecutivo_efe.csv',mime='text/csv',
             key='_v41_descargar_csv')
     st.caption('Fuente: historial persistente UMR y energía jerarquizada (Factura > PRMTE > SEAT). '
+               'Baja tensión / auxiliares utiliza E_12, la componente de 12 kV de SEAT; '
+               'no constituye una medición independiente de BT a 220/380 V. '
                'La energía de tracción y el kilometraje se usan para el IDE ponderado. '
                'Las cifras corresponden únicamente a los días disponibles tras los filtros globales.')
 
