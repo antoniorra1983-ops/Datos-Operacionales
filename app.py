@@ -12281,8 +12281,12 @@ def _v52_critico_t(grados,alfa=.05):
     return (lo+hi)/2
 
 
-def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0):
-    """MCO estable; datos completos sin sustituciones ni eliminación automática."""
+def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0,excluidas=None):
+    """MCO estable; exclusiones manuales solo de entrenamiento, auditables.
+
+    La partición temporal se fija ANTES de las exclusiones. Los períodos de
+    validación nunca se quitan ni se usan para calcular los coeficientes.
+    """
     cols=[y]+list(x)
     t=data[['Fecha','Tipo de jornada']+cols].copy()
     t[cols]=t[cols].apply(pd.to_numeric,errors='coerce').replace([np.inf,-np.inf],np.nan)
@@ -12292,9 +12296,16 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0):
     if n<minimo:
         raise ValueError(f'Se necesitan al menos {minimo} períodos completos (Y y todas las X); solo hay {n}.')
     xmat=t[x].to_numpy(dtype=float);yv=t[y].to_numpy(dtype=float)
-    nt=n if not prueba_pct else min(n-3,max(ncoef+5,int(np.floor(n*(1-prueba_pct/100)))))
-    if nt<=ncoef:raise ValueError('No hay suficientes observaciones de entrenamiento.')
-    xm=xmat[:nt];ym=yv[:nt]
+    n_inicial=n if not prueba_pct else min(n-3,max(ncoef+5,int(np.floor(n*(1-prueba_pct/100)))))
+    fechas=t['Fecha'].dt.strftime('%Y-%m-%d')
+    excluidas=set(excluidas or [])
+    idx=np.arange(n)
+    mascara_ent=(idx<n_inicial) & ~fechas.isin(excluidas).to_numpy()
+    nt=int(mascara_ent.sum())
+    if nt<max(6,ncoef+3):
+        raise ValueError(f'Tras las exclusiones quedan {nt} períodos de entrenamiento; '
+                         f'se necesitan al menos {max(6,ncoef+3)}. Recupera algunos períodos.')
+    xm=xmat[mascara_ent];ym=yv[mascara_ent]
     if not np.isfinite(ym).all() or np.std(ym)<=1e-12:
         raise ValueError('La variable Y no tiene variación suficiente para la regresión.')
     sc=np.std(xm,axis=0)
@@ -12343,20 +12354,50 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0):
         vif[col]=1/(1-R2j) if R2j<1-1e-10 else np.inf
     coef['VIF']=coef['Variable'].map(vif)
     t['Observado']=yv;t['Estimado']=yh;t['Residuo']=res
-    t['Conjunto']=np.where(np.arange(n)<nt,'Entrenamiento','Prueba')
+    t['Conjunto']=np.where(idx<n_inicial,'Entrenamiento','Prueba')
+    t.loc[(idx<n_inicial)&~mascara_ent,'Conjunto']='Excluido manualmente'
+    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
+    # residuo studentizado interno, leverage (diagonal de H) y Cook.
+    # Umbrales ORIENTATIVOS: |r studentizado| > 3; Cook > 4/n; h > 2p/n.
+    inv=np.linalg.pinv(D.T@D)
+    h=np.clip(np.einsum('ij,jk,ik->i',D,inv,D),0,1)
+    sigma=float(np.sqrt(mse)) if mse>0 else 0.
+    denom=np.sqrt(np.maximum(1-h,1e-12))
+    rstud=res_tr/(sigma*denom) if sigma>0 else np.full(nt,np.nan)
+    cook=(res_tr**2/(ncoef*mse))*h/np.maximum((1-h)**2,1e-12) if mse>0 else np.full(nt,np.nan)
+    t['Residuo studentizado']=np.nan
+    t['Leverage']=np.nan
+    t['Distancia de Cook']=np.nan
+    t.loc[mascara_ent,'Residuo studentizado']=rstud
+    t.loc[mascara_ent,'Leverage']=h
+    t.loc[mascara_ent,'Distancia de Cook']=cook
+    t['Criterio de revisión']=''
+    umbral_cook=4/nt
+    umbral_h=2*ncoef/nt
+    etiquetas=[]
+    for rs,ck,hh in zip(rstud,cook,h):
+        causas=[]
+        if np.isfinite(rs) and abs(rs)>3:causas.append('Residuo > 3')
+        if np.isfinite(ck) and ck>umbral_cook:causas.append('Cook > 4/n')
+        if np.isfinite(hh) and hh>umbral_h:causas.append('Leverage alto')
+        etiquetas.append('; '.join(causas))
+    t.loc[mascara_ent,'Criterio de revisión']=etiquetas
     rmse=float(np.sqrt(np.mean(res_tr**2)))
     mae=float(np.mean(np.abs(res_tr)))
     r2a=1-(1-r2)*(nt-1 if intercepto else nt)/de
-    tst=t.iloc[nt:]
-    res_pr=res[nt:]
+    tst=t.iloc[n_inicial:]
+    res_pr=res[n_inicial:]
     eval_pr={'n':len(tst),'rmse':float(np.sqrt(np.mean(res_pr**2))) if len(tst) else np.nan,
              'mae':float(np.mean(np.abs(res_pr))) if len(tst) else np.nan}
     return {'tabla':t,'coef':coef,'n':n,'nt':nt,'r2':r2,'r2a':r2a,'rmse':rmse,'mae':mae,
             'test':eval_pr,'y':y,'x':x,'intercepto':intercepto,
-            'corr':t[[y]+list(x)].corr(), 'df':de,'sig':float(np.sqrt(mse))}
+            'corr':t.loc[mascara_ent,[y]+list(x)].corr(), 'df':de,'sig':float(np.sqrt(mse)),
+            'excluidos':int((idx<n_inicial).sum()-nt),
+            'umbral_cook':umbral_cook,'umbral_leverage':umbral_h,
+            'n_antes_exclusion':n_inicial}
 
 
-def _v53_tabla_periodos(data, y, x, intercepto, prueba_pct):
+def _v53_tabla_periodos(data, y, x, intercepto, prueba_pct, excluidas=None):
     """Todos los períodos visibles, con Y/X originales y razón de su uso.
 
     A diferencia de la tabla del ajuste, aquí se muestran también las fechas
@@ -12377,10 +12418,16 @@ def _v53_tabla_periodos(data, y, x, intercepto, prueba_pct):
     pos_validas=np.flatnonzero(completo.to_numpy())
     etiquetas[pos_validas[:nt]]='Entrenamiento (entra en regresión)'
     etiquetas[pos_validas[nt:]]='Validación final (no entra en regresión)'
+    excluidas=set(excluidas or [])
+    if excluidas:
+        m=(t['Fecha'].dt.strftime('%Y-%m-%d').isin(excluidas)
+           & pd.Series(etiquetas,index=t.index).eq('Entrenamiento (entra en regresión)'))
+        etiquetas[m.to_numpy()]='Excluido manualmente'
     t.insert(2,'Uso en el modelo',etiquetas)
     t['Variables sin dato']=[', '.join(c for c in columnas if pd.isna(t.at[i,c]))
                                for i in range(len(t))]
-    return t, n, nt
+    nt_real=int((t['Uso en el modelo']=='Entrenamiento (entra en regresión)').sum())
+    return t, n, nt_real
 
 
 def _v52_mostrar_regresion(ops):
@@ -12468,7 +12515,93 @@ def _v52_mostrar_regresion(ops):
                     'Eso se llama **validación temporal** y permite detectar si el modelo '
                     'funciona en períodos que no utilizó para entrenarse. '
                     'No equivale a excluir datos del historial: se muestran en la tabla como «Validación».')
-    muestra, n_comp, n_ent = _v53_tabla_periodos(d,y,x,inter,pr)
+    # ===== v54 · Revisión auditable de observaciones atípicas =====
+    try:
+        base_out=_v52_ajustar(d,y,x,inter,pr)
+    except (ValueError,np.linalg.LinAlgError) as exc:
+        st.warning('No se puede calcular la regresión de referencia: '+str(exc))
+        muestra,n_comp,n_ent=_v53_tabla_periodos(d,y,x,inter,pr)
+        st.dataframe(muestra,hide_index=True,width='stretch')
+        return
+    diag=base_out['tabla']
+    diag_ent=diag.loc[diag['Conjunto']=='Entrenamiento'].copy()
+    diag_ent['Fecha clave']=diag_ent['Fecha'].dt.strftime('%Y-%m-%d')
+    atipicos=diag_ent[diag_ent['Criterio de revisión'].ne('')].copy()
+    # Cuando se cambia Y/X/filtros o validación, no se heredan exclusiones
+    # de otro modelo que pudieran afectar días sin intención del usuario.
+    _firma_ex=(y,tuple(x),inter,pr,frecuencia,tuple(validos),
+               int(pd.util.hash_pandas_object(d['Fecha'],index=False).sum()),
+               int(pd.util.hash_pandas_object(d[[y]+list(x)],index=False).sum()),len(d))
+    if st.session_state.get('_v54_firma_exclusion')!=_firma_ex:
+        st.session_state['_v54_firma_exclusion']=_firma_ex
+        st.session_state['_v54_fechas_excluidas']=[]
+        st.session_state['_v54_explicacion']=''
+        st.session_state['_v54_aplicar_exclusion']=False
+    st.markdown('#### Identificación y revisión de valores atípicos')
+    st.caption('Los candidatos se detectan sobre la regresión ORIGINAL, antes de eliminar nada. '
+               'Un punto alejado no es necesariamente un error: puede ser un día válido con '
+               'incidentes, cambios operacionales o una variable explicativa faltante.')
+    qa,qb,qc=st.columns(3)
+    qa.metric('Períodos completos de referencia',len(diag_ent))
+    qb.metric('Períodos para revisar',len(atipicos))
+    qc.metric('Criterio Cook',f'> {base_out["umbral_cook"]:.3f}')
+    if not atipicos.empty:
+        st.dataframe(atipicos[['Fecha','Observado','Estimado','Residuo',
+           'Residuo studentizado','Distancia de Cook','Leverage','Criterio de revisión']],
+           hide_index=True,width='stretch',height=min(330,70+36*len(atipicos)))
+        st.caption('Sugerencias de revisión: |residuo studentizado| > 3; '
+                   'distancia de Cook > 4/n; leverage > 2p/n, donde p es el número '
+                   'de coeficientes. Estas reglas NO ordenan eliminar la observación.')
+    else:
+        st.success('No hay períodos que superen los criterios orientativos de revisión.')
+    with st.expander('Ver residuos y diagnóstico de TODOS los períodos completos',expanded=False):
+        st.dataframe(diag_ent[['Fecha','Observado','Estimado','Residuo',
+           'Residuo studentizado','Distancia de Cook','Leverage','Criterio de revisión']],
+           hide_index=True,width='stretch',height=350)
+    cdiag1,cdiag2=st.columns(2)
+    with cdiag1:
+        fig=px.scatter(diag_ent,x='Fecha',y='Residuo studentizado',
+            hover_data=['Observado','Estimado','Residuo','Criterio de revisión'],
+            title='Residuos studentizados · modelo original')
+        fig.add_hline(y=3,line_dash='dash',line_color='#E11D48')
+        fig.add_hline(y=-3,line_dash='dash',line_color='#E11D48')
+        fig.update_layout(height=310,margin=dict(l=0,r=0,t=45,b=0))
+        _pc(fig,use_container_width=True,config={'locale':'es'})
+    with cdiag2:
+        fig=px.scatter(diag_ent,x='Fecha',y='Distancia de Cook',
+            hover_data=['Observado','Estimado','Residuo','Criterio de revisión'],
+            title='Influencia de cada período · Cook')
+        fig.add_hline(y=base_out['umbral_cook'],line_dash='dash',line_color='#E11D48')
+        fig.update_layout(height=310,margin=dict(l=0,r=0,t=45,b=0))
+        _pc(fig,use_container_width=True,config={'locale':'es'})
+    st.markdown('##### Decidir qué períodos excluir')
+    st.caption('Selecciona fechas completas del entrenamiento, no de la validación. '
+               'La información fuente nunca se borra. Para aplicar una exclusión '
+               'debes escribir su justificación y activar la casilla de confirmación.')
+    opciones=diag_ent['Fecha clave'].tolist()
+    _sel=st.session_state.get('_v54_fechas_excluidas',[])
+    if any(f not in opciones for f in _sel):
+        st.session_state['_v54_fechas_excluidas']=[f for f in _sel if f in opciones]
+    fechas_elegidas=st.multiselect('Períodos a excluir del cálculo (opcional)',
+       options=opciones,format_func=lambda f:pd.Timestamp(f).strftime('%d-%m-%Y'),
+       placeholder='Selecciona los días que investigaste...',key='_v54_fechas_excluidas')
+    motivo=st.text_area('Justificación técnica (ej.: error de medición, dato duplicado, evento extraordinario)',
+       height=75,key='_v54_explicacion',placeholder='Indica por qué estos registros no son representativos...')
+    aplicar=st.checkbox('Confirmo que revisé los registros y deseo recalcular el modelo sin estos períodos',
+       key='_v54_aplicar_exclusion')
+    fechas_excluidas=list(fechas_elegidas) if (fechas_elegidas and motivo.strip() and aplicar) else []
+    if fechas_elegidas and not fechas_excluidas:
+        st.info('Las fechas están seleccionadas, pero aún NO se excluyen. '
+                'Escribe una justificación y marca la confirmación para aplicarlas.')
+    muestra,n_comp,n_ent = _v53_tabla_periodos(d,y,x,inter,pr,fechas_excluidas)
+    # Anexar al listado los residuos originales como evidencia de la decisión.
+    evidencia=diag[['Fecha','Estimado','Residuo','Residuo studentizado',
+                  'Distancia de Cook','Leverage','Criterio de revisión']].rename(columns={
+           'Estimado':'Estimado modelo original','Residuo':'Residuo original',
+           'Residuo studentizado':'Residuo studentizado original',
+           'Distancia de Cook':'Cook original','Leverage':'Leverage original',
+           'Criterio de revisión':'Criterio revisión original'})
+    muestra=muestra.merge(evidencia,on='Fecha',how='left',validate='one_to_one')
     n_sin = len(muestra)-n_comp
     st.markdown('#### Tabla de períodos y datos para la regresión')
     st.caption('Cada fila es un día o mes según la unidad elegida. Se muestran la variable Y y '
@@ -12478,17 +12611,20 @@ def _v52_mostrar_regresion(ops):
     col_m = st.columns(3)
     col_m[0].metric('Períodos del filtro',f'{len(muestra):,}')
     col_m[1].metric('Usados para ajustar',f'{n_ent:,}')
-    col_m[2].metric('Sin datos completos / validación',f'{n_sin:,} / {n_comp-n_ent:,}')
+    col_m[2].metric('Faltantes / excluidos / validación',
+        f'{n_sin} / {len(fechas_excluidas)} / {n_comp-base_out["n_antes_exclusion"]}')
     st.dataframe(muestra,hide_index=True,width='stretch',height=380)
     st.download_button('⬇️ Descargar tabla exacta de regresión (CSV)',
         data=muestra.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
         file_name='datos_para_regresion.csv',mime='text/csv',key='_v53_muestra_csv')
     if not pr:
-        st.info('Se ajustará con el 100 % de los períodos que tengan datos completos en Y y X. '
-                'Los registros excluidos por faltantes aparecen identificados arriba.')
+        st.info('Se ajustará con todos los períodos que tengan Y y X completos, '
+                'excepto aquellos excluidos expresamente y con justificación. '
+                'Los registros faltantes siguen identificados arriba.')
     else:
-        st.caption(f'{n_ent} fechas completas para entrenamiento; '
-                   f'{n_comp-n_ent} fechas finales completas solo para evaluación de predicciones.')
+        st.caption(f'{n_ent} fechas en entrenamiento, {len(fechas_excluidas)} exclusiones manuales; '
+                   f'{n_comp-base_out["n_antes_exclusion"]} fechas finales completas '
+                   'solo para evaluación de predicciones.')
     # Señalizar fórmulas vinculadas que inflan el ajuste artificialmente.
     derivadas={'IDE · tracción (kWh/km)','Tracción sobre total (%)',
               'LB ajustada · Exceso LB (kWh)','LB ajustada · Sobreconsumo LB %',
@@ -12501,14 +12637,39 @@ def _v52_mostrar_regresion(ops):
         st.info('Para regresiones mensuales conviene disponer de 12 o más meses completos; '
                 'con pocos meses los resultados serán inestables.')
     try:
-        out=_v52_ajustar(d,y,x,inter,pr)
+        out=_v52_ajustar(d,y,x,inter,pr,fechas_excluidas) if fechas_excluidas else base_out
     except (ValueError,np.linalg.LinAlgError) as exc:
-        st.warning('No se pudo estimar el modelo: '+str(exc))
+        st.warning('No se pudo estimar el modelo con las exclusiones elegidas: '+str(exc))
         with st.expander('Cobertura y valores disponibles',expanded=True):
             st.dataframe(pd.DataFrame({'Variable':[y]+x,'Períodos con dato':[int(d[c].notna().sum()) for c in [y]+x],
                 'Origen':[_origen.get(c,'Calculado / agregado mensual') for c in [y]+x]}),
                 hide_index=True,width='stretch')
         return
+    if fechas_excluidas:
+        st.markdown('#### Impacto de excluir períodos: modelo original frente a modelo ajustado')
+        st.dataframe(pd.DataFrame({'Indicador':['Períodos utilizados','R² entrenamiento',
+            'R² ajustado','RMSE entrenamiento'],
+            'Antes de excluir':[base_out['nt'],base_out['r2'],base_out['r2a'],base_out['rmse']],
+            'Después de excluir':[out['nt'],out['r2'],out['r2a'],out['rmse']]}),
+            hide_index=True,width='stretch')
+        st.markdown('**Cambio en los coeficientes del modelo**')
+        orig=base_out['coef'][['Variable','Coeficiente']].rename(columns={
+            'Coeficiente':'Coeficiente original'})
+        act=out['coef'][['Variable','Coeficiente']].rename(columns={
+            'Coeficiente':'Coeficiente tras exclusión'})
+        comparacion=orig.merge(act,on='Variable',validate='one_to_one')
+        bo=comparacion['Coeficiente original']
+        ba=comparacion['Coeficiente tras exclusión']
+        comparacion['Cambio absoluto']=ba-bo
+        comparacion['Cambio %']=100*(ba-bo)/bo.where(bo.abs()>1e-12)
+        st.dataframe(comparacion.style.format({
+            'Coeficiente original':'{:,.3f}',
+            'Coeficiente tras exclusión':'{:,.3f}',
+            'Cambio absoluto':'{:,.3f}',
+            'Cambio %':'{:,.1f}'},na_rep='—'),hide_index=True,width='stretch')
+        st.warning('Una mejora del R² o RMSE después de eliminar días NO prueba que la exclusión '
+                   'sea correcta. Conserva la explicación y compara las ecuaciones: '
+                   'las condiciones operativas extraordinarias también pueden ser datos reales.')
     o1,o2,o3,o4=st.columns(4)
     o1.metric('R² entrenamiento',f'{out["r2"]:.3f}')
     o2.metric('R² ajustado',f'{out["r2a"]:.3f}')
@@ -12600,14 +12761,15 @@ def _v52_mostrar_regresion(ops):
                     color_continuous_scale='RdBu_r',title='Correlaciones entre Y y X')
         h.update_layout(height=min(550,210+50*len(corr)),margin=dict(t=45,b=10,l=10,r=10))
         _pc(h,use_container_width=True,config={'locale':'es'})
-        tt=tab.copy();sd=out['sig']
-        tt['Residuo estandarizado']=tt['Residuo']/sd if sd>0 else np.nan
-        at=tt[(tt['Conjunto']=='Entrenamiento') & tt['Residuo estandarizado'].abs().gt(3)]
+        tt=tab.copy()
+        at=tt[(tt['Conjunto']=='Entrenamiento') & tt['Criterio de revisión'].ne('')]
         if not at.empty:
-            st.warning(f'{len(at)} período(s) tienen residuos mayores que 3 desviaciones: se conservan en el ajuste.')
-            st.dataframe(at[['Fecha','Observado','Estimado','Residuo','Residuo estandarizado']],
+            st.warning(f'{len(at)} período(s) presentan alguna señal estadística de revisión '
+                       '(residuo, Cook o leverage). No se eliminan automáticamente.')
+            st.dataframe(at[['Fecha','Observado','Estimado','Residuo',
+                            'Residuo studentizado','Distancia de Cook','Leverage','Criterio de revisión']],
                          hide_index=True,width='stretch')
-        else:st.caption('Sin residuos de entrenamiento mayores que ±3 desviaciones estimadas.')
+        else:st.caption('Sin señales de revisión en los residuos y la influencia del modelo ajustado.')
     with st.expander('Datos y procedencia de cada variable',expanded=False):
         t_or=pd.DataFrame({'Variable':list(_origen),
                           'Días con dato':[int(_d[c].notna().sum()) for c in _origen],
@@ -12622,9 +12784,16 @@ def _v52_mostrar_regresion(ops):
         muestra.to_excel(wr,sheet_name='Muestra y exclusiones',index=False)
         tab.to_excel(wr,sheet_name='Datos y predicción',index=False)
         out['coef'].to_excel(wr,sheet_name='Coeficientes',index=False)
+        base_out['coef'].to_excel(wr,sheet_name='Coeficientes originales',index=False)
+        diag_ent[['Fecha','Observado','Estimado','Residuo','Residuo studentizado',
+                'Distancia de Cook','Leverage','Criterio de revisión']].to_excel(
+                wr,sheet_name='Diagnóstico original',index=False)
+        pd.DataFrame({'Fecha excluida':fechas_excluidas,
+                      'Justificación':[motivo.strip()]*len(fechas_excluidas)}).to_excel(
+                      wr,sheet_name='Exclusiones justificadas',index=False)
         pd.DataFrame({'Métrica':['Variable Y','Variables X','Frecuencia','Intercepto','Validación %',
-                                  'N total','N entrenamiento','R2','R2 ajustado','RMSE','MAE','RMSE prueba'],
-                      'Valor':[y,', '.join(x),frecuencia,inter,pr,out['n'],out['nt'],out['r2'],
+                                  'N total','N entrenamiento','N exclusiones manuales','Justificación exclusiones','R2','R2 ajustado','RMSE','MAE','RMSE prueba'],
+                      'Valor':[y,', '.join(x),frecuencia,inter,pr,out['n'],out['nt'],len(fechas_excluidas),motivo.strip() if fechas_excluidas else '',out['r2'],
                                out['r2a'],out['rmse'],out['mae'],out['test']['rmse']]}).to_excel(wr,sheet_name='Resumen',index=False)
         out['corr'].to_excel(wr,sheet_name='Correlaciones')
         d.to_excel(wr,sheet_name='Base disponible',index=False)
