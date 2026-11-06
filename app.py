@@ -6955,6 +6955,391 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
     out=_Bytes49();pres.save(out)
     return out.getvalue()
 
+# ===== v61 · INFORME SIMPLE EN WORD Y PDF, DESDE LOS FILTROS DEL DASHBOARD =====
+def _v61_informe_operacional(datos, servicios_via, paxkm_tabla, eficiencia, fuente_pax):
+    """Genera un informe divulgativo (DOCX y PDF) con las mismas fechas del Dashboard.
+
+    Las fuentes de km, energía, PAX-km, IDE y eficiencias usan las reglas
+    existentes de sus tarjetas; ningún dato ausente se convierte en cero.
+    Esta función solo usa el dataframe filtrado. No lee ni modifica archivos de datos.
+    """
+    from io import BytesIO
+    from datetime import datetime
+    from html import escape as _html_escape
+    import os
+    import math
+    import numpy as np
+    import pandas as pd
+    from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFont as _PILFont
+    from docx import Document
+    from docx.shared import Inches as _DocInches, Pt as _DocPt, RGBColor as _DocColor, Cm as _DocCm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from reportlab.lib import colors as _pdf_colors
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm as _pdf_cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Image as _PdfImage, Spacer, PageBreak, KeepTogether
+    from reportlab.pdfbase import pdfmetrics as _pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont as _TTFont
+
+    d = datos.copy()
+    if d.empty or 'Fecha' not in d:
+        raise ValueError('No existen fechas operacionales para generar el informe.')
+    d['Fecha'] = pd.to_datetime(d['Fecha'], errors='coerce').dt.normalize()
+    d = d.dropna(subset=['Fecha']).sort_values('Fecha')
+    if d.empty:
+        raise ValueError('No hay fechas operacionales válidas.')
+    cols = ('Servicios','PAX','E_Total','E_Tr','E_12','Odómetro [km]','Tren-Km [km]')
+    for c in cols:
+        if c not in d: d[c] = np.nan
+        d[c] = pd.to_numeric(d[c], errors='coerce')
+    if 'Tipo de jornada' not in d:
+        d['Tipo de jornada'] = d['Fecha'].dt.date.map(get_tipo_dia).map(
+            {'L':'Laboral','S':'Sábado','D/F':'Domingo y festivo'})
+
+    def suma(tabla,campo):
+        if tabla is None or tabla.empty or campo not in tabla:
+            return float('nan')
+        return float(pd.to_numeric(tabla[campo],errors='coerce').sum(min_count=1))
+    def fmt(v, dec=0, sign=False):
+        try:
+            v=float(v)
+            if not np.isfinite(v): return 'Sin dato'
+            if abs(v)<0.5*10**(-dec): v=0.0
+            s=f'{v:+,.{dec}f}' if sign else f'{v:,.{dec}f}'
+            return s.replace(',','§').replace('.',',').replace('§','.')
+        except (ValueError,TypeError):
+            return 'Sin dato'
+    def posible(v):
+        try:return np.isfinite(float(v))
+        except (TypeError,ValueError):return False
+
+    fechas=d['Fecha']
+    periodo=f'{fechas.min():%d/%m/%Y} al {fechas.max():%d/%m/%Y}'
+    num_dias=int(fechas.nunique())
+    s=suma(d,'Servicios'); pax=suma(d,'PAX')
+    total=suma(d,'E_Total'); traccion=suma(d,'E_Tr'); aux=suma(d,'E_12')
+    kmvalidos=d[d['Odómetro [km]'].ge(0)&d['Tren-Km [km]'].ge(0)].copy()
+    odom=suma(kmvalidos,'Odómetro [km]')
+    trenk=suma(kmvalidos,'Tren-Km [km]')
+    umr=(100*trenk/odom if posible(odom) and odom>0 and posible(trenk) else float('nan'))
+    ide_dias=d[d['E_Tr'].gt(0)&d['Odómetro [km]'].gt(0)].copy()
+    ide=(suma(ide_dias,'E_Tr')/suma(ide_dias,'Odómetro [km]')
+         if not ide_dias.empty and suma(ide_dias,'Odómetro [km]')>0 else float('nan'))
+    pk = suma(paxkm_tabla,'PAX-km')
+    ds_pk=int(paxkm_tabla['Fecha'].nunique()) if isinstance(paxkm_tabla,pd.DataFrame) and not paxkm_tabla.empty and 'Fecha' in paxkm_tabla else 0
+    def eficiencia_valor(clave):
+        try: return float(eficiencia[clave]['valor'])
+        except (KeyError,TypeError,ValueError):return float('nan')
+    pax_por_kwh=eficiencia_valor('Pax/kWh total')
+    pkm_por_kwh=eficiencia_valor('Pax-km/kWh')
+    cat = {}
+    for tipo in ('Vía 1','Vía 2'):
+        if isinstance(servicios_via,pd.DataFrame) and not servicios_via.empty and 'Vía' in servicios_via:
+            cat[tipo]=suma(servicios_via[servicios_via['Vía'].eq(tipo)],'Servicios')
+        else:
+            cat[tipo]=float('nan')
+
+    # Los totales reflejan exactamente los días seleccionados. Las tendencias
+    # mensuales muestran como máximo los 12 últimos períodos solo para legibilidad.
+    mensual=d.assign(Mes=d['Fecha'].dt.to_period('M').dt.to_timestamp()).groupby('Mes',as_index=False)[list(cols)].sum(min_count=1)
+    nmeses=len(mensual)
+    graf=mensual.tail(12).copy()
+    meses_corto=('Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic')
+    etiquetas=[meses_corto[x.month-1]+' '+str(x.year)[2:] for x in graf['Mes']]
+    detalle_graf=(f'Últimos {len(graf)} de {nmeses} meses seleccionados.' if nmeses>12
+                   else 'Meses del período seleccionado.')
+    if fechas.max().day<fechas.max().days_in_month:
+        detalle_graf += ' El último mes puede estar incompleto por la fecha de cierre.'
+    jornada=[]
+    for nombre in ('Laboral','Sábado','Domingo y festivo'):
+        parte=d[d['Tipo de jornada'].eq(nombre)]
+        jornada.append([nombre,str(int(len(parte))),fmt(suma(parte,'Servicios')),
+                        fmt(suma(parte,'PAX')),fmt(suma(parte,'E_Tr'))])
+
+    if posible(s) and posible(pax):
+        intro=(f'En las {num_dias} fechas seleccionadas se registraron {fmt(s)} servicios y '
+               f'{fmt(pax)} pasajeros. ')
+    else:
+        intro=f'El análisis comprende {num_dias} fechas operacionales seleccionadas. '
+    if posible(total) and posible(traccion):
+        intro+=(f'La energía total registrada fue de {fmt(total)} kWh; '
+                f'de ellos, {fmt(traccion)} kWh corresponden al consumo de tracción. ')
+    if posible(ide):
+        intro+=(f'El indicador energético fue {fmt(ide,3)} kWh por kilómetro, '
+                f'calculado con {len(ide_dias)} días que tienen energía y kilometraje válidos.')
+    else:
+        intro+='No fue posible obtener un IDE comparable en el período seleccionado.'
+
+    explicacion_ide=('El IDE muestra cuántos kWh de tracción se utilizaron por kilómetro recorrido. '
+                     'Se calcula dividiendo la energía entre los kilómetros, solo en días con ambos datos válidos. '
+                     'Un valor más bajo implica menos energía por km, pero no demuestra por sí solo un ahorro '
+                     'frente a la línea base.')
+    explicacion_pkm=('PAX-km expresa cuánto transporte se realizó: pasajeros a bordo en cada tramo '
+                     'multiplicados por la distancia de ese tramo. En este Dashboard se consideran los '
+                     'días en que también existe energía de tracción positiva.')
+    cautela=('Las cifras corresponden exclusivamente a las fechas incluidas por los filtros. '
+             'Los días sin medición no se sustituyen por ceros. El indicador de auxiliares E_12 '
+             'corresponde a 12 kV y no constituye una medición independiente de baja tensión '
+             '(220/380 V). Este informe describe resultados; no atribuye causas ni certifica ahorros.')
+
+    # Dos gráficos legibles, con escala propia por indicador para evitar
+    # confundir la magnitud de servicios, PAX y kWh de auxiliares.
+    def chart_png(paneles):
+        W,H=1300,660
+        im=_PILImage.new('RGB',(W,H),'#ffffff')
+        draw=_PILDraw.Draw(im)
+        font_regular='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+        font_bold='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+        def font(sz,bold=False):
+            ruta=font_bold if bold else font_regular
+            try:return _PILFont.truetype(ruta,sz)
+            except OSError:return _PILFont.load_default()
+        f_title=font(23,True); f_small=font(17); f_tick=font(15)
+        for pos,(titulo,campo,color) in enumerate(paneles):
+            top=10+pos*324
+            draw.text((40,top+8),titulo,fill='#123d57',font=f_title)
+            x0,y0,x1,y1=105,top+58,1250,top+260
+            vals=[float(x) if pd.notna(x) and np.isfinite(x) else None for x in graf[campo]]
+            bien=[v for v in vals if v is not None and v>=0]
+            if not bien:
+                draw.text((110,top+110),'Sin datos para este gráfico',fill='#737e89',font=f_small)
+                continue
+            ymax=max(bien)*1.12 if max(bien)>0 else 1
+            for p in range(4):
+                gy=int(y1-(y1-y0)*p/3)
+                draw.line([(x0,gy),(x1,gy)],fill='#e1e9ef',width=2)
+                vv=ymax*p/3
+                etiqueta=f'{vv:,.0f}'.replace(',','.')
+                box=draw.textbbox((0,0),etiqueta,font=f_tick)
+                draw.text((x0-12-(box[2]-box[0]),gy-9),etiqueta,fill='#506579',font=f_tick)
+            count=len(vals); pw=(x1-x0)/max(count,1)
+            bw=min(54,max(13,int(pw*0.62)))
+            for i,v in enumerate(vals):
+                center=int(x0+pw*(i+0.5))
+                if v is not None and v>=0:
+                    hh=max(1,int((v/ymax)*(y1-y0))) if v>0 else 0
+                    draw.rounded_rectangle((center-bw//2,y1-hh,center+bw//2,y1),
+                                           radius=4,fill=color)
+                lab=etiquetas[i]
+                box=draw.textbbox((0,0),lab,font=f_tick)
+                draw.text((center-(box[2]-box[0])//2,y1+15),lab,fill='#506579',font=f_tick)
+        buf=BytesIO(); im.save(buf,format='PNG');return buf.getvalue()
+    graf_oper=chart_png([('Servicios por mes','Servicios','#2474bb'),
+                        ('Pasajeros por mes','PAX','#0f9e9c')])
+    graf_ener=chart_png([('Energía de tracción (kWh)','E_Tr','#2d7abd'),
+                        ('Energía auxiliar 12 kV (kWh)','E_12','#c58b24')])
+
+    # ========== Word ==========
+    doc=Document()
+    sec=doc.sections[0];sec.top_margin=_DocCm(1.8);sec.bottom_margin=_DocCm(1.65)
+    sec.left_margin=_DocCm(2.05);sec.right_margin=_DocCm(2.05)
+    sec.header_distance=_DocCm(.8);sec.footer_distance=_DocCm(.8)
+    style=doc.styles['Normal'];style.font.name='Calibri';style.font.size=_DocPt(9.5)
+    style.font.color.rgb=_DocColor(38,62,78)
+    style.paragraph_format.space_after=_DocPt(6)
+    for est,size,space in [('Title',23,11),('Heading 1',14,9),('Heading 2',11,6)]:
+        ss=doc.styles[est];ss.font.name='Calibri';ss.font.size=_DocPt(size)
+        ss.font.bold=True;ss.font.color.rgb=_DocColor(13,65,91)
+        ss.paragraph_format.space_before=_DocPt(space)
+        ss.paragraph_format.space_after=_DocPt(5)
+    head=sec.header.paragraphs[0]
+    head.text='EFE VALPARAÍSO  |  INFORMACIÓN OPERACIONAL'
+    head.style='Caption';head.runs[0].font.color.rgb=_DocColor(28,119,147)
+    footer=sec.footer.paragraphs[0]
+    footer.text='Informe de lectura simple · Generado desde Dashboard · Las cifras dependen de los filtros'
+    footer.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    for r in footer.runs:r.font.size=_DocPt(8)
+
+    def dparagraph(txt, bold_start=None, style=None):
+        p=doc.add_paragraph(style=style)
+        if bold_start:
+            p.add_run(bold_start).bold=True
+        p.add_run(txt)
+        return p
+    def dtable(headers,rows,widths=None):
+        tb=doc.add_table(rows=1,cols=len(headers));tb.style='Light Shading Accent 1'
+        tb.alignment=WD_TABLE_ALIGNMENT.CENTER
+        for j,h in enumerate(headers):tb.rows[0].cells[j].text=str(h)
+        for row in rows:
+            cells=tb.add_row().cells
+            for j,val in enumerate(row): cells[j].text=str(val)
+        for i,row in enumerate(tb.rows):
+            for j,cell in enumerate(row.cells):
+                cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                bg='134966' if i==0 else ('EEF5F8' if i%2 else 'FFFFFF')
+                tcPr=cell._tc.get_or_add_tcPr();shd=OxmlElement('w:shd');shd.set(qn('w:fill'),bg);tcPr.append(shd)
+                for par in cell.paragraphs:
+                    par.paragraph_format.space_after=_DocPt(1)
+                    par.paragraph_format.space_before=_DocPt(1)
+                    for run in par.runs:
+                        run.font.size=_DocPt(8.5)
+                        if i==0:run.font.bold=True;run.font.color.rgb=_DocColor(255,255,255)
+        doc.add_paragraph().paragraph_format.space_after=_DocPt(0)
+        return tb
+
+    doc.add_heading('Informe operacional sencillo',0)
+    p=doc.add_paragraph();p.add_run(f'Período: {periodo}').bold=True
+    dparagraph(f'Datos incluidos: {num_dias} fechas con información, según los filtros activos del Dashboard.')
+    doc.add_heading('Lo más importante',1)
+    dparagraph(intro)
+    dtable(['Operación','Resultado','Energía','Resultado'],[
+        ['Servicios',fmt(s),'Energía total',fmt(total)+' kWh'],
+        ['Pasajeros',fmt(pax),'Tracción',fmt(traccion)+' kWh'],
+        ['PAX-km',fmt(pk),'Auxiliares 12 kV',fmt(aux)+' kWh'],
+        ['Odómetro',fmt(odom)+' km','IDE ponderado',fmt(ide,3)+' kWh/km'],
+        ['Tren-Km',fmt(trenk)+' km','UMR',fmt(umr,2)+' %']])
+    doc.add_heading('Cómo leer estas cifras',1)
+    dparagraph('Servicios: cantidad de circulaciones ferroviarias registradas. Pasajeros: cantidad de usuarios contabilizados.')
+    dparagraph('Odómetro: kilómetros recorridos por los trenes. Tren-Km: kilometraje operacional registrado; no es igual al odómetro.')
+    dparagraph('Energía total: electricidad registrada en la operación. Tracción: parte utilizada para mover los trenes. Auxiliares: componente E_12 de 12 kV.')
+    dparagraph('IDE: consumo de tracción dividido por el kilometraje comparable. No equivale a ahorro contra la línea base.')
+    doc.add_heading('Aviso sobre los datos',2)
+    dparagraph('La información puede cubrir días no consecutivos si así lo indican los filtros. '+cautela)
+
+    doc.add_page_break()
+    doc.add_heading('1 · Operación y pasajeros',1)
+    dparagraph(f'Se registraron {fmt(s)} servicios y {fmt(pax)} pasajeros. '
+               f'El transporte realizado expresado en pasajeros-kilómetro fue {fmt(pk)} PAX-km.')
+    dtable(['Indicador','Total seleccionado'],[
+        ['Servicios Vía 1',fmt(cat['Vía 1'])],['Servicios Vía 2',fmt(cat['Vía 2'])],
+        ['Kilómetros de odómetro',fmt(odom)+' km'],['Tren-Km',fmt(trenk)+' km'],
+        ['UMR',fmt(umr,2)+' %']])
+    doc.add_heading('Evolución de la operación',2)
+    doc.add_picture(BytesIO(graf_oper),width=_DocInches(6.5))
+    dparagraph(detalle_graf)
+    doc.add_heading('Resumen por tipo de día',2)
+    dtable(['Jornada','Días','Servicios','Pasajeros','Tracción (kWh)'],jornada)
+    dparagraph(explicacion_pkm)
+
+    doc.add_page_break()
+    doc.add_heading('2 · Energía y desempeño',1)
+    dparagraph(f'La energía total registrada fue de {fmt(total)} kWh. '
+               f'La tracción utilizó {fmt(traccion)} kWh y la componente auxiliar de 12 kV registró {fmt(aux)} kWh.')
+    doc.add_heading('Evolución de la energía',2)
+    doc.add_picture(BytesIO(graf_ener),width=_DocInches(6.5))
+    dparagraph(detalle_graf)
+    doc.add_heading('¿Qué indican los resultados?',2)
+    dtable(['Indicador','Resultado','Interpretación'],[
+        ['IDE',fmt(ide,3)+' kWh/km',f'{len(ide_dias)} días con kWh y km válidos'],
+        ['Pasajeros por kWh',fmt(pax_por_kwh,3),f'Fuente {fuente_pax}; energía total comparable'],
+        ['PAX-km por kWh',fmt(pkm_por_kwh,3),'Transporte realizado por kWh de tracción'],
+    ])
+    dparagraph(explicacion_ide)
+    dparagraph('Notas: '+cautela)
+    buffer_doc=BytesIO();doc.save(buffer_doc)
+
+    # ========== PDF ==========
+    fuente_pdf='Helvetica';fuente_bold='Helvetica-Bold'
+    paths=[('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
+           ('/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf',
+            '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf')]
+    for f1,f2 in paths:
+        if os.path.exists(f1) and os.path.exists(f2):
+            _pdfmetrics.registerFont(_TTFont('EfeRegular',f1));_pdfmetrics.registerFont(_TTFont('EfeBold',f2))
+            fuente_pdf='EfeRegular';fuente_bold='EfeBold';break
+    stys=getSampleStyleSheet()
+    stys.add(ParagraphStyle(name='EfeTitle',fontName=fuente_bold,fontSize=19,leading=24,
+              spaceBefore=0,spaceAfter=10,textColor=_pdf_colors.HexColor('#0d415b')))
+    stys.add(ParagraphStyle(name='EfeHead',fontName=fuente_bold,fontSize=13,leading=17,
+              spaceBefore=11,spaceAfter=7,textColor=_pdf_colors.HexColor('#0d415b')))
+    stys.add(ParagraphStyle(name='EfeSub',fontName=fuente_bold,fontSize=10.5,leading=14,
+              spaceBefore=8,spaceAfter=6,textColor=_pdf_colors.HexColor('#16778b')))
+    stys.add(ParagraphStyle(name='EfeBody',fontName=fuente_pdf,fontSize=9.1,leading=14.0,
+              spaceAfter=7,textColor=_pdf_colors.HexColor('#263e4e')))
+    stys.add(ParagraphStyle(name='EfeTiny',fontName=fuente_pdf,fontSize=8.0,leading=11.5,
+              spaceAfter=5,textColor=_pdf_colors.HexColor('#526778')))
+    stys.add(ParagraphStyle(name='EfeCell',fontName=fuente_pdf,fontSize=8.1,leading=11.6,
+              textColor=_pdf_colors.HexColor('#263e4e')))
+    stys.add(ParagraphStyle(name='EfeCellHead',fontName=fuente_bold,fontSize=8.1,leading=11.7,
+              textColor=_pdf_colors.white))
+    def para(text,sty='EfeBody'):
+        return Paragraph(_html_escape(str(text)),stys[sty])
+    def pdf_table(headers,rows,ratios=None):
+        width=A4[0]-3.6*_pdf_cm
+        if ratios is None: ratios=[1]*len(headers)
+        tw=sum(ratios); colw=[width*r/tw for r in ratios]
+        data=[[Paragraph(_html_escape(str(v)),stys['EfeCellHead']) for v in headers]]
+        data += [[Paragraph(_html_escape(str(v)),stys['EfeCell']) for v in row] for row in rows]
+        obj=Table(data,colWidths=colw,repeatRows=1,hAlign='CENTER')
+        obj.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0),_pdf_colors.HexColor('#134966')),
+            ('ROWBACKGROUNDS',(0,1),(-1,-1),[_pdf_colors.white,_pdf_colors.HexColor('#eef5f8')]),
+            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+            ('BOTTOMPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),6),
+            ('LEFTPADDING',(0,0),(-1,-1),9),('RIGHTPADDING',(0,0),(-1,-1),7),
+            ('LINEBELOW',(0,-1),(-1,-1),.5,_pdf_colors.HexColor('#d6e5ed'))]))
+        return obj
+    def pdf_image(blob):
+        width=A4[0]-3.9*_pdf_cm
+        return _PdfImage(BytesIO(blob),width=width,height=width*660/1300)
+    output_pdf=BytesIO()
+    pdf=SimpleDocTemplate(output_pdf,pagesize=A4,rightMargin=1.8*_pdf_cm,
+         leftMargin=1.8*_pdf_cm,topMargin=1.8*_pdf_cm,bottomMargin=1.6*_pdf_cm,
+         title='Informe operacional EFE Valparaíso')
+    story=[para('Informe operacional sencillo','EfeTitle'),
+           para(f'Período: {periodo}'),
+           para(f'Datos incluidos: {num_dias} fechas, según los filtros activos del Dashboard.','EfeTiny'),
+           para('Lo más importante','EfeHead'),para(intro),
+           pdf_table(['Operación','Resultado','Energía','Resultado'],[
+            ['Servicios',fmt(s),'Energía total',fmt(total)+' kWh'],
+            ['Pasajeros',fmt(pax),'Tracción',fmt(traccion)+' kWh'],
+            ['PAX-km',fmt(pk),'Auxiliares 12 kV',fmt(aux)+' kWh'],
+            ['Odómetro',fmt(odom)+' km','IDE ponderado',fmt(ide,3)+' kWh/km'],
+            ['Tren-Km',fmt(trenk)+' km','UMR',fmt(umr,2)+' %']],ratios=[1.05,.80,1.10,1.05]),
+           para('Cómo leer estas cifras','EfeHead'),
+           para('Servicios: circulaciones ferroviarias registradas. Pasajeros: usuarios contabilizados.'),
+           para('Odómetro: kilómetros recorridos físicamente. Tren-Km: kilometraje operacional registrado.'),
+           para('Energía total: electricidad registrada. Tracción: consumo para mover trenes. Auxiliares: componente E_12 de 12 kV.'),
+           para('IDE: kWh de tracción por km comparable; no es ahorro respecto a la línea base.'),
+           para('Aviso sobre los datos','EfeSub'),para(cautela,'EfeTiny'),
+           PageBreak(),
+           para('1 · Operación y pasajeros','EfeTitle'),
+           para(f'Se registraron {fmt(s)} servicios y {fmt(pax)} pasajeros. '
+                f'El transporte realizado fue {fmt(pk)} PAX-km.'),
+           pdf_table(['Indicador','Total seleccionado'],[
+            ['Servicios Vía 1',fmt(cat['Vía 1'])],['Servicios Vía 2',fmt(cat['Vía 2'])],
+            ['Odómetro',fmt(odom)+' km'],['Tren-Km',fmt(trenk)+' km'],['UMR',fmt(umr,2)+' %']],ratios=[2,1]),
+           para('Evolución de la operación','EfeSub'),pdf_image(graf_oper),
+           para(detalle_graf,'EfeTiny'),
+           para('Resumen por tipo de día','EfeSub'),
+           pdf_table(['Jornada','Días','Servicios','Pasajeros','Tracción (kWh)'],jornada,
+                     ratios=[1.3,.5,.8,.95,1.25]),
+           para(explicacion_pkm,'EfeTiny'),
+           PageBreak(),
+           para('2 · Energía y desempeño','EfeTitle'),
+           para(f'La energía total registrada fue de {fmt(total)} kWh. '
+                f'La tracción utilizó {fmt(traccion)} kWh y los auxiliares 12 kV registraron {fmt(aux)} kWh.'),
+           para('Evolución de la energía','EfeSub'),pdf_image(graf_ener),
+           para(detalle_graf,'EfeTiny'),
+           para('¿Qué indican los resultados?','EfeSub'),
+           pdf_table(['Indicador','Resultado','Interpretación'],[
+            ['IDE',fmt(ide,3)+' kWh/km',f'{len(ide_dias)} días con kWh y km válidos'],
+            ['Pasajeros / kWh',fmt(pax_por_kwh,3),f'Fuente {fuente_pax}; energía total comparable'],
+            ['PAX-km / kWh',fmt(pkm_por_kwh,3),'Transporte por kWh de tracción']],ratios=[1.0,.9,2.0]),
+           para(explicacion_ide),
+           para('Notas sobre el alcance','EfeSub'),para(cautela,'EfeTiny')]
+    def header_footer(canvas,document):
+        canvas.saveState()
+        canvas.setStrokeColor(_pdf_colors.HexColor('#b9d9e3'))
+        canvas.line(1.8*_pdf_cm,A4[1]-1.35*_pdf_cm,A4[0]-1.8*_pdf_cm,A4[1]-1.35*_pdf_cm)
+        canvas.setFont(fuente_bold,8)
+        canvas.setFillColor(_pdf_colors.HexColor('#16778b'))
+        canvas.drawString(1.8*_pdf_cm,A4[1]-1.12*_pdf_cm,'EFE VALPARAÍSO  |  INFORMACIÓN OPERACIONAL')
+        canvas.setFont(fuente_pdf,7.5)
+        canvas.setFillColor(_pdf_colors.HexColor('#667d89'))
+        canvas.drawString(1.8*_pdf_cm,.9*_pdf_cm,'Informe generado desde datos filtrados del Dashboard')
+        canvas.drawRightString(A4[0]-1.8*_pdf_cm,.9*_pdf_cm,f'Página {document.page}')
+        canvas.restoreState()
+    pdf.build(story,onFirstPage=header_footer,onLaterPages=header_footer)
+    return buffer_doc.getvalue(), output_pdf.getvalue()
+
+
 def _v41_render_dashboard(df):
     _v41_css()
     st.markdown('<div class="efe41-eyebrow">EFE VALPARAÍSO · INTELIGENCIA OPERACIONAL</div>',
@@ -7457,6 +7842,51 @@ def _v41_render_dashboard(df):
     else:
         st.caption('Presiona «Preparar presentación PPTX» para habilitar la descarga '
                    'con los filtros actuales.')
+
+    # v61 · Informe sencillo con los mismos datos filtrados que el Dashboard.
+    # El informe se genera bajo demanda y se descarga en Word o PDF; no incluye
+    # números de prueba ni relee la base histórica sin aplicar los filtros.
+    st.markdown('#### 📄 Informe sencillo en Word o PDF')
+    st.caption('Resumen fácil de leer con servicios, pasajeros, PAX-km, kilómetros, '
+               'energía e indicadores de desempeño. Incluye gráficos mensuales y '
+               'explicaciones sin tecnicismos. Usa exactamente las fechas visibles.')
+    _h61=__import__('hashlib').sha256()
+    for _t61 in (datos,servicios_via,_paxkm_tabla49):
+        if isinstance(_t61,pd.DataFrame) and not _t61.empty:
+            _h61.update(pd.util.hash_pandas_object(_t61,index=True).values.tobytes())
+        else:
+            _h61.update(b'TABLA_SIN_DATOS')
+    _firma_inf61=(_h61.hexdigest(),_fuente_kpi46,
+                  str(st.session_state.get('_cache_key')),'informe-v61')
+    if st.button('📝 Preparar informe Word y PDF',key='_v61_preparar_informe'):
+        try:
+            with st.spinner('Preparando informe con los datos filtrados...'):
+                _word61,_pdf61=_v61_informe_operacional(
+                    datos,servicios_via,_paxkm_tabla49,_ef46,_fuente_kpi46)
+                st.session_state['_v61_word']=_word61
+                st.session_state['_v61_pdf']=_pdf61
+                st.session_state['_v61_firma']=_firma_inf61
+        except (ImportError,ModuleNotFoundError):
+            st.error('Faltan dependencias para el informe. Actualiza requirements.txt '
+                     'junto con app.py y vuelve a desplegar la aplicación.')
+        except Exception as _exc61:
+            st.error(f'No fue posible crear el informe: {_exc61}')
+    if st.session_state.get('_v61_firma')==_firma_inf61 and st.session_state.get('_v61_word'):
+        _b61=st.columns(2,gap='small')
+        with _b61[0]:
+            st.download_button('⬇️ Descargar informe Word (.docx)',
+                data=st.session_state['_v61_word'],
+                file_name=f'Informe_Operacional_EFE_{fmin:%Y%m%d}_{fmax:%Y%m%d}.docx',
+                mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                key='_v61_descarga_docx',use_container_width=True)
+        with _b61[1]:
+            st.download_button('⬇️ Descargar informe PDF (.pdf)',
+                data=st.session_state['_v61_pdf'],
+                file_name=f'Informe_Operacional_EFE_{fmin:%Y%m%d}_{fmax:%Y%m%d}.pdf',
+                mime='application/pdf',key='_v61_descarga_pdf',use_container_width=True)
+    else:
+        st.caption('Presiona «Preparar informe Word y PDF» y después selecciona '
+                   'el formato para descargar. Si cambias los filtros, vuelve a prepararlo.')
 
     # Detalle verificable y exportable; datos originales sin redondeo destructivo.
     with st.expander('📋 Ver detalle diario y exportar datos',expanded=False):
@@ -13144,7 +13574,7 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0,excluidas=None):
     t['Observado']=yv;t['Estimado']=yh;t['Residuo']=res
     t['Conjunto']=np.where(idx<n_inicial,'Entrenamiento','Prueba')
     t.loc[(idx<n_inicial)&~mascara_ent,'Conjunto']='Excluido manualmente'
-    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
+    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
     # residuo studentizado interno, leverage (diagonal de H) y Cook.
     # Umbrales ORIENTATIVOS: |r studentizado| > 3; Cook > 4/n; h > 2p/n.
     inv=np.linalg.pinv(D.T@D)
