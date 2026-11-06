@@ -6721,39 +6721,53 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         txt(sl,x+.15,y+.60,w-.26,.60,fmt(value),25,white,True)
         if unit:txt(sl,x+.15,y+h-.39,w-.26,.25,unit,11,accent or teal)
     def periodos(tabla,campos):
-        """Categorías breves y espaciadas; datos íntegros aun con etiquetas omitidas."""
-        if tabla is None or tabla.empty:return [],[[] for _ in campos],False,''
-        t=tabla[['Fecha']+campos].copy()
+        """Exactamente el agregado del Dashboard, preservando faltantes y TODO el intervalo.
+
+        Antes se sustituía NaN por cero y se recortaban los últimos 24 períodos.
+        Eso inventaba caídas a cero y hacía que los gráficos de PowerPoint no
+        representaran el total del período elegido en el Dashboard.
+        """
+        if tabla is None or tabla.empty or 'Fecha' not in tabla:
+            return [],[[] for _ in campos],False,''
+        t=tabla[['Fecha']+[c for c in campos if c in tabla.columns]].copy()
+        for c in campos:
+            if c not in t.columns: t[c]=np.nan
+            t[c]=pd.to_numeric(t[c],errors='coerce')
         t['Fecha']=pd.to_datetime(t['Fecha'],errors='coerce').dt.normalize()
         t=t.dropna(subset=['Fecha']).sort_values('Fecha')
+        if t.empty:return [],[[] for _ in campos],False,''
+        # Con muchas fechas, el gráfico se agrega por mes como el Dashboard.
         mensual=(vista!='Diaria' or t['Fecha'].nunique()>35)
+        ultimo_dato=t['Fecha'].max()
+        ultimo_parcial=bool(mensual and ultimo_dato.day<ultimo_dato.days_in_month)
         if mensual:t['Fecha']=t['Fecha'].dt.to_period('M').dt.to_timestamp()
         t=t.groupby('Fecha',as_index=False)[campos].sum(min_count=1)
-        # Evita 24+ meses ilegibles en el mismo eje sin alterar los KPI totales.
-        nota=''
-        if len(t)>24:
-            t=t.tail(24)
-            nota='Gráfico: últimos 24 períodos; los KPI incluyen todo el intervalo seleccionado.'
-        if vista=='Diaria' and mensual:
-            nota='Vista de muchas fechas: agregado mensual para hacer legible el eje X. '
+        nota=('Vista diaria con más de 35 fechas: gráfico agrupado por mes.'
+              if vista=='Diaria' and mensual else '')
         dos_anos=t['Fecha'].dt.year.nunique()>1
         abre=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
         labels=([abre[f.month-1]+(' '+str(f.year)[-2:] if dos_anos else '') for f in t['Fecha']]
                 if mensual else [f.strftime('%d/%m') for f in t['Fecha']])
-        # Conserva todas las barras y líneas; solo reduce etiquetas X cuando se enciman.
-        from math import ceil as _ceil49
-        paso=max(1,_ceil49(len(labels)/12))
-        if paso>1:
-            visibles=set(range(0,len(labels),paso))
-            # Incluye la última fecha, pero evita que choque con la penúltima.
-            ultimo=len(labels)-1
-            if ultimo not in visibles:
-                anterior=max(visibles)
-                if ultimo-anterior<paso:
-                    visibles.remove(anterior)
-                visibles.add(ultimo)
-            labels=[etq if i in visibles else ' ' for i,etq in enumerate(labels)]
-        return labels,[[float(v) if pd.notna(v) else 0. for v in t[c]] for c in campos],mensual,nota
+        # Marcar el último mes parcial: su barra/valor es menor porque no contiene
+        # el mes completo, no porque la medición haya caído necesariamente.
+        if ultimo_parcial:labels[-1]+='*'
+        # No recortar los datos del período. Espaciar SOLO las etiquetas X en
+        # series largas: los valores de las categorías sin texto se conservan.
+        if len(labels)>16:
+            from math import ceil as _ceil49
+            salto=_ceil49(len(labels)/12)
+            indices=set(range(0,len(labels),salto))
+            final=len(labels)-1
+            if ultimo_parcial:
+                # Mantener visible el asterisco de cierre sin juntar etiquetas.
+                previo=max(indices)
+                if final-previo<salto and previo!=0:indices.remove(previo)
+                indices.add(final)
+            elif final-max(indices)>=salto:indices.add(final)
+            labels=[et if i in indices else ' ' for i,et in enumerate(labels)]
+        series=[[float(v) if pd.notna(v) and np.isfinite(v) else None
+                 for v in t[c]] for c in campos]
+        return labels,series,mensual,nota
 
     def _fondo_grafico(ch):
         """Fondo oscuro nativo del gráfico, también editable en PowerPoint."""
@@ -6774,38 +6788,41 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         if not cats:
             txt(sl,x,y,w,.7,'No hay datos comparables para este gráfico.',15,muted)
             return
+        # Omitir únicamente las series completamente ausentes; nunca inventar 0 kWh / km.
+        presentes=[i for i,vals in enumerate(series) if any(v is not None for v in vals)]
+        if not presentes:
+            txt(sl,x,y,w,.7,'Sin mediciones disponibles para este gráfico.',15,muted)
+            return
+        names=[etiquetas[i] for i in presentes]
         data=_ChartData49();data.categories=cats
-        for name,values in zip(etiquetas,series):data.add_series(name,values)
+        for i in presentes:data.add_series(etiquetas[i],series[i])
         ct=(_ChartType49.LINE_MARKERS if tipo=='line' else _ChartType49.COLUMN_CLUSTERED)
         ch=sl.shapes.add_chart(ct,_In49(x),_In49(y),_In49(w),_In49(h),data).chart
         ch.chart_style=10
         _fondo_grafico(ch)
-        # Algunos visores (LibreOffice) generan un título negro automático
-        # cuando el gráfico tiene una sola serie. Un título vacío explícito
-        # evita que tape el eje o contraste mal sobre el fondo nocturno.
-        if len(etiquetas)==1:
-            ch.has_title=True
-            ch.chart_title.text_frame.text=' '
-        ch.has_legend=len(etiquetas)>1
+        # Sin títulos automáticos superpuestos a los ejes.
+        ch.has_title=False
+        ch.has_legend=len(presentes)>1
         if ch.has_legend:
             ch.legend.position=_Leg49.BOTTOM;ch.legend.include_in_layout=False
             ch.legend.font.name='Aptos';ch.legend.font.size=_Pt49(11)
             ch.legend.font.color.rgb=white
         if colors:
-            for serie,color in zip(ch.series,colors):
+            for serie,i in zip(ch.series,presentes):
+                color=colors[i] if i<len(colors) else teal
                 try:
                     serie.format.fill.solid();serie.format.fill.fore_color.rgb=color
                     serie.format.line.color.rgb=color
-                    serie.format.line.width=_Pt49(2.1)
+                    serie.format.line.width=_Pt49(2.3)
                 except (AttributeError,ValueError):pass
-        # Ejes y unidades explícitos, con contraste y números grandes sin notación científica.
         xa=ch.category_axis;ya=ch.value_axis
         xa.visible=True;ya.visible=True
-        xa.tick_labels.font.name='Aptos';xa.tick_labels.font.size=_Pt49(11)
+        xa.tick_labels.font.name='Aptos';xa.tick_labels.font.size=_Pt49(10)
         xa.tick_labels.font.color.rgb=white
-        ya.tick_labels.font.name='Aptos';ya.tick_labels.font.size=_Pt49(11)
+        ya.tick_labels.font.name='Aptos';ya.tick_labels.font.size=_Pt49(10)
         ya.tick_labels.font.color.rgb=white
-        ya.tick_labels.number_format='#,##0'
+        # Evitar separador anglosajón (1,200,000) en presentaciones en español.
+        ya.tick_labels.number_format='0'
         ya.tick_labels.number_format_is_linked=False
         ya.minimum_scale=0
         ya.has_major_gridlines=True
@@ -6814,7 +6831,7 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
         xa.has_title=True
         xa.axis_title.text_frame.text=titulo_x or ('Mes / año' if agregado else 'Fecha (día/mes)')
         ya.has_title=True
-        ya.axis_title.text_frame.text=unidad_y or (etiquetas[0] if len(etiquetas)==1 else 'Total')
+        ya.axis_title.text_frame.text=unidad_y or (names[0] if len(names)==1 else 'Total')
         for ax in (xa,ya):
             for para in ax.axis_title.text_frame.paragraphs:
                 para.font.name='Aptos';para.font.size=_Pt49(11)
@@ -6886,22 +6903,36 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
           'Se suman los viajes de Carga V1 y V2. Se usan los días con tracción > 0.',3.55)
     chart(sl,paxkm_tabla,['PAX-km'],['PAX-km'],.7,3.30,11.85,3.05,colors=[orange],unidad_y='PAX-km')
     # 4. UMR.
-    sl=base('Kilometraje · Odómetro y Tren-Km','Comparación UMR en kilómetros')
+    _corte_parcial=(' · * último mes parcial' if ff.day<ff.days_in_month else '')
+    sl=base('Kilometraje · Odómetro y Tren-Km',
+            'Mismo período y filtros del Dashboard · barras de km por período'+_corte_parcial)
     tile(sl,.7,1.55,3.6,1.5,'Odómetro UMR',odo,'km',violet)
     tile(sl,4.65,1.55,3.6,1.5,'Tren-Km',trenk,'km',teal)
     tile(sl,8.6,1.55,3.6,1.5,'UMR global',100*trenk/odo if np.isfinite(odo) and odo>0 else np.nan,'%',orange)
-    chart(sl,km,['Odómetro [km]','Tren-Km [km]'],['Odómetro','Tren-Km'],.75,3.35,11.8,2.85,
+    chart(sl,km,['Odómetro [km]','Tren-Km [km]'],['Odómetro UMR','Tren-Km'],.75,3.33,11.8,2.96,
           colors=[violet,teal],unidad_y='Kilómetros (km)')
-    # 5. Energía (tres componentes, mismo origen jerarquizado que pestaña Energía).
-    sl=base('Consumo energético','Total, tracción y auxiliares 12 kV (fuente para baja tensión)')
+    txt(sl,.82,6.48,11.6,.3,
+        'Fuente UMR · Excluye registros con km negativos · Sin rellenar ausencias con cero.',10,muted)
+    # 5. Energía: separar auxiliares para evitar comprimirla al compartir
+    # escala con el consumo total, que suele ser varias veces mayor.
+    sl=base('Consumo energético · Total y tracción',
+            'Mismos kWh y períodos del Dashboard · sin completar fechas faltantes con cero'+_corte_parcial)
     tile(sl,.75,1.55,3.8,1.5,'Energía total',total_e,'kWh',teal)
     tile(sl,4.80,1.55,3.8,1.5,'Tracción',total_tr,'kWh',violet)
-    tile(sl,8.85,1.55,3.8,1.5,'BT / auxiliares 12 kV',total_aux,'kWh',orange)
-    chart(sl,datos,['E_Total','E_Tr','E_12'],
-          ['Energía total','Tracción','Auxiliares 12 kV'],
-          .7,3.25,11.85,3.05,'line',colors=[teal,violet,orange],unidad_y='Energía (kWh)')
-    txt(sl,.8,6.63,11.8,.25,
-        'BT: referencia auxiliar E_12 de SEAT; no es una medición independiente a 220/380 V.',10,muted)
+    tile(sl,8.85,1.55,3.8,1.5,'Auxiliares 12 kV',total_aux,'kWh',orange)
+    chart(sl,datos,['E_Total','E_Tr'],['Energía total','Tracción'],
+          .7,3.30,11.85,3.08,'line',colors=[teal,violet],unidad_y='Energía (kWh)')
+    txt(sl,.8,6.64,11.8,.25,
+        'BT/auxiliares 12 kV: serie separada en la siguiente diapositiva para usar su propia escala.',10,muted)
+    # 6. Auxiliares, con escala Y independiente y datos no imputados.
+    sl=base('Consumo auxiliar · 12 kV',
+            'Detalle E_12 de SEAT · escala independiente de total y tracción'+_corte_parcial)
+    tile(sl,.75,1.62,4.2,1.48,'Auxiliares 12 kV',total_aux,'kWh',orange)
+    txt(sl,5.25,1.89,7.0,1.03,
+        'Es el consumo auxiliar de 12 kV. No representa una medición independiente de BT a 220/380 V.',
+        13,muted)
+    chart(sl,datos,['E_12'],['Auxiliares 12 kV'],
+          .75,3.26,11.76,3.08,'line',colors=[orange],unidad_y='Auxiliares (kWh)')
     # 6. Eficiencia.
     sl=base('Desempeño energético','Cocientes ponderados calculados solo con días comparables')
     for x,y,label,value,unit,col in (
@@ -7398,6 +7429,14 @@ def _v41_render_dashboard(df):
                    float(_v41_suma(datos,'PAX')),float(_v41_suma(datos,'Servicios')),
                    float(_v41_suma(datos,'E_Total')),float(_v41_suma(datos,'E_Tr')),
                    float(_v41_suma(datos,'E_12')),
+                   float(_v41_suma(_km_validos,'Odómetro [km]')),
+                   float(_v41_suma(_km_validos,'Tren-Km [km]')),
+                   # Comprueba no solo sumas, también la distribución por fecha.
+                   __import__('hashlib').sha256(
+                       pd.util.hash_pandas_object(
+                           datos[['Fecha','Odómetro [km]','Tren-Km [km]',
+                                  'E_Total','E_Tr','E_12']],index=False
+                       ).values.tobytes()).hexdigest(),
                    float(_total_paxkm49) if np.isfinite(_total_paxkm49) else None,
                    str(st.session_state.get('_cache_key')))
     if st.button('📑 Preparar presentación PPTX',key='_v49_preparar_pptx'):
