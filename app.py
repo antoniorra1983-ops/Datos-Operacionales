@@ -6639,6 +6639,35 @@ def _v46_indicadores_eficiencia(datos,viajes=None,paxkm_diario=None,fuente='Carg
 
 
 
+# ===== v59 · IDE PONDERADO CON DÍAS ESTRICTAMENTE PAREADOS =====
+def _v59_ide_dias_pareados(datos):
+    """Días que realmente entran al IDE: tracción y odómetro positivos y coincidentes.
+
+    El mismo criterio es utilizado por _v56_agregar en Comparación entre años.
+    No suma kWh de un día cuyo kilometraje UMR está ausente o invalidado.
+    El argumento ya contiene únicamente las fechas de los filtros activos.
+    """
+    columnas=['Fecha','E_Tr','Odómetro [km]']
+    if datos is None or getattr(datos,'empty',True) or any(c not in datos for c in columnas):
+        return pd.DataFrame(columns=columnas+['Tipo de jornada','IDE diario (kWh/km)'])
+    col=columnas+(['Tipo de jornada'] if 'Tipo de jornada' in datos else [])
+    tabla=datos[col].copy()
+    tabla['Fecha']=pd.to_datetime(tabla['Fecha'],errors='coerce').dt.normalize()
+    for campo in ('E_Tr','Odómetro [km]'):
+        tabla[campo]=pd.to_numeric(tabla[campo],errors='coerce')
+    tabla=tabla[(tabla['Fecha'].notna())&tabla['E_Tr'].gt(0)&tabla['Odómetro [km]'].gt(0)].copy()
+    tabla['IDE diario (kWh/km)']=tabla['E_Tr']/tabla['Odómetro [km]']
+    return tabla.sort_values('Fecha').reset_index(drop=True)
+
+
+def _v59_ide_ponderado(tabla_pareada):
+    """Razón de sumas, nunca media aritmética de IDE diarios."""
+    if tabla_pareada is None or tabla_pareada.empty:
+        return float('nan')
+    km=float(tabla_pareada['Odómetro [km]'].sum())
+    return float(tabla_pareada['E_Tr'].sum()/km) if km>0 else float('nan')
+
+
 def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista):
     """PowerPoint ejecutivo editable con los filtros ACTUALES del Dashboard.
 
@@ -6821,7 +6850,8 @@ def _v49_dashboard_pptx(datos,servicios_via,paxkm_tabla,eficiencia,fuente,vista)
     odo=_v41_suma(km,'Odómetro [km]');trenk=_v41_suma(km,'Tren-Km [km]')
     total_tr=_v41_suma(datos,'E_Tr');total_e=_v41_suma(datos,'E_Total')
     total_aux=_v41_suma(datos,'E_12')  # Auxiliares 12 kV (componente disponible para BT)
-    ide=total_tr/odo if np.isfinite(total_tr) and np.isfinite(odo) and odo>0 else np.nan
+    # Mismo IDE pareado que Dashboard y Comparación entre años (v59).
+    ide=_v59_ide_ponderado(_v59_ide_dias_pareados(datos))
     # 1. Resumen ejecutivo.
     sl=base('Dashboard ejecutivo · Datos operacionales',
             f'Período: {fi:%d/%m/%Y} al {ff:%d/%m/%Y} · {len(datos)} jornadas')
@@ -6915,7 +6945,12 @@ def _v41_render_dashboard(df):
     umr_pct=(100*tren_km/km if np.isfinite(km) and km>0 and np.isfinite(tren_km)
              else float('nan'))
     pax=_v41_suma(datos,'PAX'); serv=_v41_suma(datos,'Servicios')
-    ide=t/km if np.isfinite(t) and np.isfinite(km) and km>0 else np.nan
+    # IDE: SOLO fechas que contienen simultáneamente tracción y odómetro positivos.
+    # Antes se sumaba E_Tr de todos los días pero el km únicamente de los UMR válidos;
+    # eso producía un valor distinto al comparativo interanual y al IDE por jornada.
+    _ide_dias59=_v59_ide_dias_pareados(datos)
+    ide=_v59_ide_ponderado(_ide_dias59)
+    _ide_jornada59=_v48_cociente_jornada(_ide_dias59,'E_Tr','Odómetro [km]')
     fmin,fmax=datos['Fecha'].min(),datos['Fecha'].max()
 
     # v48: mismo orden de Resumen y totales separados por clase de jornada.
@@ -7199,9 +7234,26 @@ def _v41_render_dashboard(df):
               'En condiciones operacionales comparables, un valor menor representa menor consumo específico.'
               if np.isfinite(ide) else 'Sin energía de tracción y kilometraje UMR comparables.')
     _v41_card('IDE ponderado',ide,'kWh/km','#21dbc6',
-              por_jornada=_v48_cociente_jornada(datos,'E_Tr','Odómetro [km]'),
+              por_jornada=_ide_jornada59,
               desglose_titulo='IDE POR TIPO DE DÍA',explicacion=_exp_ide,
-              nota='Cálculo ponderado: suma de kWh de tracción ÷ suma de km UMR; no es promedio simple de los días.')
+              nota=f'{len(_ide_dias59)} de {len(datos)} días filtrados con energía de tracción y odómetro UMR positivos y coincidentes. '
+                   'IDE = Σ kWh tracción / Σ km UMR de esos mismos días.')
+    with st.expander('📐 Comprobar el IDE ponderado · días incluidos y excluidos',expanded=False):
+        _detalle59=datos[['Fecha','Tipo de jornada','E_Tr','Odómetro [km]']].copy()
+        _detalle59['Incluido en IDE']=(_detalle59['E_Tr'].gt(0)&_detalle59['Odómetro [km]'].gt(0))
+        _detalle59['IDE diario (kWh/km)']=np.where(
+            _detalle59['Incluido en IDE'],
+            _detalle59['E_Tr']/_detalle59['Odómetro [km]'].replace(0,np.nan),np.nan)
+        st.caption(f'IDE filtrado: {_ncl(ide,3)} kWh/km · '
+                   f'{len(_ide_dias59)} días válidos de {len(datos)} fechas seleccionadas · '
+                   f'Energía pareada: {_ncl(_v41_suma(_ide_dias59,"E_Tr"),2)} kWh · '
+                   f'Kilometraje pareado: {_ncl(_v41_suma(_ide_dias59,"Odómetro [km]"),2)} km. '
+                   'Los días sin ambos datos positivos se excluyen solo de este cociente, no de las tarjetas de totales.')
+        st.dataframe(_detalle59,hide_index=True,width='stretch')
+        st.download_button('⬇️ Descargar días del cálculo IDE (CSV)',
+                 data=_detalle59.to_csv(index=False,sep=';',decimal=',').encode('utf-8-sig'),
+                 file_name='detalle_ide_ponderado_dashboard.csv',mime='text/csv',
+                 key='_v59_csv_ide')
 
     # v46 · KPIs adicionales del Resumen, con interpretación dentro de cada tarjeta.
     # Pax/kWh usa la MISMA selección de fuente de la pestaña Resumen.
@@ -7287,9 +7339,8 @@ def _v41_render_dashboard(df):
                         unsafe_allow_html=True)
             for nom,color in (('Laboral','#10ded1'),('Sábado','#289bfa'),
                               ('Domingo y festivo','#bb5cf5')):
-                grupo=datos[datos['Tipo de jornada'].eq(nom)]
-                gtr=_v41_suma(grupo,'E_Tr');gkm=_v41_suma(grupo,'Odómetro [km]')
-                valor=gtr/gkm if np.isfinite(gtr) and np.isfinite(gkm) and gkm>0 else np.nan
+                # Misma pareja de días que tarjeta IDE y desglose por jornada.
+                valor=_ide_jornada59[nom]['valor']
                 visto=f'{_ncl(valor,2)}' if np.isfinite(valor) else '—'
                 st.markdown('<div style="display:flex;justify-content:space-between;'
                             f'align-items:center;border-bottom:1px solid #173a50;padding:12px 0;">'
@@ -7496,7 +7547,7 @@ def _v56_agregar(d, grupos):
     No se promedian IDE, UMR ni PAX/kWh. Los indicadores sin fuente son NaN,
     nunca cero; PAX-km coincide con el KPI de Dashboard solo días con E_Tr > 0.
     """
-    cols=list(grupos)+['Días operacionales','Días con PAX-km']+[c for c,_,_ in _V56_METRICAS]
+    cols=list(grupos)+['Días operacionales','Días con PAX-km','Días con IDE']+[c for c,_,_ in _V56_METRICAS]
     if d is None or d.empty: return pd.DataFrame(columns=cols)
     filas=[]
     def _suma(df,c):
@@ -7515,6 +7566,7 @@ def _v56_agregar(d, grupos):
         res=dict(zip(grupos,llave))
         res['Días operacionales']=int(g['Fecha'].nunique())
         res['Días con PAX-km']=int(pd.to_numeric(g['PAX-km'],errors='coerce').gt(0).sum())
+        res['Días con IDE']=len(_v59_ide_dias_pareados(g))
         for c in _V56_SUMAS:
             if c in ('Odómetro [km]','Tren-Km [km]'):
                 valid=(pd.to_numeric(g['Odómetro [km]'],errors='coerce').ge(0)
@@ -7911,7 +7963,7 @@ def _v56_mostrar_comparacion(ops):
                 '</b> · Año base: <b>'+str(ref)+'</b> · '+
                 ('corte diario común activado' if mismo_corte else 'sin corte diario común')+
                 '</div>',unsafe_allow_html=True)
-    cobertura=anual[['Año','Días operacionales','Días con PAX-km']].copy()
+    cobertura=anual[['Año','Días operacionales','Días con PAX-km','Días con IDE']].copy()
     cobertura['Meses con registros']=cobertura['Año'].map(
                          mensual.groupby('Año')['Mes'].nunique().to_dict())
     with st.container(key='v57_cobertura'):
@@ -7919,10 +7971,12 @@ def _v56_mostrar_comparacion(ops):
         for i,anio in enumerate(anios):
             cr=cobertura[cobertura['Año'].eq(anio)]
             dias=int(cr.iloc[0]['Días operacionales']) if len(cr) else 0
+            dias_ide=int(cr.iloc[0]['Días con IDE']) if len(cr) else 0
             mes_n=int(cr.iloc[0]['Meses con registros']) if len(cr) else 0
             with cols[i%len(cols)]:
                 st.markdown(f'<div class="efe57-counter">Año {anio}'
-                            f'<b>{_v57_formato(dias,0)} días · {mes_n} meses</b></div>',
+                            f'<b>{_v57_formato(dias,0)} días · {mes_n} meses</b>'
+                            f'<span>IDE: {dias_ide} días pareados</span></div>',
                             unsafe_allow_html=True)
         st.caption('Revisa la cobertura: si los años tienen distinta cantidad de días, '
                    'sus totales pueden variar por esa diferencia, además de la operación real.')
