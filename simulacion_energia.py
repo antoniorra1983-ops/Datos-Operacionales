@@ -197,40 +197,179 @@ def construir_viajes(via1, via2, fecha, estaciones, km_acum, get_col_thdr: Calla
     return pd.DataFrame(filas), descartes, count
 
 
+def _clave_campo(s):
+    """Normaliza encabezados de Carga conservando sólo letras y números."""
+    import unicodedata
+    txt = unicodedata.normalize('NFKD', str(s))
+    return re.sub(r'[^A-Z0-9]', '', ''.join(c for c in txt if not unicodedata.combining(c)).upper())
+
+
+def _minuto_hora(v):
+    """Hora de export Carga: HH:MM[:SS], timedelta, time, o fracción Excel."""
+    if pd.isna(v):
+        return np.nan
+    if hasattr(v, 'hour') and hasattr(v, 'minute'):
+        return (int(v.hour) * 60 + int(v.minute) + float(getattr(v, 'second', 0))/60) % 1440
+    if isinstance(v, (pd.Timedelta,)):
+        return (v.total_seconds() / 60) % 1440
+    if isinstance(v, (float, int, np.number)):
+        v = float(v)
+        return (v * 1440 if 0 <= v < 1 else v) % 1440
+    ss = str(v).strip()
+    hh = re.search(r'(\d{1,2}):(\d{2})(?::(\d{2}))?', ss)
+    if hh:
+        h, m = int(hh.group(1)), int(hh.group(2))
+        seg = int(hh.group(3) or 0)
+        if 0 <= h < 24 and m < 60 and seg < 60:
+            return h*60 + m + seg/60
+    return np.nan
+
+
+def _dist_minutos(a, b):
+    if not np.isfinite(a) or not np.isfinite(b):
+        return np.nan
+    delta = abs((float(a) % 1440) - (float(b) % 1440))
+    return min(delta, 1440 - delta)
+
+
 def incorporar_pasajeros(viajes, carga_v1, carga_v2, fecha, pax_estimados, columnas_pax):
-    """Solo asigna una carga real si el servicio y el día son inequívocos."""
+    """Carga V1/V2 real por estación para el motor físico, sin duplicar servicios.
+
+    Prioridad de vinculación: N° THDR/Viaje exacto y tren (cuando consten);
+    si falta N° THDR, tren y hora origen cercana; tren único sólo cuando no
+    existe ambigüedad. Siempre se exige fecha y vía. Un registro de Carga no
+    puede asignarse a dos viajes THDR. Los casos ambiguos quedan estimados.
+
+    pax_d es el perfil por estación. El motor recupera la ocupación en cada
+    kilómetro mediante get_pax_at_km_nativo, no mediante una cifra constante.
+    """
     d = viajes.copy()
     d['pax_abordo'] = int(pax_estimados)
     d['pax_d'] = [{} for _ in range(len(d))]
-    encontrados = 0
-    for via, carga in ((1, carga_v1), (2, carga_v2)):
-        if not isinstance(carga, pd.DataFrame) or carga.empty or 'Fecha' not in carga:
+    d['Fuente pasajeros'] = 'Estimado (sin cruce Carga)'
+    d['Cruce pasajeros'] = 'Sin coincidencia inequívoca'
+    d['PAX-km de carga'] = np.nan
+    d['Estaciones con carga'] = 0
+    usados = 0
+    for via, fuente in ((1, carga_v1), (2, carga_v2)):
+        if not isinstance(fuente, pd.DataFrame) or fuente.empty or 'Fecha' not in fuente:
             continue
-        dia = carga.loc[pd.to_datetime(carga['Fecha'], errors='coerce').dt.normalize() == pd.Timestamp(fecha).normalize()].copy()
+        fcruda = fuente['Fecha']
+        # La carga puede traer timestamps, fechas ISO o DD/MM/AAAA.
+        # Evita advertencias al interpretar un período completo en formato ISO.
+        es_iso = fcruda.astype(str).str.match(r'^\d{4}-\d{2}-\d{2}')
+        fechas = pd.to_datetime(fcruda, errors='coerce', dayfirst=not bool(es_iso.all()))
+        dia = fuente.loc[fechas.dt.normalize() == pd.Timestamp(fecha).normalize()].copy().reset_index(drop=True)
         if dia.empty:
             continue
-        cc = [c for c in columnas_pax if c in dia]
-        campos_servicio = [c for c in dia.columns if str(c).strip().upper() in ('TREN', 'SERVICIO', 'NRO THDR', 'NRO_THDR')]
-        if not cc or not campos_servicio:
+        normalizadas = {_clave_campo(c): c for c in dia.columns}
+        estaciones = {codigo: normalizadas.get(_clave_campo(codigo)) for codigo in columnas_pax}
+        estaciones = {codigo: col for codigo, col in estaciones.items() if col is not None}
+        if len(estaciones) < 2:
             continue
-        mapa = {}
-        for _, r in dia.iterrows():
-            for c in campos_servicio:
-                key = _texto_servicio(r.get(c))
-                if key and key.lower() not in ('none', 'nan'):
-                    mapa.setdefault(key, []).append(r)
-        for i, v in d[d['Via'] == via].iterrows():
-            cs = mapa.get(v['num_servicio'], [])
-            if len(cs) != 1:
-                continue  # evitar emparejamientos ambiguos
-            perfil = {k: max(0, int(float(cs[0][k]))) for k in cc
-                      if pd.notna(cs[0][k]) and pd.to_numeric(cs[0][k], errors='coerce') >= 0}
+        def buscar(*nombres):
+            return next((normalizadas[_clave_campo(n)] for n in nombres
+                         if _clave_campo(n) in normalizadas), None)
+        col_thdr = buscar('NRO THDR', 'N THDR', 'NUMERO THDR', 'VIAJE', 'NRO VIAJE')
+        col_tren = buscar('TREN', 'NRO TREN', 'NUMERO TREN', 'SERVICIO')
+        col_hora = buscar('HORA ORIGEN', 'HORA SALIDA', 'HORA INICIO', 'HORA ORIG')
+        candidatos_carga = []
+        for ix, row in dia.iterrows():
+            perfil = {}
+            for cod, col in estaciones.items():
+                valor = pd.to_numeric(str(row.get(col)).replace(',', '.'), errors='coerce')
+                if pd.notna(valor) and np.isfinite(float(valor)) and float(valor) >= 0:
+                    perfil[cod] = int(round(float(valor)))
             if len(perfil) < 2:
                 continue
-            d.at[i, 'pax_d'] = perfil
-            d.at[i, 'pax_abordo'] = max(perfil.values())
-            encontrados += 1
-    return d, encontrados
+            candidatos_carga.append({
+                'ix': ix, 'perfil': perfil,
+                'viaje': _texto_servicio(row.get(col_thdr)) if col_thdr else '',
+                'tren': _texto_servicio(row.get(col_tren)) if col_tren else '',
+                'hora': _minuto_hora(row.get(col_hora)) if col_hora else np.nan,
+            })
+        if not candidatos_carga:
+            continue
+        candidatos = []
+        viajes_via = d.loc[d['Via'] == via]
+        for idx, r in viajes_via.iterrows():
+            nr = _texto_servicio(r.get('nro_viaje'))
+            tren = _texto_servicio(r.get('num_servicio'))
+            h_thdr = float(r.get('t_ini', np.nan))
+            for cg in candidatos_carga:
+                # El identificador THDR prevalece sobre el número de tren.
+                hay_nr = bool(nr and cg['viaje'])
+                hay_tr = bool(tren and cg['tren'])
+                match_nr = hay_nr and nr == cg['viaje']
+                match_tr = hay_tr and tren == cg['tren']
+                if (hay_nr and not match_nr) or (hay_tr and not match_tr):
+                    continue
+                if not (match_nr or match_tr):
+                    continue
+                diferencia = _dist_minutos(h_thdr, cg['hora'])
+                # Una hora contradictoria indica que probablemente es otro viaje.
+                if np.isfinite(diferencia) and diferencia > 35:
+                    continue
+                prioridad = (100 if match_nr else 0) + (40 if match_tr else 0)
+                if np.isfinite(diferencia):
+                    prioridad += 20 - min(20, diferencia / 2)
+                candidatos.append((idx, cg['ix'], prioridad, diferencia,
+                                   match_nr, match_tr, cg))
+        # Permitir una coincidencia solo cuando es la mejor para ambas filas;
+        # empates exactos sin datos suficientes no se deciden por orden arbitrario.
+        por_viaje, por_carga = {}, {}
+        for co in candidatos:
+            por_viaje.setdefault(co[0], []).append(co)
+            por_carga.setdefault(co[1], []).append(co)
+        aceptables = []
+        for co in candidatos:
+            mejores_v = sorted(por_viaje[co[0]], key=lambda x: x[2], reverse=True)
+            mejores_c = sorted(por_carga[co[1]], key=lambda x: x[2], reverse=True)
+            if co is not mejores_v[0] or co is not mejores_c[0]:
+                continue
+            if (len(mejores_v) > 1 and abs(mejores_v[0][2] - mejores_v[1][2]) < 1e-6):
+                continue
+            if (len(mejores_c) > 1 and abs(mejores_c[0][2] - mejores_c[1][2]) < 1e-6):
+                continue
+            aceptables.append(co)
+        for idx, ix, _, diferencia, match_nr, match_tr, cg in aceptables:
+            perfil = cg['perfil']
+            d.at[idx, 'pax_d'] = perfil
+            d.at[idx, 'pax_abordo'] = max(perfil.values())
+            d.at[idx, 'Fuente pasajeros'] = 'Carga Vía 1' if via == 1 else 'Carga Vía 2'
+            criterios = []
+            if match_nr: criterios.append('N° THDR')
+            if match_tr: criterios.append('Tren')
+            if np.isfinite(diferencia): criterios.append(f'hora ±{diferencia:.0f} min')
+            d.at[idx, 'Cruce pasajeros'] = ', '.join(criterios)
+            d.at[idx, 'Estaciones con carga'] = len(perfil)
+            usados += 1
+            # Se informa PAX-km registrado para auditoría. La potencia se calcula
+            # con los pasajeros de cada estación según la posición del tren.
+            dist = float(d.at[idx, 'km_viaje'])
+            if dist > 0 and perfil:
+                # Codificación y kilometraje de 21 estaciones del Simulador.
+                k = [0.0, .7, 1.4, 2.2, 3.9, 6.0, 7.4, 8.3, 9.2, 10.2,
+                     11.7, 19.1, 21.4, 23.3, 25.3, 26.4, 27.6, 28.5, 29.1, 30.4, 43.13]
+                cods = ['PUE','BEL','FRA','BAR','POR','REC','MIR','VIN','HOS','CHO',
+                        'SLT','VAL','QUI','SOL','BTO','AME','CON','VAM','SGA','PEN','LIM']
+                ko, kd = sorted((float(d.at[idx, 'km_orig']),float(d.at[idx, 'km_dest'])))
+                vperfil = 0
+                paxkm = 0.0
+                if via == 1:
+                    ruta = range(len(k)-1)
+                    for j in ruta:
+                        if ko <= k[j] and k[j+1] <= kd:
+                            vperfil = perfil.get(cods[j],vperfil)
+                            paxkm += vperfil * (k[j+1]-k[j])
+                else:
+                    ruta = range(len(k)-1,0,-1)
+                    for j in ruta:
+                        if ko <= k[j-1] and k[j] <= kd:
+                            vperfil = perfil.get(cods[j],vperfil)
+                            paxkm += vperfil * (k[j]-k[j-1])
+                d.at[idx, 'PAX-km de carga'] = paxkm
+    return d, usados
 
 
 def ejecutar_motor(viajes, pct_traccion, usar_pendientes, usar_riel_mojado,
@@ -400,13 +539,24 @@ def render_simulacion(v1, v2, carga1, carga2, df_ops, estaciones, km_acum,
                f"vía 2: {meta['cobertura'][2]} · pasajeros reales asociados: "
                f"{meta['pax_reales']} · restantes con ocupación supuesta: "
                f"{len(res)-meta['pax_reales']} · descartados: {len(meta['descartados'])}.")
+    if meta['pax_reales'] < len(res):
+        st.warning(f"Solo {meta['pax_reales']} de {len(res)} servicios se pudieron vincular inequívocamente "
+                   'a Carga de Pasajeros. Los otros utilizan la ocupación estimada indicada en los parámetros. '
+                   'Revisa N° THDR, tren y hora en las planillas si esperabas una cobertura mayor.')
+    st.markdown('#### Cobertura de carga real de pasajeros')
+    if 'Fuente pasajeros' in res.columns:
+        cobertura_pax = res.groupby(['Via', 'Fuente pasajeros'], dropna=False).size().rename('Viajes').reset_index()
+        st.dataframe(cobertura_pax, use_container_width=True, hide_index=True)
+    st.caption('Cuando hay Carga de pasajeros, se aplica la ocupación de cada estación a los tramos '
+               'del recorrido. No se utiliza una ocupación constante para esos servicios.')
     for titulo, group in [('Vía', 'Via'), ('Tipo de tren', 'tipo_tren')]:
         st.markdown(f'#### Consumo por {titulo.lower()}')
         g = res.groupby(group,as_index=False)[list(fields)].sum()
         st.dataframe(g.rename(columns=fields),hide_index=True,use_container_width=True)
     st.markdown('#### Detalle estimado por viaje')
     cols = ['Fecha_str','Via','num_servicio','motriz_num','tipo_tren','doble','t_ini',
-            'km_orig','km_dest','pax_abordo','tren_km',*fields]
+            'km_orig','km_dest','pax_abordo','Fuente pasajeros',
+            'Cruce pasajeros','Estaciones con carga','PAX-km de carga', 'tren_km',*fields]
     detalle = res[[c for c in cols if c in res.columns]].copy()
     st.dataframe(detalle, hide_index=True,use_container_width=True,height=360)
     st.download_button('⬇️ Descargar simulación del día (.csv)',
