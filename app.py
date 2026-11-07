@@ -7380,6 +7380,8 @@ def _v62_generar_informe_sge(tipo,datos,servicios_via,paxkm_tabla,eficiencia,fue
     from io import BytesIO
     from html import escape
     import math
+    import base64
+    _logo_sge=base64.b64decode('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34b0a+uXubrTbaaZ8bneMEnAx1/CtajFARnKLvF2EAwAB0FZ19oOlanMJr2wguJFXaHkQEgelaVFARlKLvF2MT/hD/D3/QHs/wDv0KdD4W0K3nSaHSrVJY2DIyxDKkdCK2aKVkW69Vqzk/vEKgrtPTGKxP8AhDvDv/QHs/8Av0K3KKNyYVJw+F2MP/hDvDv/AEB7P/v0KvafpNhpSOlhaQ26ucsI1C5NXqKLIcq1SStKTfzFooopmYUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABWF40/5EXXv+wfP/AOgGt2sLxp/yIuvf9g+f/wBANOO4nsfJNFFFeicwUUUUAevfAT/kMax/17x/+hGvda8K+An/ACGNY/694/8A0I17rXDW+Nm8NgooorMsKKKKACiiigAooooAKKKKACiiigAoxRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABWF40/wCRF17/ALB8/wD6Aa3awfGv/Ija9/2D5/8A0A047iex8lUUUV6JzBRRRQB698BP+QxrH/XvH/6Ea91rwn4C/wDIY1j/AK94/wD0I17tXDW+Nm8NgooorMsKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKM0AFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFAAaxfFtvNd+D9ZtreNpZpbKZI41GSzFCAB+NbVJQtHcD5N/4QXxX/0L+of9+DR/wgviv/oX9Q/78GvrLAowK39uzP2aPk3/AIQXxX/0L+of9+DR/wAIJ4r/AOhf1D/vwa+sqKPbyD2aPHPgx4e1jRdU1STU9NubRJIUVGmjK7juPTNeyUmKKxlLmdy0rIWiiikMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACijNJmgBaKTNLmgAoozRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAFFFFABRRRQAUUUUAf//Z')  # Logotipo extraído del documento 2025 que entregó el usuario
     from PIL import Image, ImageDraw, ImageFont
     from docx import Document
     from docx.shared import Inches, Cm, Pt, RGBColor
@@ -7556,13 +7558,21 @@ def _v62_generar_informe_sge(tipo,datos,servicios_via,paxkm_tabla,eficiencia,fue
             coef=np.polyfit(x,y,1);estim=coef[0]*x+coef[1]
             sst=float(np.square(y-y.mean()).sum());sse=float(np.square(y-estim).sum())
             r2=1-sse/sst if sst>0 else float('nan')
-            regime.append([title,len(r),coef[1],coef[0],r2,'Exploratoria'])
+            rmse=float(np.sqrt(sse/max(len(r)-2,1)))
+            r2adj=1-(1-r2)*(len(r)-1)/(len(r)-2) if len(r)>2 and ok(r2) else np.nan
+            cv=100*rmse/float(y.mean()) if y.mean()>0 else np.nan
+            ssxx=float(np.square(x-x.mean()).sum())
+            tcoef=float(coef[0]/np.sqrt((sse/max(len(r)-2,1))/ssxx)) if ssxx>0 and sse>0 else np.nan
+            regime.append([title,len(r),coef[1],coef[0],r2,'Exploratoria',r2adj,rmse,cv,tcoef])
         else:
-            regime.append([title,len(r),np.nan,np.nan,np.nan,'Muestra insuficiente'])
-    regression_rows=[]
-    for name,n,b0,b1,r2,situation in regime:
+            regime.append([title,len(r),np.nan,np.nan,np.nan,'Muestra insuficiente',np.nan,np.nan,np.nan,np.nan])
+    regression_rows=[]; reg_stats={}
+    for name,n,b0,b1,r2,situation,r2adj,rmse,cv,tcoef in regime:
         ecuacion=(f'{fm(b0,3)} + ({fm(b1,3)} × km)' if ok(b0) and ok(b1) else 'No estimable')
         regression_rows.append([name,str(n),ecuacion,fm(r2,3),situation])
+        reg_stats[name]=[['R²',fm(r2,3)],['R² ajustado',fm(r2adj,3)],
+                          ['Error típico (kWh)',fm(rmse,2)],['CV(RMSE)',fm(cv,2)+' %'],
+                          ['t de la pendiente',fm(tcoef,2)],['Observaciones',str(n)]]
 
     # Validez y comunicación clara sobre ajustes / pérdidas de información.
     cautela=('El informe utiliza únicamente los días visibles por los filtros activos. Una fecha sin datos de '
@@ -7585,132 +7595,249 @@ def _v62_generar_informe_sge(tipo,datos,servicios_via,paxkm_tabla,eficiencia,fue
     if len(l)<n_dias:
         conclusion+=f' Quedaron {n_dias-lb_dias} días fuera de esa comparación por falta de datos compatibles.'
 
-    # Modelo de contenido común para asegurar paridad Word/PDF.
-    sections=[]
+    # v63 · Seguir el índice, las definiciones y las secciones de los documentos entregados,
+    # no un informe genérico de tres páginas. Los resultados siguen el filtro ACTUAL.
+    _resumen_mes = [[str(r['Mes']), fm(r['E_Total']), fm(r['E_Tr']), fm(r['E_12'])]
+                    for _,r in mensal.iterrows()]
+    _mes_lb = [[str(r['Mes']), fm(r['E_LB']), fm(r['Ahorro LB']),
+                fm(r['E_Tr'])] for _,r in mensal.iterrows()]
+    _pax_mes=d.assign(Mes=d['Fecha'].dt.to_period('M').astype(str)).groupby('Mes',as_index=False)['PAX'].sum(min_count=1)
+    _pax_filas=[[str(r['Mes']),fm(r['PAX'])] for _,r in _pax_mes.iterrows()]
+    _j_lb = [[r[0],str(r[1]),fm(r[3]),fm(r[4],3),fm(r[5]),fm(r[6],2)+' %'] for r in d_jornada]
+    _reg = {r[0]:r for r in regression_rows}
+    def _result_lb_grupo(tipo,meses=None):
+        _dias=d[d['Tipo de jornada'].eq(tipo)]
+        if meses is not None:_dias=_dias[_dias['Fecha'].dt.month.isin(meses)]
+        _comp=l[l['Fecha'].isin(_dias['Fecha'])] if not l.empty else pd.DataFrame()
+        a=sumar(_comp,'E_real');b=sumar(_comp,'E_LB')
+        dif=b-a if ok(a) and ok(b) else np.nan
+        return [['Días comparables',str(len(_comp))],['Tracción real (kWh)',fm(a)],
+                ['Línea base ajustada (kWh)',fm(b)],['Ahorro / exceso (kWh)',fm(dif)]]
+    def _reg_bloque(grupo,explain):
+        r=_reg.get(grupo)
+        return [('p',explain),
+                ('table',['Días','Ecuación de consumo esperado (kWh)','R²','Condición'],
+                 [[r[1],r[2],r[3],r[4]]] if r else [['0','No estimable','—','Sin datos']]),
+                ('p','Estadísticas de la regresión para los días del filtro (si la muestra permite el ajuste):'),
+                ('table',['Estadística','Valor'],reg_stats.get(grupo,[]))]
+    definiciones=[
+       ('p','Objetivo energético: resultado específico establecido para cumplir con la política energética.'),
+       ('p','Meta energética: objetivo cuantificable de mejora del desempeño energético.'),
+       ('p','Uso significativo de la energía (USE): uso que supone un consumo sustancial o un potencial importante de mejora.'),
+       ('p','Consumo de energía: cantidad de energía utilizada en un proceso, relacionada con potencia, eficiencia y horas de funcionamiento.')]
+    referencias=[('p','PR-MVA-GOF-067 SGE – REVISIÓN ENERGÉTICA, LB e IDE.'),
+                 ('p','PR-MVA-GOF-068 SGE – OBJETIVOS Y METAS ENERGÉTICAS.')]
+    _intro=('El documento utiliza únicamente las fechas visibles en el Dashboard: '+descripcion_filtro+
+            ' Este es un informe dinámico; las cifras del documento original son antecedentes y no se presentan como resultados de otro período.')
+    _objetivo=('Dar a conocer los resultados del Sistema de Gestión de la Energía (SGE) para el período seleccionado y '+
+               'presentar los parámetros necesarios para evaluar y mejorar el desempeño energético.')
     if tipo=='analisis':
         sections=[
-          ('Resumen de resultados',[
-              ('p',f'Este informe describe lo ocurrido entre el {period} con los filtros activos del Dashboard.'),
-              ('p',f'Los servicios registrados fueron {fm(serv)} y los pasajeros {fm(pax)}. '
-                   f'Se utilizaron {fm(tr)} kWh en tracción, que representan {fm(e_tr_share,1)} % de la energía total registrada.'),
-              ('table',['Indicador','Valor del período'],resumen_rows),
-              ('p','Los datos proceden del Dashboard operacional. Los valores publicados en el documento SGE 2025 '
-                   'son antecedentes históricos y NO se copian como si fueran resultados del período elegido.')]),
-          ('Revisión energética e indicadores',[
-              ('p','En el sistema ferroviario, el consumo de tracción es la energía destinada al movimiento de trenes. '
-                   'Los auxiliares de 12 kV se presentan por separado. La eficiencia se observa mediante el IDE: '
-                   'kWh de tracción divididos por kilómetros UMR de los mismos días.'),
-              ('table',['Jornada','Días','Servicios','Tracción kWh','IDE kWh/km'],jornada_rows),
-              ('img',img_oper,'Evolución mensual · solo meses seleccionados (últimos 12 en el gráfico).'),
-              ('p',f'IDE ponderado del período: {fm(ide,3)} kWh/km sobre {len(ide_d)} días con '
-                   'energía y kilometraje positivos. En días con operación comparable, un IDE inferior indica '
-                   'menor consumo específico; no equivale por sí mismo a ahorro contra la LB.')]),
-          ('Línea base, metas y conclusiones',[
-              ('p','La línea base estima cuánta tracción se esperaba según el recorrido y las características '
-                   'del material rodante. La comparación se hace solo sobre días con energía y UMR suficientes.'),
-              ('table',['Comparación tracción - LB','Resultado'],lb_rows),
-              ('table',jp[0],jp[1:]),
-              ('img',img_ahorro,'Ahorro positivo y sobreconsumo negativo. Un mes sin LB se deja sin barra.'),
-              ('p',conclusion),
-              ('p','Metas de referencia del análisis SGE 2025: ahorro de tracción de 0,5 % en jornadas '
-                   'laborales y 1 % en sábados, domingos y festivos; uso comercial de material rodante '
-                   'de al menos 96,4 %. ' + caveat_meta),
-              ('p',f'UMR observado con los filtros: {fm(umr,2)} %. '
-                   'Los ahorros por cortes/acoples y reducción de trenes dobles requieren '
-                   'cálculos específicos: no se infieren ni se suman a partir del ahorro frente a LB.'),
-              ('p','Alcance y calidad de datos: '+cautela)])]
+          ('1. OBJETIVO',[('p',_objetivo),('p',_intro)]),
+          ('2. DEFINICIONES',definiciones),
+          ('3. REFERENCIAS',referencias),
+          ('4. ANÁLISIS DEL PERÍODO FILTRADO',[
+            ('p',f'Período considerado: {period}. Se incluyen {n_dias} fechas visibles en el Dashboard.'),
+            ('h2','4.1 REVISIÓN ENERGÉTICA'),
+            ('p','La revisión energética identifica dónde se utiliza la electricidad y facilita encontrar oportunidades de mejora. '+
+                 'Como en el documento original, la energía total se distingue de la utilizada para la tracción de trenes.'),
+            ('p',f'En el período seleccionado la tracción utilizó {fm(tr)} kWh, equivalentes a {fm(e_tr_share,2)} % '+
+                 f'del total registrado ({fm(en)} kWh). El componente auxiliar de 12 kV registró {fm(aux)} kWh. '+
+                 'Este último no constituye una medición independiente de baja tensión de 220/380 V.'),
+            ('table',['Mes','Total (kWh)','Tracción (kWh)','Auxiliares (kWh)'],_resumen_mes),
+            ('img',img_oper,'Figura 1. Consumo de energía según los meses del filtro (últimos 12 visibles en la figura).'),
+            ('h2','4.2 INDICADORES DE DESEMPEÑO ENERGÉTICO (IDE)'),
+            ('p','El IDE relaciona la energía eléctrica utilizada por los trenes con los kilómetros que recorrieron. '+
+                 'Un valor más bajo significa menos energía por kilómetro para operaciones comparables.'),
+            ('p',f'IDE ponderado del período: {fm(ide,3)} kWh/km, calculado como suma de la tracción dividida por '+
+                 f'suma de los kilómetros en {len(ide_d)} días con ambos datos positivos. '+
+                 'Se diferencia de un promedio simple de los IDE diarios.'),
+            ('table',['Jornada','Días','Servicios','Tracción (kWh)','IDE (kWh/km)'],jornada_rows),
+            ('h2','4.3 LÍNEA BASE ENERGÉTICA'),
+            ('p','La línea base indica cuánta energía de tracción se esperaba consumir para una operación determinada. '+
+                 'El cálculo de este informe utiliza la línea base ajustada por trenes 100/M y SFE que ya está cargada en la aplicación.'),
+            ('table',['Indicador de línea base','Resultado filtrado'],lb_rows),
+            ('h3','4.3.1 Aplicación de la línea base por USE'),
+            ('p','Se evalúan solamente los días con energía, kilometraje UMR y coeficientes de línea base válidos. '+
+                 'La referencia distingue días laborales, sábados y domingos/festivos; las condiciones de vacaciones pueden requerir un tratamiento separado.'),
+            ('h3','4.3.2 Jornada laboral: verano y vacaciones'),
+            ('p','La operación de vacaciones suele presentar diferente demanda y composición de trenes. '+
+                 'Se informa el resultado del grupo solo cuando hay datos filtrados para esa jornada.'),
+            ('table',['Dato','Valor filtrado'],_result_lb_grupo('Laboral',[1,2])),
+            ('h3','4.3.3 Jornada laboral: período restante'),
+            ('p','Se revisa por separado del grupo de vacaciones para no atribuir a eficiencia cambios originados por el programa de servicios.'),
+            ('table',['Dato','Valor filtrado'],_result_lb_grupo('Laboral',[3,4,5,6,7,8,9,10,11,12])),
+            ('h3','4.3.4 Jornada de sábado'),
+            ('p','Los sábados se evalúan de forma independiente, porque la oferta y circulación de trenes pueden diferir de los días laborales.'),
+            ('table',['Dato','Valor filtrado'],_result_lb_grupo('Sábado',None)),
+            ('h3','4.3.5 Domingo y festivo'),
+            ('p','Los domingos y festivos forman un grupo operativo específico para evaluar su propio desempeño.'),
+            ('table',['Dato','Valor filtrado'],_result_lb_grupo('Domingo y festivo',None)),
+            ('table',jp[0],jp[1:]),
+            ('img',img_ahorro,'Figura 2. Ahorro positivo y sobreconsumo negativo frente a la línea base, según el filtro.'),
+            ('h2','4.4 OBJETIVOS Y METAS ENERGÉTICAS'),
+            ('p','Las metas indicadas a continuación proceden del análisis SGE 2025 aportado y se mantienen como '+
+                 'referencia documental. La verificación de cumplimiento formal requiere respetar el período anual y los criterios originales.'),
+            ('h3','4.4.1 Tracción'),
+            ('p','Meta documental 2025: ahorrar 0,5 % de energía de tracción en jornadas laborales y 1 % en sábados, domingos y festivos.'),
+            ('p',conclusion),
+            ('table',['Jornada','Días','Tracción (kWh)','IDE (kWh/km)','Ahorro LB (kWh)','Ahorro LB (%)'],_j_lb),
+            ('h3','4.4.2 Gestión de flota'),
+            ('p','Corte y acople: consiste en ajustar la composición de trenes en determinados trayectos sin reducir la oferta programada. '+
+                 'El ahorro específico requiere un escenario de referencia para cada maniobra; no se infiere solo del consumo total.'),
+            ('p','Reducción de trenes dobles: permite ajustar capacidad a demanda en meses de vacaciones. '+
+                 'El documento 2025 usa datos de pasajeros y tren-km evitados para estimar su aporte energético.'),
+            ('table',['Mes','Pasajeros transportados'],_pax_filas),
+            ('p',f'Uso del material rodante (UMR): {fm(umr,2)} % para las fechas con kilómetros comparables. '+
+                 'La referencia documental de 2025 establece una meta de 96,4 % de recorrido comercial. '+
+                 'Una comparación de períodos parciales es orientativa.'),
+            ('h2','4.5 RESUMEN'),
+            ('table',['Resultado general','Valor del filtro'],resumen_rows),
+            ('p',conclusion),
+            ('p',f'Calidad de datos: {lb_dias} de {n_dias} días permiten comparar tracción y LB. '+cautela),
+            ('p',caveat_meta)
+          ])]
     else:
         sections=[
-          ('Objetivo y alcance de la línea base',[
-              ('p','Siguiendo la estructura del documento de proyección SGE 2026, este informe presenta '
-                   'la línea base energética, las variables consideradas y las metas de eficiencia. '
-                   'Todos los resultados se recalculan para el filtro actual.'),
-              ('table',['Dato general','Período seleccionado'],resumen_rows),
-              ('p','La línea base es la energía que se habría esperado para la operación analizada. '
-                   'La energía de tracción es el uso significativo que se compara con esta referencia.'),
-              ('p','Fuentes: energía jerarquizada (Factura > PRMTE > SEAT), odómetro UMR y coeficientes '
-                   'de línea base cargados en la aplicación.')]),
-          ('Consumo real frente a línea base',[
-              ('table',['Comparación de consumo','Resultado'],lb_rows),
-              ('img',img_lb,'Energía real y energía LB ajustada por mes del período seleccionado.'),
-              ('p',conclusion),
-              ('p',f'Las pruebas SFE aportan un componente ESTIMADO de {fm(sfe_prueba)} kWh '
-                   'a la LB únicamente cuando hay UMR y coeficientes válidos. '
-                   'No se suma ese estimado al consumo real, ni se duplican kilómetros SFE comerciales.'),
-              ('p','Una diferencia entre consumo real y línea base es una señal de desempeño, no una '
-                   'prueba automática de causalidad: incidentes, composición de flota y cambios de servicio '
-                   'deben revisarse antes de explicar los desvíos.')]),
-          ('Regresiones y metas de referencia',[
-              ('p','Las siguientes ecuaciones se ajustan SOLO con los días filtrados. Son diagnósticos '
-                   'exploratorios (Y = energía tracción diaria; X = km UMR), y NO reemplazan las '
-                   'ecuaciones oficiales de la LB que ya están cargadas en la aplicación. '
-                   'Se requiere un mínimo de 15 días y variación de kilometraje para mostrarlas.'),
-              ('table',['Grupo','Días','Ecuación: kWh','R²','Estado'],regression_rows),
-              ('p','Los grupos reproducen la separación operativa de la referencia 2026: '
-                   'laborales en vacaciones (enero-febrero, julio y hasta el 14 de agosto), '
-                   'laborales restantes, sábados y domingos/festivos.'),
-              ('p','Objetivos de referencia del SGE 2026: IDE real inferior al IDE proyectado '
-                   'para trenes convencionales y SFE; ahorro de 0,5 % por control de flota; '
-                   'ahorro de 0,5 % por reducción de servicios dobles en vacaciones; '
-                   'uso comercial del material rodante de 96,4 %. '+caveat_meta),
-              ('p',f'UMR calculado en el período: {fm(umr,2)} %. '
-                   'Las metas de flota y trenes dobles se consideran no evaluables sin el '
-                   'detalle específico de las acciones y sus escenarios de referencia.'),
-              ('p','Alcance y calidad de datos: '+cautela)])]
+          ('1. OBJETIVO',[('p',_objetivo),('p',_intro)]),
+          ('2. DEFINICIONES',definiciones),
+          ('3. REFERENCIAS',referencias),
+          ('4. ANÁLISIS DEL PERÍODO FILTRADO',[
+            ('h2','4.1 LÍNEA BASE ENERGÉTICA'),
+            ('p','El documento original «Línea base, objetivos y metas SGE 2026» propone regresiones entre la energía '+
+                 'de tracción y el kilometraje, diferenciando las jornadas y los períodos operacionales. '+
+                 'Aquí se utiliza la misma agrupación con los días seleccionados en el Dashboard.'),
+            ('p','Las ecuaciones de esta sección son regresiones EXPLORATORIAS recalculadas con el filtro actual; '+
+                 'no sustituyen los coeficientes oficiales de línea base cargados en la aplicación. '+
+                 'Si no hay observaciones suficientes, el grupo se identifica como no estimable.'),
+            ('h3','Línea base día laboral: vacaciones (enero-febrero, julio-agosto hasta el día 14)'),
+            *_reg_bloque('Laboral vacaciones','Se agrupan días laborales de enero, febrero, julio y los primeros 14 días de agosto, como en la referencia 2026.'),
+            ('h3','Línea base día laboral: período restante'),
+            *_reg_bloque('Laboral resto','Se consideran los demás días laborales del filtro, con energía y kilometraje válidos.'),
+            ('h3','Línea base sábado (enero-diciembre)'),
+            *_reg_bloque('Sábado','Los sábados se analizan separados de días laborales y domingos/festivos.'),
+            ('h3','Línea base domingo y festivo (enero-diciembre)'),
+            *_reg_bloque('Domingo/festivo','Los domingos y días festivos se analizan con su propio ajuste lineal.'),
+            ('h3','Trenes SFE'),
+            ('p','El documento original de 2026 analiza las pruebas nocturnas de unidades SFE mediante '+
+                 'registros de OIT, medianas de consumo 00:00–05:00 y kilómetros UMR. '+
+                 'En este reporte el valor SFE incluido en la línea base solo corresponde a los días seleccionados y con evidencia de UMR.'),
+            ('p',f'Estimación SFE en pruebas incorporada a la LB filtrada: {fm(sfe_prueba)} kWh. '+
+                 'El consumo real no se aumenta con este estimado y no se duplican SFE comerciales. '+
+                 'El IDE específico de pruebas nocturnas no se presenta sin la serie horaria y el kilometraje específico del filtro.'),
+            ('h3','Consumo real frente a línea base ajustada'),
+            ('table',['Comparación energía de tracción y línea base','Valor del filtro'],lb_rows),
+            ('table',['Mes','LB esperada (kWh)','Ahorro LB (kWh)','Tracción total (kWh)'],_mes_lb),
+            ('img',img_lb,'Figura 1. Tracción real y línea base ajustada según los meses del filtro.'),
+            ('p',conclusion),
+            ('h2','4.2 OBJETIVOS Y METAS ENERGÉTICAS'),
+            ('p','El documento fuente 2026 plantea la reducción del consumo mediante tracción al 75 % en jornadas laborales, '+
+                 'tracción al 50 % en sábados, domingos y festivos; control de flota, UMR y disminución de servicios dobles en vacaciones.'),
+            ('p','Metas documentales 2026: IDE real menor que IDE proyectado para material rodante convencional y SFE; '+
+                 'ahorro de 0,5 % mediante control de flota en laborales; ahorro de 0,5 % mediante reducción de '+
+                 'trenes dobles en vacaciones; UMR comercial mínimo de 96,4 %.'),
+            ('table',['Jornada','Días','Tracción (kWh)','IDE (kWh/km)','Ahorro LB (kWh)','Ahorro LB (%)'],_j_lb),
+            ('p',f'UMR del filtro: {fm(umr,2)} %. Los ahorros de gestión de flota y de reducción de servicios dobles '+
+                 'son no evaluables si no existe el detalle de operaciones y del escenario sin medida.'),
+            ('p',caveat_meta),
+            ('p',f'Calidad de datos: {lb_dias} de {n_dias} días con línea base calculable. '+cautela),
+          ])]
 
-    # ------------------- Word -------------------
+    # ------------------- Word: membrete, portada e índice como las referencias -------------------
     doc=Document()
-    ss=doc.sections[0];ss.top_margin=Cm(1.7);ss.bottom_margin=Cm(1.65)
+    ss=doc.sections[0]
+    ss.top_margin=Cm(2.85);ss.bottom_margin=Cm(2.5)
     ss.left_margin=Cm(1.85);ss.right_margin=Cm(1.85)
-    ss.header_distance=Cm(.7);ss.footer_distance=Cm(.8)
+    ss.header_distance=Cm(.55);ss.footer_distance=Cm(1.05)
     normal=doc.styles['Normal'];normal.font.name='Calibri';normal.font.size=Pt(9.4)
-    normal.font.color.rgb=RGBColor(39,59,75);normal.paragraph_format.space_after=Pt(6)
-    for key,sz in [('Title',21),('Heading 1',14),('Heading 2',11)]:
+    normal.font.color.rgb=RGBColor(36,43,50);normal.paragraph_format.space_after=Pt(6)
+    for key,sz in [('Title',21),('Heading 1',13),('Heading 2',11),('Heading 3',10)]:
         stl=doc.styles[key];stl.font.name='Calibri';stl.font.size=Pt(sz)
-        stl.font.bold=True;stl.font.color.rgb=RGBColor(13,62,88)
-        stl.paragraph_format.space_before=Pt(7);stl.paragraph_format.space_after=Pt(5)
-    head=ss.header.paragraphs[0];head.text='EFE VALPARAÍSO  |  SISTEMA DE GESTIÓN DE LA ENERGÍA'
-    for run in head.runs:run.font.color.rgb=RGBColor(31,116,143);run.font.size=Pt(8)
+        stl.font.bold=True;stl.font.color.rgb=RGBColor(12,27,48)
+        stl.paragraph_format.space_before=Pt(8);stl.paragraph_format.space_after=Pt(5)
+    _cabeza=('ANÁLISIS SGE' if tipo=='analisis' else 'LÍNEA BASE, OBJETIVOS Y METAS SGE')
+    _anio_label=(str(inicio.year) if inicio.year==fin.year else f'{inicio.year}–{fin.year}')
+    _titulo_impreso=f'{_cabeza} · {_anio_label}'
+    # Membrete de tres columnas: imagen original, nombre del documento y control de versión.
+    hd=ss.header
+    header_tbl=hd.add_table(rows=1,cols=3,width=Cm(17.25))
+    header_tbl.autofit=False
+    header_tbl.columns[0].width=Cm(3.25)
+    header_tbl.columns[1].width=Cm(10.15)
+    header_tbl.columns[2].width=Cm(3.85)
+    a,b,c=header_tbl.rows[0].cells
+    a.paragraphs[0].add_run().add_picture(BytesIO(_logo_sge),width=Cm(2.8))
+    a.vertical_alignment=b.vertical_alignment=c.vertical_alignment=1
+    b.text='DOCUMENTO\n'+_titulo_impreso
+    c.text='Ver: 01\nDatos filtrados'
+    for cel in (a,b,c):
+        for paragraph in cel.paragraphs:
+            paragraph.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            for rr in paragraph.runs:
+                rr.font.name='Arial';rr.font.size=Pt(7.4);rr.bold=True
+        cp=cel._tc.get_or_add_tcPr()
+        bord=OxmlElement('w:tcBorders')
+        for side in ('top','left','bottom','right'):
+            ln=OxmlElement('w:'+side);ln.set(qn('w:val'),'single');ln.set(qn('w:sz'),'6');bord.append(ln)
+        cp.append(bord)
     foot=ss.footer.paragraphs[0]
-    foot.text='Documento generado desde el Dashboard · Resultados del período filtrado · Uso interno'
+    foot.text=('Este documento contiene información de propiedad de la Empresa de los Ferrocarriles del Estado '+
+              'y queda prohibida su reproducción o difusión sin la autorización correspondiente. '+
+              'Resultados recalculados con los filtros del Dashboard.')
     foot.alignment=WD_ALIGN_PARAGRAPH.CENTER
-    for run in foot.runs:run.font.size=Pt(7.5)
-    doc.add_heading(label+' · PERÍODO FILTRADO',0)
-    p=doc.add_paragraph();p.add_run(period).bold=True
-    doc.add_paragraph(subtitle+'.')
-    p=doc.add_paragraph('Filtros utilizados: '+descripcion_filtro)
-    p.style='Subtitle'
+    for rr in foot.runs:rr.font.size=Pt(7);rr.italic=True
+    # Portada visual con logotipo del documento original (no una marca nueva).
+    doc.add_paragraph().paragraph_format.space_after=Pt(35)
+    pt=doc.add_paragraph();pt.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    pt.add_run().add_picture(BytesIO(_logo_sge),width=Cm(11.7))
+    doc.add_paragraph().paragraph_format.space_after=Pt(36)
+    p0=doc.add_paragraph();p0.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    r0=p0.add_run(_titulo_impreso.upper());r0.font.size=Pt(23);r0.font.bold=True
+    p1=doc.add_paragraph();p1.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    r1=p1.add_run('INFORME GENERADO CON LOS FILTROS DEL DASHBOARD');r1.font.size=Pt(11)
+    p2=doc.add_paragraph(period);p2.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    p3=doc.add_paragraph(descripcion_filtro);p3.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_page_break()
+    # Índice original: nombres de los capítulos que el informe sí contiene.
+    doc.add_heading('CONTENIDO',1)
+    for h,_ in sections[:3]:doc.add_paragraph(h)
+    doc.add_paragraph('4. ANÁLISIS DEL PERÍODO FILTRADO')
+    for entry in sections[-1][1]:
+        if entry[0] in ('h2','h3'):
+            pidx=doc.add_paragraph(entry[1]);pidx.paragraph_format.left_indent=Cm(.65 if entry[0]=='h2' else 1.3)
+    doc.add_page_break()
     def doc_tbl(headers,rows):
-        table=doc.add_table(rows=1,cols=len(headers));table.alignment=WD_TABLE_ALIGNMENT.CENTER
-        table.autofit=True
-        for i,h in enumerate(headers):table.rows[0].cells[i].text=str(h)
+        tbl=doc.add_table(rows=1,cols=len(headers));tbl.alignment=WD_TABLE_ALIGNMENT.CENTER
+        tbl.autofit=True
+        for i,h in enumerate(headers):tbl.rows[0].cells[i].text=str(h)
         for rr in rows:
-            cells=table.add_row().cells
+            cells=tbl.add_row().cells
             for i,val in enumerate(rr):cells[i].text=str(val)
-        for ir,row in enumerate(table.rows):
+        for ir,row in enumerate(tbl.rows):
             for cell in row.cells:
-                cell._tc.get_or_add_tcPr()
-                sh=OxmlElement('w:shd');sh.set(qn('w:fill'),'164762' if ir==0 else ('EEF4F7' if ir%2 else 'FFFFFF'))
-                cell._tc.get_or_add_tcPr().append(sh)
+                tc=cell._tc.get_or_add_tcPr()
+                sh=OxmlElement('w:shd');sh.set(qn('w:fill'),'DCE5EE' if ir==0 else 'FFFFFF');tc.append(sh)
                 for pp in cell.paragraphs:
                     pp.paragraph_format.space_after=Pt(2)
                     for run in pp.runs:
                         run.font.size=Pt(7.5 if len(headers)>=5 else 8.4)
-                        if ir==0:
-                            run.bold=True;run.font.color.rgb=RGBColor(255,255,255)
+                        run.bold=ir==0
         doc.add_paragraph().paragraph_format.space_after=Pt(0)
-    for section_index,(heading,content) in enumerate(sections):
-        if section_index:doc.add_page_break()
-        doc.add_heading(f'{section_index+1}. {heading}',1)
+    for heading,content in sections:
+        doc.add_heading(heading,1)
         for entry in content:
             if entry[0]=='p':doc.add_paragraph(entry[1])
+            elif entry[0]=='h2':doc.add_heading(entry[1],2)
+            elif entry[0]=='h3':doc.add_heading(entry[1],3)
             elif entry[0]=='table':doc_tbl(entry[1],entry[2])
             elif entry[0]=='img':
-                doc.add_picture(BytesIO(entry[1]),width=Inches(6.45))
+                doc.add_picture(BytesIO(entry[1]),width=Inches(6.3))
                 pp=doc.add_paragraph(entry[2]);pp.style='Caption'
     bd=BytesIO();doc.save(bd)
 
-    # ------------------- PDF --------------------
+    # ------------------- PDF: misma estructura y membrete institucional --------------------
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import KeepTogether
     reg_font,bold_font='Helvetica','Helvetica-Bold'
     import os
     fa='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
@@ -7720,60 +7847,82 @@ def _v62_generar_informe_sge(tipo,datos,servicios_via,paxkm_tabla,eficiencia,fue
         if 'EfeSGEBold' not in pdfmetrics.getRegisteredFontNames():pdfmetrics.registerFont(TTFont('EfeSGEBold',fb))
         reg_font,bold_font='EfeSGERegular','EfeSGEBold'
     styles=getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='SGETitle',fontName=bold_font,fontSize=17,leading=23,
-                    spaceAfter=9,textColor=colors.HexColor('#103f57')))
-    styles.add(ParagraphStyle(name='SGEHead',fontName=bold_font,fontSize=12,leading=16,
-                    spaceAfter=7,textColor=colors.HexColor('#145a77')))
-    styles.add(ParagraphStyle(name='SGEBody',fontName=reg_font,fontSize=8.8,leading=12.8,
+    for nm,fs,ld,sp in [('SGETitle',20,27,11),('SGEHead',11.5,15.8,7),
+                        ('SGESub',10,13.5,5),('SGESubsub',9.5,12,5)]:
+        styles.add(ParagraphStyle(name=nm,fontName=bold_font,fontSize=fs,leading=ld,
+                    spaceBefore=7,spaceAfter=sp,textColor=colors.HexColor('#162a44')))
+    styles.add(ParagraphStyle(name='SGEBody',fontName=reg_font,fontSize=8.55,leading=12.2,
                     spaceAfter=5,textColor=colors.HexColor('#293f4d')))
     styles.add(ParagraphStyle(name='SGETiny',fontName=reg_font,fontSize=7.7,leading=10.4,
                     spaceAfter=4,textColor=colors.HexColor('#53697b')))
-    styles.add(ParagraphStyle(name='SGECell',fontName=reg_font,fontSize=7.5,leading=10.5))
-    styles.add(ParagraphStyle(name='SGEHeaderCell',fontName=bold_font,fontSize=7.5,
-                    leading=10.2,textColor=colors.white))
+    styles.add(ParagraphStyle(name='SGECell',fontName=reg_font,fontSize=7.15,leading=9.4))
+    styles.add(ParagraphStyle(name='SGEHeaderCell',fontName=bold_font,fontSize=7.15,leading=9.3))
     def ptext(st):return Paragraph(escape(str(st)),styles['SGEBody'])
     def make_table(headers,rows):
         avail=A4[0]-3.7*cm
-        # Columna para ecuación con más espacio en tabla regresiones.
-        if len(headers)==5 and headers[2].startswith('Ecuación'):
-            ratios=[1.2,.4,2.4,.45,.9]
-        else:ratios=[1]*len(headers)
+        ratios=[1.55,1,1,1,1] if len(headers)==5 else [1]*len(headers)
+        if len(headers)==4 and ('Ecuación' in ' '.join(headers)):ratios=[.6,2.5,.5,.7]
         widths=[avail*r/sum(ratios) for r in ratios]
         entries=[[Paragraph(escape(str(x)),styles['SGEHeaderCell']) for x in headers]]
         entries += [[Paragraph(escape(str(x)),styles['SGECell']) for x in rr] for rr in rows]
         table=Table(entries,colWidths=widths,repeatRows=1,hAlign='LEFT')
         table.setStyle(TableStyle([
-            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#164762')),
-            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#edf4f8')]),
+            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#dee7f0')),
+            ('LINEBELOW',(0,0),(-1,0),.5,colors.HexColor('#25344b')),
+            ('LINEBELOW',(0,-1),(-1,-1),.4,colors.HexColor('#8c9eac')),
             ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-            ('TOPPADDING',(0,0),(-1,-1),4.5),('BOTTOMPADDING',(0,0),(-1,-1),4.5),
-            ('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),5),
+            ('TOPPADDING',(0,0),(-1,-1),3.5),('BOTTOMPADDING',(0,0),(-1,-1),3.5),
+            ('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),
         ]))
         return table
     def pimg(b):
-        width=A4[0]-3.85*cm
+        width=A4[0]-3.9*cm
         return PDFImage(BytesIO(b),width=width,height=width*620/1280)
-    story=[Paragraph(escape(label+' · PERÍODO FILTRADO'),styles['SGETitle']),
-           ptext(period),Paragraph(escape(subtitle+'. '+descripcion_filtro),styles['SGETiny'])]
-    for section_index,(heading,contents) in enumerate(sections):
-        if section_index:story.append(PageBreak())
-        story.append(Paragraph(escape(f'{section_index+1}. {heading}'),styles['SGEHead']))
+    story=[Spacer(1,2.5*cm),
+           PDFImage(BytesIO(_logo_sge),width=11.8*cm,height=11.8*cm*271/631),
+           Spacer(1,2.4*cm),Paragraph(escape(_titulo_impreso.upper()),styles['SGETitle']),
+           ptext('INFORME GENERADO CON LOS FILTROS DEL DASHBOARD'),ptext(period),
+           Paragraph(escape(descripcion_filtro),styles['SGETiny']),PageBreak(),
+           Paragraph('CONTENIDO',styles['SGEHead'])]
+    for h,_ in sections[:3]:story.append(ptext(h))
+    story.append(ptext('4. ANÁLISIS DEL PERÍODO FILTRADO'))
+    for entry in sections[-1][1]:
+        if entry[0] in ('h2','h3'):story.append(ptext('    '+entry[1]))
+    story.append(PageBreak())
+    for heading,contents in sections:
+        story.append(Paragraph(escape(heading),styles['SGEHead']))
         for entry in contents:
             if entry[0]=='p':story.append(ptext(entry[1]))
+            elif entry[0]=='h2':story.append(Paragraph(escape(entry[1]),styles['SGESub']))
+            elif entry[0]=='h3':story.append(Paragraph(escape(entry[1]),styles['SGESubsub']))
             elif entry[0]=='table':story.append(make_table(entry[1],entry[2]));story.append(Spacer(1,5))
             elif entry[0]=='img':story.append(pimg(entry[1]));story.append(Paragraph(escape(entry[2]),styles['SGETiny']))
     output=BytesIO()
-    docpdf=SimpleDocTemplate(output,pagesize=A4,
-                             topMargin=1.8*cm,bottomMargin=1.65*cm,
+    docpdf=SimpleDocTemplate(output,pagesize=A4,topMargin=3*cm,bottomMargin=2.25*cm,
                              leftMargin=1.85*cm,rightMargin=1.85*cm)
     def footpdf(canv,document):
-        canv.saveState();canv.setFont(bold_font,7.4);canv.setFillColor(colors.HexColor('#166280'))
-        canv.drawString(1.85*cm,A4[1]-1.11*cm,'EFE VALPARAÍSO  |  SGE')
-        canv.setStrokeColor(colors.HexColor('#c7dce5'))
-        canv.line(1.85*cm,A4[1]-1.28*cm,A4[0]-1.85*cm,A4[1]-1.28*cm)
-        canv.setFont(reg_font,7)
-        canv.drawString(1.85*cm,.95*cm,'Datos filtrados del Dashboard · Uso interno')
-        canv.drawRightString(A4[0]-1.85*cm,.95*cm,f'Página {document.page}')
+        canv.saveState()
+        x=1.85*cm;y=A4[1]-1.25*cm
+        canv.setStrokeColor(colors.HexColor('#243047'))
+        canv.setLineWidth(.6)
+        canv.rect(x,y-1.08*cm,A4[0]-3.7*cm,1.08*cm,stroke=1,fill=0)
+        canv.drawImage(ImageReader(BytesIO(_logo_sge)),x+.15*cm,y-.83*cm,width=1.9*cm,height=.815*cm)
+        canv.line(x+2.2*cm,y-1.08*cm,x+2.2*cm,y)
+        canv.line(A4[0]-5.25*cm,y-1.08*cm,A4[0]-5.25*cm,y)
+        canv.setFillColor(colors.HexColor('#162a44'))
+        canv.setFont(bold_font,7.5)
+        canv.drawCentredString(x+2.2*cm+(A4[0]-7.45*cm)/2,y-.45*cm,'DOCUMENTO')
+        canv.setFont(bold_font,7.2)
+        canv.drawCentredString(x+2.2*cm+(A4[0]-7.45*cm)/2,y-.82*cm,_cabeza[:43])
+        canv.setFont(reg_font,7.3)
+        canv.drawString(A4[0]-5.1*cm,y-.42*cm,'Ver: 01')
+        canv.drawString(A4[0]-5.1*cm,y-.81*cm,f'Página {document.page}')
+        txt=('Este documento contiene información de propiedad de la Empresa de los Ferrocarriles del Estado. '+
+             'Prohibida su difusión sin autorización. Datos filtrados del Dashboard.')
+        canv.setStrokeColor(colors.black)
+        canv.line(x,1.34*cm,A4[0]-x,1.34*cm)
+        canv.setFont(reg_font,6.5)
+        canv.drawCentredString(A4[0]/2,1.0*cm,txt)
         canv.restoreState()
     docpdf.build(story,onFirstPage=footpdf,onLaterPages=footpdf)
     return bd.getvalue(),output.getvalue()
@@ -8327,7 +8476,7 @@ def _v41_render_dashboard(df):
         st.caption('Presiona «Preparar informe Word y PDF» y después selecciona '
                    'el formato para descargar. Si cambias los filtros, vuelve a prepararlo.')
 
-    # v62 · Dos informes de gestión basados en los documentos SGE entregados.
+    # v63 · Informes basados en el contenido y el estilo institucional de los originales.
     # Los valores se calculan SOLO con los filtros visibles del Dashboard.
     # No reusar cifras estáticas de 2025/2026 como resultados del período.
     st.markdown('#### 📘 Informes SGE · Análisis y Línea base')
@@ -8346,8 +8495,8 @@ def _v41_render_dashboard(df):
         _lb_fechas62=_lb_src62[_lb_src62['Fecha'].isin(datos['Fecha'])] if 'Fecha' in _lb_src62 else _lb_src62
         _hash62.update(pd.util.hash_pandas_object(_lb_fechas62,index=True).values.tobytes())
     _firma62=(_hash62.hexdigest(),str(st.session_state.get('_cache_key')),
-              str(st.session_state.get('_v28_creado_utc')),_fuente_kpi46,'sge-v62')
-    if st.button('📑 Preparar los dos informes SGE (Word y PDF)',key='_v62_preparar_sge'):
+              str(st.session_state.get('_v28_creado_utc')),_fuente_kpi46,'sge-v63.1')
+    if st.button('📑 Preparar informes SGE según documentos originales (Word y PDF)',key='_v62_preparar_sge'):
         try:
             with st.spinner('Calculando la línea base y creando cuatro archivos del período filtrado...'):
                 _lb62=_v62_preparar_lb_dashboard(
@@ -14071,7 +14220,7 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0,excluidas=None):
     t['Observado']=yv;t['Estimado']=yh;t['Residuo']=res
     t['Conjunto']=np.where(idx<n_inicial,'Entrenamiento','Prueba')
     t.loc[(idx<n_inicial)&~mascara_ent,'Conjunto']='Excluido manualmente'
-    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
+    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
     # residuo studentizado interno, leverage (diagonal de H) y Cook.
     # Umbrales ORIENTATIVOS: |r studentizado| > 3; Cook > 4/n; h > 2p/n.
     inv=np.linalg.pinv(D.T@D)
