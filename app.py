@@ -3437,7 +3437,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 _SECCIONES = [ "📑 Trenes", "⚡ Energía",
-              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "📉 Regresión lineal", "📊 Comparación entre años", "🌌 Dashboard"]
+              "🌙 Consumo Nocturno", "📋 THDR", "👥 Pasajeros", "📈 Servicios", "💡 Ahorro de energía", "🧱 Constructor de datos", "🔮 Proyección de energía", "🔎 Análisis de sobreconsumo IDE", "🔗 BI Carga vs Energía", "📏 Línea base pax-km/kWh", "🧭 Causa raíz del consumo", "🎯 BI Ejecutivo", "📉 Regresión lineal", "📊 Comparación entre años", "🌌 Dashboard", "⚡ Simulación energética"]
 
 # ===== OPTIMIZACIÓN INTEGRADA: GESTIÓN DE ARCHIVOS =====
 # El gestor sigue dentro del sidebar; las búsquedas y filtros no vuelven
@@ -3900,6 +3900,9 @@ _V29_DATOS_POR_SECCION = (
     # únicamente al generar; los indicadores generales no se recalculan.
     ('df_incid', 'df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes',
      'df_ide_lb', 'all_tr'),
+    # Simulación energética: solo carga THDR por vía y Carga pasajeros del
+    # historial. E_Tr y su fuente proceden del df_ops filtrado habitual.
+    ('df_thdr_v1', 'df_thdr_v2', 'df_carga_v1', 'df_carga_v2'),
 )
 
 def _v29_necesarios():
@@ -4105,10 +4108,10 @@ with st.sidebar:
     st.caption("EFE Valparaíso · Navegación")
     # v51: Resumen principal eliminado; Dashboard es la portada.
     # Los índices de navegación coinciden con la matriz _V29_DATOS_POR_SECCION.
-    _v41_nav_opciones = [_SECCIONES[-1]] + _SECCIONES[:-1]
+    _v41_nav_opciones = ["🌌 Dashboard"] + [x for x in _SECCIONES if x != "🌌 Dashboard"]
     # Limpiar selecciones antiguas que podrían seguir en session_state.
     if st.session_state.get('_nav_seccion') not in _v41_nav_opciones:
-        st.session_state['_nav_seccion'] = _SECCIONES[-1]
+        st.session_state['_nav_seccion'] = "🌌 Dashboard"
     _seccion = st.radio("Secciones", _v41_nav_opciones, key="_nav_seccion",
                         horizontal=False, label_visibility="collapsed")
     st.divider()
@@ -14220,7 +14223,7 @@ def _v52_ajustar(data,y,x,intercepto=True,prueba_pct=0,excluidas=None):
     t['Observado']=yv;t['Estimado']=yh;t['Residuo']=res
     t['Conjunto']=np.where(idx<n_inicial,'Entrenamiento','Prueba')
     t.loc[(idx<n_inicial)&~mascara_ent,'Conjunto']='Excluido manualmente'
-    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
+    # Diagnósticos de influencia calculados SOLO en las filas entrenadas:
     # residuo studentizado interno, leverage (diagonal de H) y Cook.
     # Umbrales ORIENTATIVOS: |r studentizado| > 3; Cook > 4/n; h > 2p/n.
     inv=np.linalg.pinv(D.T@D)
@@ -14679,3 +14682,20 @@ def _v52_mostrar_regresion(ops):
 
 if _seccion == '📉 Regresión lineal':
     _v52_mostrar_regresion(df_ops)
+
+
+# ===== v65 · SIMULACIÓN ENERGÉTICA (THDR VS TRACCIÓN REAL) =====
+# Motor físico en módulo separado, solo se descarga/verifica/ejecuta cuando
+# se pulsa el botón. No altera los datos fuente ni la línea base existente.
+if _seccion == '⚡ Simulación energética':
+    try:
+        from simulacion_energia import render_simulacion
+        render_simulacion(
+            df_thdr_v1, df_thdr_v2, df_carga_v1, df_carga_v2,
+            df_ops, ESTACIONES, KM_ACUM, get_col_thdr,
+            list(PAX_COL_CODE.values()),
+            clasificar_jornada=get_tipo_dia,
+        )
+    except Exception as _v65_error:
+        st.error('No se pudo mostrar la pestaña Simulación energética: '
+                 f'{type(_v65_error).__name__}: {_v65_error}')
