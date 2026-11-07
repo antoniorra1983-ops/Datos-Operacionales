@@ -3896,7 +3896,10 @@ _V29_DATOS_POR_SECCION = (
     # Comparación multi-año: exactamente los agregados del Dashboard, en años
     # no consecutivos; pasajeros-km exige Carga V1/V2 y servicios por vía THDR.
     ('df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes'),
-    ('df_incid', 'df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes'),
+    # Dashboard: informes SGE requieren coeficientes LB y UMR por tren
+    # únicamente al generar; los indicadores generales no se recalculan.
+    ('df_incid', 'df_carga_v1', 'df_carga_v2', 'df_serv_tipo', 'df_viajes',
+     'df_ide_lb', 'all_tr'),
 )
 
 def _v29_necesarios():
@@ -7340,6 +7343,442 @@ def _v61_informe_operacional(datos, servicios_via, paxkm_tabla, eficiencia, fuen
     return buffer_doc.getvalue(), output_pdf.getvalue()
 
 
+# ===== v62 · Informes SGE 2025/2026 basados en documentos de referencia =====
+def _v62_preparar_lb_dashboard(datos, df_ide_lb, registros_umr):
+    """LB ajustada SOLO para fechas visibles y con evidencia suficiente.
+
+    El mismo método del BI/Ahorro: no supone 0 km SFE si no hay UMR.
+    """
+    if not isinstance(df_ide_lb, pd.DataFrame) or df_ide_lb.empty:
+        return pd.DataFrame()
+    if not isinstance(datos, pd.DataFrame) or datos.empty:
+        return pd.DataFrame()
+    _base=datos[['Fecha','Odómetro [km]','E_Tr','IDE (kWh/km)']].copy()
+    _fechas=set(pd.to_datetime(_base['Fecha'],errors='coerce').dt.date)
+    _tr=[]
+    for _r in (registros_umr or []):
+        try:
+            _f=_r.get('Fecha')
+            _f=pd.Timestamp(_f).date()
+            if _f in _fechas:
+                _tr.append(_r)
+        except (TypeError,ValueError,OverflowError,AttributeError):
+            continue
+    try:
+        return _bi_lb_diaria_desde_umr(_base,df_ide_lb,_tr)
+    except (KeyError,ValueError,TypeError) as _ex:
+        raise ValueError('No se pudo obtener la línea base ajustada para este filtro: '+str(_ex)) from _ex
+
+
+def _v62_generar_informe_sge(tipo,datos,servicios_via,paxkm_tabla,eficiencia,fuente_pax,
+                              lb_tabla=None):
+    """Dos informes Word/PDF dinámicos, estructurados según los modelos SGE 2025/2026.
+
+    tipo = 'analisis' o 'linea_base'. No copia cifras históricas de los documentos
+    de referencia: los resultados proceden de los datos filtrados del Dashboard.
+    """
+    from io import BytesIO
+    from html import escape
+    import math
+    from PIL import Image, ImageDraw, ImageFont
+    from docx import Document
+    from docx.shared import Inches, Cm, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, Image as PDFImage
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    if tipo not in ('analisis','linea_base'):
+        raise ValueError('Tipo de informe SGE desconocido')
+    d=datos.copy() if isinstance(datos,pd.DataFrame) else pd.DataFrame()
+    if d.empty or 'Fecha' not in d:
+        raise ValueError('No existen datos del Dashboard para los filtros actuales.')
+    d['Fecha']=pd.to_datetime(d['Fecha'],errors='coerce').dt.normalize()
+    d=d.dropna(subset=['Fecha']).sort_values('Fecha').drop_duplicates('Fecha',keep='last')
+    if d.empty:
+        raise ValueError('No existen fechas válidas para generar el informe.')
+    for c in ['E_Total','E_Tr','E_12','Odómetro [km]','Tren-Km [km]','PAX','Servicios']:
+        if c not in d:d[c]=np.nan
+        d[c]=pd.to_numeric(d[c],errors='coerce')
+    if 'Tipo de jornada' not in d:
+        d['Tipo de jornada']=d['Fecha'].dt.date.map(get_tipo_dia).map({'L':'Laboral','S':'Sábado','D/F':'Domingo y festivo'})
+    def sumar(df,col):
+        if df is None or df.empty or col not in df:return float('nan')
+        return float(pd.to_numeric(df[col],errors='coerce').sum(min_count=1))
+    def ok(v):
+        try:return math.isfinite(float(v))
+        except (ValueError,TypeError,OverflowError):return False
+    def fm(v,n=0):
+        if not ok(v):return 'Sin dato'
+        v=float(v)
+        if abs(v)<0.5*10**(-n):v=0.
+        return f'{v:,.{n}f}'.replace(',','~').replace('.',',').replace('~','.')
+    def fmt_delta(v,n=1):
+        return ('+' if ok(v) and v>0 else '')+fm(v,n)
+    def perc(n,den):
+        return float(n)/float(den)*100 if ok(n) and ok(den) and den>0 else float('nan')
+    def resultados_group(gr):
+        _k=gr[gr['E_Tr'].gt(0)&gr['Odómetro [km]'].gt(0)]
+        _en=sumar(_k,'E_Tr');_km=sumar(_k,'Odómetro [km]')
+        return _en/_km if ok(_km) and _km>0 else float('nan')
+    def campo_reg(x):
+        try:return float(eficiencia[x]['valor'])
+        except (KeyError,TypeError,ValueError):return float('nan')
+
+    inicio=d['Fecha'].min();fin=d['Fecha'].max()
+    period=f'{inicio:%d/%m/%Y} al {fin:%d/%m/%Y}'
+    n_dias=int(d['Fecha'].nunique())
+    mes_periodo=d['Fecha'].dt.to_period('M')
+    meses=sorted(mes_periodo.astype(str).unique())
+    filtro_meses=', '.join(meses) if len(meses)<=12 else ', '.join(meses[:9])+f' y otros {len(meses)-9} meses'
+    jornadas=[j for j in ('Laboral','Sábado','Domingo y festivo') if d['Tipo de jornada'].eq(j).any()]
+    descripcion_filtro=f'{n_dias} días con datos · Meses: {filtro_meses} · Jornadas: {", ".join(jornadas)}.'
+    en=sumar(d,'E_Total');tr=sumar(d,'E_Tr');aux=sumar(d,'E_12');serv=sumar(d,'Servicios');pax=sumar(d,'PAX')
+    km_d=d[d['Odómetro [km]'].ge(0)&d['Tren-Km [km]'].ge(0)]
+    odom=sumar(km_d,'Odómetro [km]');tk=sumar(km_d,'Tren-Km [km]')
+    umr=perc(tk,odom)
+    ide_d=d[d['E_Tr'].gt(0)&d['Odómetro [km]'].gt(0)]
+    ide=resultados_group(d)
+    paxkm=sumar(paxkm_tabla,'PAX-km')
+    paxkwh=campo_reg('Pax/kWh tracción')
+    pkmkwh=campo_reg('Pax-km/kWh')
+
+    l=lb_tabla.copy() if isinstance(lb_tabla,pd.DataFrame) else pd.DataFrame()
+    if not l.empty and 'Fecha' in l:
+        l['Fecha']=pd.to_datetime(l['Fecha'],errors='coerce').dt.normalize()
+        l=l[l['Fecha'].isin(d['Fecha'])].drop_duplicates('Fecha',keep='last').copy()
+        if 'Línea base calculable' in l:
+            l=l[l['Línea base calculable'].fillna(False).astype(bool)].copy()
+        else:l=l.iloc[:0].copy()
+    if not l.empty:
+        for c in ('E_real','E_LB','Exceso kWh','E_SFE_pruebas_estimada_LB (kWh)'):
+            if c not in l:l[c]=np.nan
+            l[c]=pd.to_numeric(l[c],errors='coerce')
+        l=l[l['E_real'].gt(0)&l['E_LB'].gt(0)].copy()
+    lb_real=sumar(l,'E_real');lb_esperada=sumar(l,'E_LB')
+    exceso=(lb_real-lb_esperada if ok(lb_real) and ok(lb_esperada) else float('nan'))
+    ahorro=(-exceso if ok(exceso) else float('nan'))
+    ahorro_pct=perc(ahorro,lb_esperada)
+    sfe_prueba=sumar(l,'E_SFE_pruebas_estimada_LB (kWh)')
+    lb_dias=len(l)
+    porcentaje_cobertura=perc(lb_dias,n_dias)
+    e_tr_share=perc(tr,en)
+    d_jornada=[]
+    for clase in ('Laboral','Sábado','Domingo y festivo'):
+        a=d[d['Tipo de jornada'].eq(clase)]
+        b=l[l['Fecha'].isin(a['Fecha'])] if not l.empty else pd.DataFrame()
+        aj=sumar(b,'E_LB')-sumar(b,'E_real') if not b.empty else float('nan')
+        ap=perc(aj,sumar(b,'E_LB')) if not b.empty else float('nan')
+        d_jornada.append((clase,len(a),sumar(a,'Servicios'),sumar(a,'E_Tr'),resultados_group(a),aj,ap))
+    monthcols=['E_Total','E_Tr','E_12','Servicios','PAX']
+    mensal=d.assign(Mes=d['Fecha'].dt.to_period('M').astype(str)).groupby('Mes',as_index=False)[monthcols].sum(min_count=1)
+    if not l.empty:
+        ml=l.assign(Mes=l['Fecha'].dt.to_period('M').astype(str)).groupby('Mes',as_index=False)[['E_real','E_LB']].sum(min_count=1)
+        ml['Ahorro LB']=ml['E_LB']-ml['E_real']
+        mensal=mensal.merge(ml[['Mes','E_LB','Ahorro LB']],on='Mes',how='left',validate='one_to_one')
+    else:
+        mensal['E_LB']=np.nan;mensal['Ahorro LB']=np.nan
+    label=("ANÁLISIS DE DESEMPEÑO ENERGÉTICO" if tipo=='analisis' else "LÍNEA BASE Y METAS ENERGÉTICAS")
+    subtitle=('Basado en el documento «Análisis SGE 2025»' if tipo=='analisis'
+              else 'Basado en el documento «Línea base, objetivos y metas SGE 2026»')
+    # Gráficos: solo periodos filtrados, nunca rellenar faltantes como cero.
+    def figura(series):
+        w,h=1280,620
+        image=Image.new('RGB',(w,h),'white');g=ImageDraw.Draw(image)
+        ff='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+        bf='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+        def f(sz,b=False):
+            try:return ImageFont.truetype(bf if b else ff,sz)
+            except OSError:return ImageFont.load_default()
+        mon=mensal.tail(12)
+        names=mon['Mes'].tolist()
+        for k,(title,col,clr) in enumerate(series):
+            ytop=7+k*305
+            g.text((35,ytop+4),title,fill='#143d55',font=f(22,True))
+            x0,y0,x1,y1=113,ytop+61,1225,ytop+251
+            yy=pd.to_numeric(mon[col],errors='coerce')
+            valid=[float(v) for v in yy if ok(v)]
+            if not valid:
+                g.text((115,ytop+121),'Sin valores comparables en los filtros actuales',fill='#667788',font=f(17));continue
+            floor=min(0,min(valid));high=max(1,max(valid));ran=high-floor
+            high+=ran*.09;floor-=ran*.07
+            def ypix(v):return int(y1-(v-floor)/(high-floor)*(y1-y0))
+            for t in range(4):
+                num=floor+(high-floor)*t/3;py=ypix(num)
+                g.line([(x0,py),(x1,py)],fill='#dee7ed',width=2)
+                tick=f'{num:,.0f}'.replace(',','.')
+                tw=g.textbbox((0,0),tick,font=f(14))[2]
+                g.text((x0-15-tw,py-9),tick,fill='#617588',font=f(14))
+            if floor<0 and high>0:g.line([(x0,ypix(0)),(x1,ypix(0))],fill='#a2afbd',width=2)
+            bw=min(56,max(11,int((x1-x0)/max(len(mon),1)*.62)))
+            for i,(m,v) in enumerate(zip(names,yy)):
+                xx=int(x0+(i+.5)*(x1-x0)/max(len(mon),1))
+                if ok(v):
+                    yyv=ypix(float(v));ybase=ypix(0)
+                    g.rectangle([(xx-bw//2,min(yyv,ybase)),(xx+bw//2,max(yyv,ybase))],fill=clr)
+                lab=m[5:7]+'/'+m[2:4]
+                tw=g.textbbox((0,0),lab,font=f(14))[2]
+                g.text((xx-tw//2,y1+13),lab,fill='#566b80',font=f(14))
+        out=BytesIO();image.save(out,format='PNG');return out.getvalue()
+    img_oper=figura([('Energía total (kWh)','E_Total','#217eb1'),('Tracción (kWh)','E_Tr','#16a4a1')])
+    img_lb=figura([('Tracción real (kWh)','E_Tr','#2478b8'),('Línea base ajustada (kWh)','E_LB','#e4a246')])
+    img_ahorro=figura([('Ahorro (+) / exceso (-) vs línea base (kWh)','Ahorro LB','#25a181'),('Auxiliares 12 kV (kWh)','E_12','#e3a44c')])
+    jornada_rows=[[j,str(nd),fm(s),fm(ee),fm(idev,3)] for j,nd,s,ee,idev,_,_ in d_jornada]
+    resumen_rows=[['Días seleccionados',str(n_dias)],['Servicios',fm(serv)],['Pasajeros',fm(pax)],
+                 ['PAX-km',fm(paxkm)],['Energía total',fm(en)+' kWh'],['Energía tracción',fm(tr)+' kWh'],
+                 ['Auxiliares 12 kV',fm(aux)+' kWh'],['Odómetro UMR',fm(odom)+' km'],
+                 ['IDE ponderado',fm(ide,3)+' kWh/km'],['UMR',fm(umr,2)+' %']]
+    lb_rows=[['Días con LB válida',f'{lb_dias} de {n_dias}'],['Tracción real comparable',fm(lb_real)+' kWh'],
+             ['Tracción esperada LB',fm(lb_esperada)+' kWh'],['Ahorro (+) / exceso (-)',fm(ahorro)+' kWh'],
+             ['Ahorro sobre LB',fm(ahorro_pct,2)+' %'],['Estimación SFE en pruebas',fm(sfe_prueba)+' kWh']]
+    jp=[['Jornada','Días LB','Ahorro (kWh)','Ahorro (%)']]
+    for j,nd,s,ee,idev,aj,ap in d_jornada:
+        num=len(l[l['Fecha'].isin(d.loc[d['Tipo de jornada'].eq(j),'Fecha'])]) if not l.empty else 0
+        jp.append([j,str(num),fm(aj),fm(ap,2)+' %'])
+
+    regime=[]
+    for title,cond in [
+        ('Laboral vacaciones',d['Tipo de jornada'].eq('Laboral') & ((d['Fecha'].dt.month.isin([1,2,7])) | ((d['Fecha'].dt.month.eq(8)) & d['Fecha'].dt.day.le(14)))),
+        ('Laboral resto',d['Tipo de jornada'].eq('Laboral') & ~((d['Fecha'].dt.month.isin([1,2,7])) | ((d['Fecha'].dt.month.eq(8)) & d['Fecha'].dt.day.le(14)))),
+        ('Sábado',d['Tipo de jornada'].eq('Sábado')),
+        ('Domingo/festivo',d['Tipo de jornada'].eq('Domingo y festivo'))]:
+        r=d.loc[cond & d['E_Tr'].gt(0) & d['Odómetro [km]'].gt(0)]
+        if len(r)>=15 and r['Odómetro [km]'].nunique()>=5:
+            x=r['Odómetro [km]'].to_numpy(float);y=r['E_Tr'].to_numpy(float)
+            coef=np.polyfit(x,y,1);estim=coef[0]*x+coef[1]
+            sst=float(np.square(y-y.mean()).sum());sse=float(np.square(y-estim).sum())
+            r2=1-sse/sst if sst>0 else float('nan')
+            regime.append([title,len(r),coef[1],coef[0],r2,'Exploratoria'])
+        else:
+            regime.append([title,len(r),np.nan,np.nan,np.nan,'Muestra insuficiente'])
+    regression_rows=[]
+    for name,n,b0,b1,r2,situation in regime:
+        ecuacion=(f'{fm(b0,3)} + ({fm(b1,3)} × km)' if ok(b0) and ok(b1) else 'No estimable')
+        regression_rows.append([name,str(n),ecuacion,fm(r2,3),situation])
+
+    # Validez y comunicación clara sobre ajustes / pérdidas de información.
+    cautela=('El informe utiliza únicamente los días visibles por los filtros activos. Una fecha sin datos de '
+            'energía o kilometraje no equivale a cero. Los totales y el IDE pueden tener distintos días válidos. '
+            'La línea base se calcula solo donde coinciden energía, odómetro, coeficientes IDE y registros UMR. '
+            'El componente E_12 corresponde a auxiliares de 12 kV; no es una lectura independiente de 220/380 V.')
+    caveat_meta=('Los porcentajes de meta se toman de los documentos de referencia. '
+                 'Su comparación con los filtros actuales es orientativa y no constituye '
+                 'una declaración formal de cumplimiento para otros años o periodos parciales.')
+    if lb_dias==0:
+        conclusion='No se puede comprobar un ahorro frente a la línea base en este filtro, porque no hay días con LB válida.'
+    elif ahorro>0:
+        conclusion=(f'En los {lb_dias} días con línea base válida, la tracción real fue menor que la '
+                    f'prevista: ahorro estimado de {fm(ahorro)} kWh ({fm(ahorro_pct,2)} %).')
+    elif ahorro<0:
+        conclusion=(f'En los {lb_dias} días comparables, se consumieron {fm(-ahorro)} kWh '
+                    f'más que lo estimado por la línea base ({fm(-ahorro_pct,2)} % de exceso).')
+    else:
+        conclusion='En los días con línea base válida, el consumo real coincide con el estimado.'
+    if len(l)<n_dias:
+        conclusion+=f' Quedaron {n_dias-lb_dias} días fuera de esa comparación por falta de datos compatibles.'
+
+    # Modelo de contenido común para asegurar paridad Word/PDF.
+    sections=[]
+    if tipo=='analisis':
+        sections=[
+          ('Resumen de resultados',[
+              ('p',f'Este informe describe lo ocurrido entre el {period} con los filtros activos del Dashboard.'),
+              ('p',f'Los servicios registrados fueron {fm(serv)} y los pasajeros {fm(pax)}. '
+                   f'Se utilizaron {fm(tr)} kWh en tracción, que representan {fm(e_tr_share,1)} % de la energía total registrada.'),
+              ('table',['Indicador','Valor del período'],resumen_rows),
+              ('p','Los datos proceden del Dashboard operacional. Los valores publicados en el documento SGE 2025 '
+                   'son antecedentes históricos y NO se copian como si fueran resultados del período elegido.')]),
+          ('Revisión energética e indicadores',[
+              ('p','En el sistema ferroviario, el consumo de tracción es la energía destinada al movimiento de trenes. '
+                   'Los auxiliares de 12 kV se presentan por separado. La eficiencia se observa mediante el IDE: '
+                   'kWh de tracción divididos por kilómetros UMR de los mismos días.'),
+              ('table',['Jornada','Días','Servicios','Tracción kWh','IDE kWh/km'],jornada_rows),
+              ('img',img_oper,'Evolución mensual · solo meses seleccionados (últimos 12 en el gráfico).'),
+              ('p',f'IDE ponderado del período: {fm(ide,3)} kWh/km sobre {len(ide_d)} días con '
+                   'energía y kilometraje positivos. En días con operación comparable, un IDE inferior indica '
+                   'menor consumo específico; no equivale por sí mismo a ahorro contra la LB.')]),
+          ('Línea base, metas y conclusiones',[
+              ('p','La línea base estima cuánta tracción se esperaba según el recorrido y las características '
+                   'del material rodante. La comparación se hace solo sobre días con energía y UMR suficientes.'),
+              ('table',['Comparación tracción - LB','Resultado'],lb_rows),
+              ('table',jp[0],jp[1:]),
+              ('img',img_ahorro,'Ahorro positivo y sobreconsumo negativo. Un mes sin LB se deja sin barra.'),
+              ('p',conclusion),
+              ('p','Metas de referencia del análisis SGE 2025: ahorro de tracción de 0,5 % en jornadas '
+                   'laborales y 1 % en sábados, domingos y festivos; uso comercial de material rodante '
+                   'de al menos 96,4 %. ' + caveat_meta),
+              ('p',f'UMR observado con los filtros: {fm(umr,2)} %. '
+                   'Los ahorros por cortes/acoples y reducción de trenes dobles requieren '
+                   'cálculos específicos: no se infieren ni se suman a partir del ahorro frente a LB.'),
+              ('p','Alcance y calidad de datos: '+cautela)])]
+    else:
+        sections=[
+          ('Objetivo y alcance de la línea base',[
+              ('p','Siguiendo la estructura del documento de proyección SGE 2026, este informe presenta '
+                   'la línea base energética, las variables consideradas y las metas de eficiencia. '
+                   'Todos los resultados se recalculan para el filtro actual.'),
+              ('table',['Dato general','Período seleccionado'],resumen_rows),
+              ('p','La línea base es la energía que se habría esperado para la operación analizada. '
+                   'La energía de tracción es el uso significativo que se compara con esta referencia.'),
+              ('p','Fuentes: energía jerarquizada (Factura > PRMTE > SEAT), odómetro UMR y coeficientes '
+                   'de línea base cargados en la aplicación.')]),
+          ('Consumo real frente a línea base',[
+              ('table',['Comparación de consumo','Resultado'],lb_rows),
+              ('img',img_lb,'Energía real y energía LB ajustada por mes del período seleccionado.'),
+              ('p',conclusion),
+              ('p',f'Las pruebas SFE aportan un componente ESTIMADO de {fm(sfe_prueba)} kWh '
+                   'a la LB únicamente cuando hay UMR y coeficientes válidos. '
+                   'No se suma ese estimado al consumo real, ni se duplican kilómetros SFE comerciales.'),
+              ('p','Una diferencia entre consumo real y línea base es una señal de desempeño, no una '
+                   'prueba automática de causalidad: incidentes, composición de flota y cambios de servicio '
+                   'deben revisarse antes de explicar los desvíos.')]),
+          ('Regresiones y metas de referencia',[
+              ('p','Las siguientes ecuaciones se ajustan SOLO con los días filtrados. Son diagnósticos '
+                   'exploratorios (Y = energía tracción diaria; X = km UMR), y NO reemplazan las '
+                   'ecuaciones oficiales de la LB que ya están cargadas en la aplicación. '
+                   'Se requiere un mínimo de 15 días y variación de kilometraje para mostrarlas.'),
+              ('table',['Grupo','Días','Ecuación: kWh','R²','Estado'],regression_rows),
+              ('p','Los grupos reproducen la separación operativa de la referencia 2026: '
+                   'laborales en vacaciones (enero-febrero, julio y hasta el 14 de agosto), '
+                   'laborales restantes, sábados y domingos/festivos.'),
+              ('p','Objetivos de referencia del SGE 2026: IDE real inferior al IDE proyectado '
+                   'para trenes convencionales y SFE; ahorro de 0,5 % por control de flota; '
+                   'ahorro de 0,5 % por reducción de servicios dobles en vacaciones; '
+                   'uso comercial del material rodante de 96,4 %. '+caveat_meta),
+              ('p',f'UMR calculado en el período: {fm(umr,2)} %. '
+                   'Las metas de flota y trenes dobles se consideran no evaluables sin el '
+                   'detalle específico de las acciones y sus escenarios de referencia.'),
+              ('p','Alcance y calidad de datos: '+cautela)])]
+
+    # ------------------- Word -------------------
+    doc=Document()
+    ss=doc.sections[0];ss.top_margin=Cm(1.7);ss.bottom_margin=Cm(1.65)
+    ss.left_margin=Cm(1.85);ss.right_margin=Cm(1.85)
+    ss.header_distance=Cm(.7);ss.footer_distance=Cm(.8)
+    normal=doc.styles['Normal'];normal.font.name='Calibri';normal.font.size=Pt(9.4)
+    normal.font.color.rgb=RGBColor(39,59,75);normal.paragraph_format.space_after=Pt(6)
+    for key,sz in [('Title',21),('Heading 1',14),('Heading 2',11)]:
+        stl=doc.styles[key];stl.font.name='Calibri';stl.font.size=Pt(sz)
+        stl.font.bold=True;stl.font.color.rgb=RGBColor(13,62,88)
+        stl.paragraph_format.space_before=Pt(7);stl.paragraph_format.space_after=Pt(5)
+    head=ss.header.paragraphs[0];head.text='EFE VALPARAÍSO  |  SISTEMA DE GESTIÓN DE LA ENERGÍA'
+    for run in head.runs:run.font.color.rgb=RGBColor(31,116,143);run.font.size=Pt(8)
+    foot=ss.footer.paragraphs[0]
+    foot.text='Documento generado desde el Dashboard · Resultados del período filtrado · Uso interno'
+    foot.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    for run in foot.runs:run.font.size=Pt(7.5)
+    doc.add_heading(label+' · PERÍODO FILTRADO',0)
+    p=doc.add_paragraph();p.add_run(period).bold=True
+    doc.add_paragraph(subtitle+'.')
+    p=doc.add_paragraph('Filtros utilizados: '+descripcion_filtro)
+    p.style='Subtitle'
+    def doc_tbl(headers,rows):
+        table=doc.add_table(rows=1,cols=len(headers));table.alignment=WD_TABLE_ALIGNMENT.CENTER
+        table.autofit=True
+        for i,h in enumerate(headers):table.rows[0].cells[i].text=str(h)
+        for rr in rows:
+            cells=table.add_row().cells
+            for i,val in enumerate(rr):cells[i].text=str(val)
+        for ir,row in enumerate(table.rows):
+            for cell in row.cells:
+                cell._tc.get_or_add_tcPr()
+                sh=OxmlElement('w:shd');sh.set(qn('w:fill'),'164762' if ir==0 else ('EEF4F7' if ir%2 else 'FFFFFF'))
+                cell._tc.get_or_add_tcPr().append(sh)
+                for pp in cell.paragraphs:
+                    pp.paragraph_format.space_after=Pt(2)
+                    for run in pp.runs:
+                        run.font.size=Pt(7.5 if len(headers)>=5 else 8.4)
+                        if ir==0:
+                            run.bold=True;run.font.color.rgb=RGBColor(255,255,255)
+        doc.add_paragraph().paragraph_format.space_after=Pt(0)
+    for section_index,(heading,content) in enumerate(sections):
+        if section_index:doc.add_page_break()
+        doc.add_heading(f'{section_index+1}. {heading}',1)
+        for entry in content:
+            if entry[0]=='p':doc.add_paragraph(entry[1])
+            elif entry[0]=='table':doc_tbl(entry[1],entry[2])
+            elif entry[0]=='img':
+                doc.add_picture(BytesIO(entry[1]),width=Inches(6.45))
+                pp=doc.add_paragraph(entry[2]);pp.style='Caption'
+    bd=BytesIO();doc.save(bd)
+
+    # ------------------- PDF --------------------
+    reg_font,bold_font='Helvetica','Helvetica-Bold'
+    import os
+    fa='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+    fb='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+    if os.path.isfile(fa) and os.path.isfile(fb):
+        if 'EfeSGERegular' not in pdfmetrics.getRegisteredFontNames():pdfmetrics.registerFont(TTFont('EfeSGERegular',fa))
+        if 'EfeSGEBold' not in pdfmetrics.getRegisteredFontNames():pdfmetrics.registerFont(TTFont('EfeSGEBold',fb))
+        reg_font,bold_font='EfeSGERegular','EfeSGEBold'
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='SGETitle',fontName=bold_font,fontSize=17,leading=23,
+                    spaceAfter=9,textColor=colors.HexColor('#103f57')))
+    styles.add(ParagraphStyle(name='SGEHead',fontName=bold_font,fontSize=12,leading=16,
+                    spaceAfter=7,textColor=colors.HexColor('#145a77')))
+    styles.add(ParagraphStyle(name='SGEBody',fontName=reg_font,fontSize=8.8,leading=12.8,
+                    spaceAfter=5,textColor=colors.HexColor('#293f4d')))
+    styles.add(ParagraphStyle(name='SGETiny',fontName=reg_font,fontSize=7.7,leading=10.4,
+                    spaceAfter=4,textColor=colors.HexColor('#53697b')))
+    styles.add(ParagraphStyle(name='SGECell',fontName=reg_font,fontSize=7.5,leading=10.5))
+    styles.add(ParagraphStyle(name='SGEHeaderCell',fontName=bold_font,fontSize=7.5,
+                    leading=10.2,textColor=colors.white))
+    def ptext(st):return Paragraph(escape(str(st)),styles['SGEBody'])
+    def make_table(headers,rows):
+        avail=A4[0]-3.7*cm
+        # Columna para ecuación con más espacio en tabla regresiones.
+        if len(headers)==5 and headers[2].startswith('Ecuación'):
+            ratios=[1.2,.4,2.4,.45,.9]
+        else:ratios=[1]*len(headers)
+        widths=[avail*r/sum(ratios) for r in ratios]
+        entries=[[Paragraph(escape(str(x)),styles['SGEHeaderCell']) for x in headers]]
+        entries += [[Paragraph(escape(str(x)),styles['SGECell']) for x in rr] for rr in rows]
+        table=Table(entries,colWidths=widths,repeatRows=1,hAlign='LEFT')
+        table.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#164762')),
+            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#edf4f8')]),
+            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+            ('TOPPADDING',(0,0),(-1,-1),4.5),('BOTTOMPADDING',(0,0),(-1,-1),4.5),
+            ('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),5),
+        ]))
+        return table
+    def pimg(b):
+        width=A4[0]-3.85*cm
+        return PDFImage(BytesIO(b),width=width,height=width*620/1280)
+    story=[Paragraph(escape(label+' · PERÍODO FILTRADO'),styles['SGETitle']),
+           ptext(period),Paragraph(escape(subtitle+'. '+descripcion_filtro),styles['SGETiny'])]
+    for section_index,(heading,contents) in enumerate(sections):
+        if section_index:story.append(PageBreak())
+        story.append(Paragraph(escape(f'{section_index+1}. {heading}'),styles['SGEHead']))
+        for entry in contents:
+            if entry[0]=='p':story.append(ptext(entry[1]))
+            elif entry[0]=='table':story.append(make_table(entry[1],entry[2]));story.append(Spacer(1,5))
+            elif entry[0]=='img':story.append(pimg(entry[1]));story.append(Paragraph(escape(entry[2]),styles['SGETiny']))
+    output=BytesIO()
+    docpdf=SimpleDocTemplate(output,pagesize=A4,
+                             topMargin=1.8*cm,bottomMargin=1.65*cm,
+                             leftMargin=1.85*cm,rightMargin=1.85*cm)
+    def footpdf(canv,document):
+        canv.saveState();canv.setFont(bold_font,7.4);canv.setFillColor(colors.HexColor('#166280'))
+        canv.drawString(1.85*cm,A4[1]-1.11*cm,'EFE VALPARAÍSO  |  SGE')
+        canv.setStrokeColor(colors.HexColor('#c7dce5'))
+        canv.line(1.85*cm,A4[1]-1.28*cm,A4[0]-1.85*cm,A4[1]-1.28*cm)
+        canv.setFont(reg_font,7)
+        canv.drawString(1.85*cm,.95*cm,'Datos filtrados del Dashboard · Uso interno')
+        canv.drawRightString(A4[0]-1.85*cm,.95*cm,f'Página {document.page}')
+        canv.restoreState()
+    docpdf.build(story,onFirstPage=footpdf,onLaterPages=footpdf)
+    return bd.getvalue(),output.getvalue()
+
+
 def _v41_render_dashboard(df):
     _v41_css()
     st.markdown('<div class="efe41-eyebrow">EFE VALPARAÍSO · INTELIGENCIA OPERACIONAL</div>',
@@ -7887,6 +8326,64 @@ def _v41_render_dashboard(df):
     else:
         st.caption('Presiona «Preparar informe Word y PDF» y después selecciona '
                    'el formato para descargar. Si cambias los filtros, vuelve a prepararlo.')
+
+    # v62 · Dos informes de gestión basados en los documentos SGE entregados.
+    # Los valores se calculan SOLO con los filtros visibles del Dashboard.
+    # No reusar cifras estáticas de 2025/2026 como resultados del período.
+    st.markdown('#### 📘 Informes SGE · Análisis y Línea base')
+    st.caption('Se generan dos informes independientes, siguiendo la estructura de '
+               '«Análisis SGE 2025» y «Línea base, objetivos y metas SGE 2026». '
+               'Ambos utilizan las fechas, meses, jornadas y años del filtro ACTUAL, '
+               'no los valores históricos que aparecen en los documentos de referencia.')
+    _hash62=__import__('hashlib').sha256()
+    for _data62 in (datos,servicios_via,_paxkm_tabla49):
+        if isinstance(_data62,pd.DataFrame) and not _data62.empty:
+            _hash62.update(pd.util.hash_pandas_object(_data62,index=True).values.tobytes())
+        else:_hash62.update(b'SIN_DATOS')
+    _lb_src62=st.session_state.get('df_ide_lb',pd.DataFrame())
+    if isinstance(_lb_src62,pd.DataFrame) and not _lb_src62.empty:
+        # Las líneas base son por fecha, incluir solo las que intersectan el filtro.
+        _lb_fechas62=_lb_src62[_lb_src62['Fecha'].isin(datos['Fecha'])] if 'Fecha' in _lb_src62 else _lb_src62
+        _hash62.update(pd.util.hash_pandas_object(_lb_fechas62,index=True).values.tobytes())
+    _firma62=(_hash62.hexdigest(),str(st.session_state.get('_cache_key')),
+              str(st.session_state.get('_v28_creado_utc')),_fuente_kpi46,'sge-v62')
+    if st.button('📑 Preparar los dos informes SGE (Word y PDF)',key='_v62_preparar_sge'):
+        try:
+            with st.spinner('Calculando la línea base y creando cuatro archivos del período filtrado...'):
+                _lb62=_v62_preparar_lb_dashboard(
+                    datos,st.session_state.get('df_ide_lb',pd.DataFrame()),
+                    st.session_state.get('all_tr',[]))
+                _a62=_v62_generar_informe_sge('analisis',datos,servicios_via,_paxkm_tabla49,
+                                                _ef46,_fuente_kpi46,_lb62)
+                _b62=_v62_generar_informe_sge('linea_base',datos,servicios_via,_paxkm_tabla49,
+                                                _ef46,_fuente_kpi46,_lb62)
+                st.session_state['_v62_archivos']={'analisis':_a62,'linea_base':_b62}
+                st.session_state['_v62_firma']=_firma62
+                st.session_state['_v62_lb_dias']=len(_lb62[_lb62['Línea base calculable'].fillna(False)]) if not _lb62.empty and 'Línea base calculable' in _lb62 else 0
+        except (ImportError,ModuleNotFoundError):
+            st.error('Faltan bibliotecas de Word/PDF. Instala el requirements.txt de la versión v61.')
+        except Exception as _e62:
+            st.error(f'No fue posible generar los informes SGE: {_e62}')
+    if st.session_state.get('_v62_firma')==_firma62 and st.session_state.get('_v62_archivos'):
+        _nvalidos62=st.session_state.get('_v62_lb_dias',0)
+        st.caption(f'Línea base energética evaluable: {_nvalidos62} de {len(datos)} días filtrados. '
+                   'Si faltan coeficientes o UMR, los informes lo indicarán sin inventar valores.')
+        for _key62,_name62 in (('analisis','Análisis SGE'),('linea_base','Línea base y metas SGE')):
+            st.markdown('**'+_name62+'**')
+            _col62=st.columns(2,gap='small')
+            _word62,_pdf62=st.session_state['_v62_archivos'][_key62]
+            with _col62[0]:
+                st.download_button('⬇️ Word · '+_name62,data=_word62,
+                    file_name=f'Informe_{_key62}_EFE_{fmin:%Y%m%d}_{fmax:%Y%m%d}.docx',
+                    mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    key='_v62_dl_'+_key62+'_docx',use_container_width=True)
+            with _col62[1]:
+                st.download_button('⬇️ PDF · '+_name62,data=_pdf62,
+                    file_name=f'Informe_{_key62}_EFE_{fmin:%Y%m%d}_{fmax:%Y%m%d}.pdf',
+                    mime='application/pdf',key='_v62_dl_'+_key62+'_pdf',use_container_width=True)
+    else:
+        st.caption('Prepara los dos informes con los filtros actuales. '
+                   'Cuando modifiques un filtro, vuelve a prepararlos para actualizar las cifras.')
 
     # Detalle verificable y exportable; datos originales sin redondeo destructivo.
     with st.expander('📋 Ver detalle diario y exportar datos',expanded=False):
