@@ -14439,16 +14439,27 @@ def _v52_mostrar_regresion(ops):
         fig.update_layout(height=310,margin=dict(l=0,r=0,t=45,b=0))
         _pc(fig,use_container_width=True,config={'locale':'es'})
     st.markdown('##### Decidir qué períodos excluir')
-    st.caption('Selecciona fechas completas del entrenamiento, no de la validación. '
-               'La información fuente nunca se borra. Para aplicar una exclusión '
-               'debes escribir su justificación y activar la casilla de confirmación.')
-    opciones=diag_ent['Fecha clave'].tolist()
+    st.caption('En el selector aparecen ÚNICAMENTE períodos fuera de los criterios de revisión '
+               '(|residuo studentizado| > 3, Cook > 4/n o leverage > 2p/n). '
+               'Los períodos normales NO se ofrecen para excluir y continúan en el ajuste. '
+               'La fuente nunca se borra; para excluir un candidato debes justificarlo y confirmar.')
+    # Las opciones se construyen SOLO a partir de los candidatos detectados
+    # por el modelo ORIGINAL. Las fechas normales siguen en la regresión.
+    _candidatos_selector=atipicos.sort_values('Fecha',ascending=False)
+    opciones=_candidatos_selector['Fecha clave'].tolist()
+    _motivos_selector=dict(zip(_candidatos_selector['Fecha clave'],
+                              _candidatos_selector['Criterio de revisión']))
     _sel=st.session_state.get('_v54_fechas_excluidas',[])
     if any(f not in opciones for f in _sel):
         st.session_state['_v54_fechas_excluidas']=[f for f in _sel if f in opciones]
-    fechas_elegidas=st.multiselect('Períodos a excluir del cálculo (opcional)',
-       options=opciones,format_func=lambda f:pd.Timestamp(f).strftime('%d-%m-%Y'),
-       placeholder='Selecciona los días que investigaste...',key='_v54_fechas_excluidas')
+    if not opciones:
+        st.info('No hay períodos fuera de los criterios: el selector permanece vacío '
+                'y todos los períodos válidos se mantienen en la regresión.')
+    fechas_elegidas=st.multiselect('Períodos fuera de norma a excluir (opcional)',
+       options=opciones,
+       format_func=lambda f:pd.Timestamp(f).strftime('%d-%m-%Y') + ' · ' + _motivos_selector.get(f,''),
+       placeholder='Selecciona solo los períodos marcados para revisión...',
+       disabled=not bool(opciones),key='_v54_fechas_excluidas')
     motivo=st.text_area('Justificación técnica (ej.: error de medición, dato duplicado, evento extraordinario)',
        height=75,key='_v54_explicacion',placeholder='Indica por qué estos registros no son representativos...')
     aplicar=st.checkbox('Confirmo que revisé los registros y deseo recalcular el modelo sin estos períodos',
